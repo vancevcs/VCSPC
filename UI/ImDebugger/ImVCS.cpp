@@ -574,6 +574,16 @@ void ImVCSWindow::DrawCamera() {
 			ImGui::TextColored(kBadColor,
 				"  Needs 'Drive the game's second stick' too, or you walk where you aim.");
 		}
+		if (s.moveInFreeAim) {
+			ImGui::Checkbox("Face the camera while moving", &s.freeAimFaceCamera);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip(
+					"Turns the character to face where you are aiming while moving in free aim.\n\n"
+					"Free aim latches a movement direction when it engages and never revisits it, "
+					"so without this the body keeps travelling the way it was pointed while only "
+					"the arm tracks the aim. Turning the body turns the movement with it.");
+			}
+		}
 		ImGui::Checkbox("Walk in free aim by translating (noclip-style)", &s.freeAimTranslate);
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip(

@@ -126,6 +126,7 @@ void Tick() {
 	// than last frame's. Writes the ped's velocity, so it has to run every frame or be wiped.
 	FreeAimMoveTick(context);
 	FreeAimTranslateTick(context);
+	FreeAimFaceTick(context);
 }
 
 bool IsActive() {

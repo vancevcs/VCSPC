@@ -102,6 +102,21 @@ static std::atomic<bool> g_lockOnMode{false};
 // the button down at all, and these are 60Hz ticks, so a few is right.
 static int g_freeAimTimer = 0;
 static const int kFreeAimPulse = 4;
+
+// Automating the run-into-free-aim entry, so there is no ritual to perform.
+//
+// Free aim latches whatever movement state exists when it engages - that is what makes moving
+// while aiming possible at all, see MoveGateBranch. Done by hand it means sprinting, letting go of
+// sprint, and only then aiming, which is not a control scheme. All of it is producible from here:
+// hold sprint and the movement stick for a few ticks after the aim key goes down, drop sprint but
+// keep moving for a few more so the state settles to a run rather than a sprint, and only then
+// press Free Aim. The game latches a running player and the animation comes with it.
+//
+// While this runs the stick has to carry MOVEMENT, not the mouse - otherwise there is no movement
+// state to latch. ReticleActive stands down for the duration.
+static int g_latchTimer = 0;
+static const int kLatchStart = 16;        // ~8 game frames at 60Hz ticks
+static const int kLatchDropSprintAt = 7;  // sprint for the first half, run for the rest
 static VCSInputContext g_prevAppliedContext = VCSInputContext::Unknown;
 
 const char *VCSInputContextName(VCSInputContext context) {
@@ -506,20 +521,40 @@ u32 ApplyMapping(VCSInputContext context) {
 	// every frame and hold d-pad down forever.
 	if (context == VCSInputContext::Aiming && g_prevAppliedContext != VCSInputContext::Aiming) {
 		if (CameraSettings().autoFreeAim && !g_lockOnMode.load(std::memory_order_relaxed)) {
-			// Delay + pulse. A delay of 0 presses Free Aim on the very same tick the aim trigger
-			// goes down, which is the least lock-on the game can be given.
-			int delay = CameraSettings().aimFreeAimDelay;
-			if (delay < 0) delay = 0;
-			g_freeAimTimer = delay + kFreeAimPulse;
+			// If the player is already asking to move, spend a few ticks establishing a running
+			// state before pressing Free Aim, so the game has something worth latching. The pulse
+			// is armed when that finishes rather than now.
+			if (CameraSettings().moveInFreeAim && IsHostKeyDown(NKCODE_W)) {
+				g_latchTimer = kLatchStart;
+				g_freeAimTimer = 0;
+			} else {
+				// Delay + pulse. A delay of 0 presses Free Aim on the very same tick the aim
+				// trigger goes down, which is the least lock-on the game can be given.
+				int delay = CameraSettings().aimFreeAimDelay;
+				if (delay < 0) delay = 0;
+				g_freeAimTimer = delay + kFreeAimPulse;
+			}
 		}
 	} else if (context != VCSInputContext::Aiming) {
 		// Letting go of aim cancels a pulse in flight, so releasing early can't leave d-pad down
-		// asserted into whatever context comes next.
+		// asserted into whatever context comes next. Same for the entry sequence.
 		g_freeAimTimer = 0;
+		g_latchTimer = 0;
 	}
 	g_prevAppliedContext = context;
 
 	u32 setMask = ComputeButtonMask(context) | GlanceButtonMask(context) | g_forcedButtons;
+
+	// The entry sequence, before the Free Aim press: sprint into a run, then arm the pulse.
+	if (g_latchTimer > 0) {
+		g_latchTimer--;
+		if (g_latchTimer > kLatchDropSprintAt) {
+			setMask |= CTRL_CROSS;   // sprint on foot
+		}
+		if (g_latchTimer == 0) {
+			g_freeAimTimer = kFreeAimPulse;
+		}
+	}
 
 	if (g_freeAimTimer > 0) {
 		g_freeAimTimer--;
@@ -777,6 +812,11 @@ bool ReticleActive(VCSInputContext context) {
 	// them running at once fight over one crosshair, and worse, whichever runs first eats the
 	// mouse delta and starves the other.
 	//
+	// The entry sequence needs the stick for MOVEMENT, not the mouse - there has to be a running
+	// player for free aim to latch. A dozen ticks of the crosshair not tracking, once per aim.
+	if (g_latchTimer > 0) {
+		return false;
+	}
 	// usePadStick DOES suppress this now, and that is the whole point of it.
 	//
 	// It sets CameraInputMode, which moves the aim axis onto the d-pad pair - so PadStickTick is

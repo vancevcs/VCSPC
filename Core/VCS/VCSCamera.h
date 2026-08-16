@@ -212,6 +212,15 @@ struct VCSCameraSettings {
 	// as far as the physics resolves interpenetration after the fact.
 	bool freeAimTranslate = false;
 
+	// Turn the character to face the camera while moving in free aim, so they travel where you are
+	// pointing rather than the way they happened to be facing when the aim latched.
+	//
+	// OFF: it does not work. Writing the entity matrix does not redirect the latched movement -
+	// most likely the game rewrites the orientation from its own animation state after we do, the
+	// same way it owns velocity. Kept because the addresses are correct and useful, and because
+	// knowing this route fails is worth as much as the route itself.
+	bool freeAimFaceCamera = false;
+
 	// Consecutive still GAME frames before a stroke counts as over and the stop is allowed to fire.
 	//
 	// At 30fps each frame is 33ms, so 2 is about 66ms - longer than a gap in the middle of real
@@ -450,6 +459,10 @@ void FreeAimMoveTick(VCSInputContext context);
 // Walks the player during free aim by adding a step to their world position each frame. Emu thread
 // only. Independent of the code patch above - see freeAimTranslate.
 void FreeAimTranslateTick(VCSInputContext context);
+
+// Turns the character to face the camera while moving in free aim, so the latched movement follows
+// where you point. Emu thread only, every frame - the game rewrites the matrix.
+void FreeAimFaceTick(VCSInputContext context);
 
 // Applies the accumulated mouse movement to the game's camera. Emu thread only, once per frame.
 // Does not touch the camera in the Aiming context - there the mouse belongs to the reticle.

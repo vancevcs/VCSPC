@@ -1144,6 +1144,45 @@ void FreeAimTranslateTick(VCSInputContext context) {
 	WriteAddrFloat(VCSAddr::PedPosY, *py + std::sin(h) * step);
 }
 
+// Turn the character to face where the camera is pointing, while moving in free aim.
+//
+// Free aim latches a movement direction when it engages and never revisits it, so the body keeps
+// travelling the way it was pointed while only the arm tracks the aim - "he only goes in one
+// direction but stretches his hand around". Turning the body turns the movement with it, because
+// the latched motion is along the ped's own forward.
+//
+// Only while actually moving. Standing still in free aim should leave the aiming pose alone; the
+// arm already tracks the camera perfectly well on its own.
+void FreeAimFaceTick(VCSInputContext context) {
+	if (!g_settings.freeAimFaceCamera || !g_settings.moveInFreeAim) {
+		return;
+	}
+	if (!FreeAimActive(context) || !IsHostKeyDown(NKCODE_W)) {
+		return;
+	}
+	if (!IsAddrSet(VCSAddr::PedFwdX) || !IsAddrSet(VCSAddr::CameraYaw)) {
+		return;
+	}
+
+	const std::optional<float> yaw = ReadAddrFloat(VCSAddr::CameraYaw);
+	if (!yaw) {
+		return;
+	}
+
+	// Same heading convention the translation path had to be corrected to - CameraYaw - PI, found
+	// by trying it rather than derived, since the documented "matrix yaw + PI/2" was a quarter turn
+	// out. Observed matrix with the player facing world +X: forward (1,0,0), right (0,-1,0), which
+	// fixes the right vector as (sin, -cos) for a forward of (cos, sin).
+	const float h = *yaw - 3.14159265f;
+	const float c = std::cos(h);
+	const float s = std::sin(h);
+
+	WriteAddrFloat(VCSAddr::PedFwdX, c);
+	WriteAddrFloat(VCSAddr::PedFwdY, s);
+	WriteAddrFloat(VCSAddr::PedRightX, s);
+	WriteAddrFloat(VCSAddr::PedRightY, -c);
+}
+
 void FreeAimMoveTick(VCSInputContext context) {
 	// Patch the branch that makes aiming and moving mutually exclusive.
 	//
