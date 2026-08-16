@@ -537,7 +537,48 @@ Both mistakes share a root cause: a correct observation about *symptoms* was pro
 conclusion about *mechanism*, without reading the code that produced it. The code was ~40 lines
 and answered both in one sitting.
 
-### Free aim has no movement channel, and that is the game's decision
+### Movement in free aim is LATCHED, not forbidden — and the patch is a brake
+
+**This supersedes the section below, which concluded the game simply forbids it. That was wrong,
+and wrong in a way no amount of disassembly would have corrected**, because the code is identical
+in both cases. It only shows up in play.
+
+Enter free aim *while already running* — sprint, release sprint, keep the movement key held, then
+aim — and the player **keeps running, with the correct running-with-weapon animation**. Movement
+was never impossible in free aim. Only *changing* it was.
+
+The reason is the branch at `0x0894b864` (`MoveGateBranch`): free aim skips the movement call at
+`0x0894b888`, so nothing ever re-evaluates the movement. Whatever state you entered with is latched
+and applied forever, which is also why it could not be stopped.
+
+**So the patch is a brake, not an accelerator, and that inversion is the whole trick.** There is
+nothing to start — the latch does that. What was missing was a way to stop, and letting the
+movement call run again is exactly that: it re-reads the stick, finds it centred, and halts the
+player. Hence:
+
+```
+holding the movement key  ->  patched OUT, latch keeps carrying you
+key released              ->  patched IN, the call runs and stops you
+```
+
+Confirmed in play. The game does the movement, the animation and the collision; this fork only
+decides *when* the game is allowed to re-evaluate.
+
+Two approaches were tried and abandoned first, both recorded in docs/VCS_ADDRESSES.md: writing
+`PedVelX/Y` (impossible - the game zeroes and recomputes velocity every frame from the very intent
+free aim suppresses) and translating `PedPosX/Y` directly (works, but it is a noclip: no animation,
+no slopes, and collision only as far as the physics resolves interpenetration afterwards).
+`freeAimTranslate` still exists for comparison and is off.
+
+**The second stick cannot be part of this.** Setting `CameraInputMode` makes the d-pad the aim
+axis, which makes d-pad-down indistinguishable from aiming downward - so the game's Free Aim button
+becomes unpressable and free aim is unreachable. Aim on the nub, movement latched, patch as brake.
+
+The lesson worth carrying: "the feature is absent" and "the feature is present but frozen" produce
+identical symptoms from the outside, and the second is a far easier problem. Ask which one it is
+before concluding anything is impossible.
+
+### Superseded: "free aim has no movement channel"
 
 Established in play, not inferred:
 

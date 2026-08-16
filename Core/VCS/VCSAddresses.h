@@ -125,6 +125,16 @@ enum class VCSAddr {
 	// speed. Based on PlayerBase, because the ped is heap-allocated and moves between runs.
 	PedVelX,
 	PedVelY,
+	PedPosX,
+	PedPosY,
+
+	// CODE, not data: the branch that makes aiming and moving mutually exclusive.
+	//
+	// The player control function processes aiming and then branches straight over the call that
+	// applies movement. Turning that branch into a nop lets the aim path fall through into the
+	// movement path, so both run. This is the only entry in this table that is patched rather than
+	// read, and the only one where a wrong address crashes rather than misbehaves.
+	MoveGateBranch,
 
 	LookSensitivity,   // The game's own look sensitivity setting. Squared, in the mode 11 response.
 	AimAxisScale,      // CPad+0xd0. The game scales the axis by this in weapon camera modes.
@@ -234,6 +244,19 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	{ VCSAddr::CamFOV,        "CamFOV",        VCSAddrType::Float, 0x08bc7fc8,    kNoBase,              "CCam[0]+0x128. Read 70.0 in gameplay. Aim rates scale with FOV/80" },
 	{ VCSAddr::PedVelX,       "PedVelX",       VCSAddrType::Float, 0x140,         VCSAddr::PlayerBase,  "Movement velocity X, per frame. Zero in free aim - that is the thing being worked around" },
 	{ VCSAddr::PedVelY,       "PedVelY",       VCSAddrType::Float, 0x144,         VCSAddr::PlayerBase,  "Movement velocity Y. Pairs with PedVelX" },
+	// World position, from the entity matrix. Unlike velocity, nothing recomputes this from the
+	// movement state - so a small step added each frame accumulates instead of being wiped, which
+	// is what makes translating the player directly a viable way to move during free aim.
+	{ VCSAddr::PedPosX,       "PedPosX",       VCSAddrType::Float, 0x30,          VCSAddr::PlayerBase,  "World X. Matrix position at PlayerBase+0x30" },
+	{ VCSAddr::PedPosY,       "PedPosY",       VCSAddrType::Float, 0x34,          VCSAddr::PlayerBase,  "World Y. Pairs with PedPosX" },
+	// `b 0x0894b890` (0x1000000a), reached after the aim call at 0x0894b85c and jumping over the
+	// movement call at 0x0894b888. Found by breakpointing all four call sites of the movement
+	// applier and diffing: 0x0894b888 ran on 100% of walking frames and 24% of aiming ones.
+	//
+	// NOTE the live word here reads 0x68xxxxxx, not 0x1000000a - PPSSPP's JIT overwrites the first
+	// instruction of each compiled block with a block marker. Invalidate the icache before reading
+	// or writing, or you will compare against, and clobber, a JIT pointer.
+	{ VCSAddr::MoveGateBranch, "MoveGateBranch", VCSAddrType::U32, 0x0894b864,    kNoBase,              "CODE. The branch that skips movement while aiming. Patched, not read" },
 	// gp - 0x3588. Squared at 0x0899d2e4, so it is the game's look sensitivity setting; the Controls
 	// menu writes it. Read 0.007.
 	{ VCSAddr::LookSensitivity, "LookSensitivity", VCSAddrType::Float, 0x08bae7d8, kNoBase,             "Game's own look sensitivity. Only in the mode 11/28 response, where it is squared" },

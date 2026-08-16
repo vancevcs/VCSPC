@@ -615,10 +615,16 @@ void ApplyAnalog(VCSInputContext context) {
 		}
 	} else {
 		g_analogIsReticle = false;
-		// The model keeps state between frames, so it has to be dropped the moment the reticle
-		// stops driving - otherwise the next free aim opens by cancelling a glide that ended long
-		// ago, and jumps.
-		AimModelReset();
+		// The model keeps state between frames, so it has to be dropped when aiming stops -
+		// otherwise the next free aim opens by cancelling a glide that ended long ago, and jumps.
+		//
+		// But "the reticle isn't driving" is no longer the same as "nothing is aiming". With the
+		// d-pad as the aim channel the reticle stands down permanently, and resetting here would
+		// wipe the model on every single frame, moments before PadStickTick asks it for a
+		// deflection. Only reset when neither aim channel is running.
+		if (!PadStickActive(context)) {
+			AimModelReset();
+		}
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 		switch (context) {
 		case VCSInputContext::OnFoot:
@@ -771,17 +777,26 @@ bool ReticleActive(VCSInputContext context) {
 	// them running at once fight over one crosshair, and worse, whichever runs first eats the
 	// mouse delta and starves the other.
 	//
-	// usePadStick deliberately does NOT suppress this, though it did briefly. The two read
-	// different channels and are selected by IsFreeAiming, so they never contend:
+	// usePadStick DOES suppress this now, and that is the whole point of it.
 	//
-	//   not free-aiming : the aim axis comes from the d-pad, which PadStickTick drives
-	//   free-aiming     : the aim axis comes from the NUB, so the reticle drives it here
+	// It sets CameraInputMode, which moves the aim axis onto the d-pad pair - so PadStickTick is
+	// already aiming, and driving the nub from the mouse as well is redundant. Worse, it is what
+	// stops the player moving: the nub is the movement channel, and while the reticle owns it,
+	// WASD has nowhere to go. Confirmed in play - with the second stick on, the crosshair moved
+	// from the d-pad exactly as intended and WASD did nothing at all.
 	//
-	// That second line is an observed fact, not a guess. Once in free aim, pushing the nub left
-	// and right is what turns the aim - which is CPad+0x2, the flag==0 path in the select at
-	// 0x0894b3b8. Suppressing this while usePadStick was on left free aim with nothing driving
-	// it at all, which is exactly what "I very rarely get to free aim and then can only turn
-	// with A and D" was describing.
+	// Standing down here hands the nub back to ApplyAnalog's ordinary WASD path, giving two
+	// separate channels from one physical stick:
+	//
+	//   aim      d-pad pair, driven by the mouse    (PadStickTick)
+	//   movement nub, driven by WASD                (ApplyAnalog's else branch)
+	//
+	// That only became useful once the movement call stopped being skipped - see MoveGateBranch.
+	// Before that patch the nub had nothing to do either way, which is why suppressing this used
+	// to leave free aim with no driver and was reverted.
+	if (CameraSettings().usePadStick && PadStickAvailable()) {
+		return false;
+	}
 	if (CameraSettings().aimViaRightStick) {
 		return false;
 	}

@@ -18,6 +18,8 @@
 #include <cmath>
 #include <mutex>
 
+#include "Core/MIPS/MIPS.h"
+#include "Core/MemMap.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
@@ -698,7 +700,11 @@ bool PadStickActive(VCSInputContext context) {
 	// meaning is destructive: left/right is previous/next target while locked on (a trace caught
 	// us writing 255 and cycling through NPCs) and previous/next weapon on foot. Free aim is the
 	// one state where the buttons have nothing worse to do.
-	return PadStickModeWanted(context) && ReticleActive(context);
+	// Keyed on FreeAimActive, NOT ReticleActive. It used to key on the reticle, which became
+	// circular the moment the reticle had to stand down for this: the reticle stops so the nub is
+	// free for movement, which would have stopped the d-pad aim as well, which would have left free
+	// aim with nothing driving it at all.
+	return PadStickModeWanted(context) && FreeAimActive(context);
 }
 
 void PadStickTick(VCSInputContext context) {
@@ -739,10 +745,18 @@ void PadStickTick(VCSInputContext context) {
 	g_padStickFrames++;
 
 	float dx, dy;
-	// PEEK, don't take. This only runs during free aim, where ApplyAnalog has already drained the
-	// frame's delta for the nub - draining again would always see zero. Both channels want the
-	// same movement, because between them they make up one aim: nub for yaw, d-pad for pitch.
-	PeekMouseDelta(&dx, &dy);
+	// Take or peek, depending on whether anyone drained the delta before us.
+	//
+	// This used to always PEEK, on the reasoning that ApplyAnalog's reticle branch had already
+	// drained the frame's movement for the nub, so draining again would find nothing. That held
+	// only while the reticle ran alongside this. Now the reticle stands down whenever the d-pad is
+	// the aim channel - so that the nub is free for WASD - and with it went the only consumer that
+	// drained anything. Peeking then returns a stale value, and the mouse stops aiming entirely.
+	if (ReticleActive(context)) {
+		PeekMouseDelta(&dx, &dy);
+	} else {
+		TakeMouseDelta(&dx, &dy);
+	}
 
 	// The deflection is no longer proportional to the mouse movement - it is whatever the model
 	// says will move the aim by the distance the mouse moved. See AimAxisStep.
@@ -1079,48 +1093,126 @@ void CameraTick(VCSInputContext context) {
 //
 // The direction is camera-relative, which is what a mouse-look game wants: W goes where you are
 // looking. Sign conventions here are a first guess and may need swapping.
-void FreeAimMoveTick(VCSInputContext context) {
-	if (!g_settings.moveInFreeAim || !ReticleActive(context)) {
+// Walk during free aim by TRANSLATING the player, rather than by asking the game to move them.
+//
+// Velocity was tried first and cannot work: the ped movement update zeroes it at the start of
+// every frame and recomputes it from the movement intent, which free aim is what suppresses. So a
+// written velocity is wiped before anything reads it - measured, with the game verifiably running.
+//
+// Position has no such owner. Nothing recomputes it from the movement state, so a small step added
+// each frame simply accumulates. It is closer to a noclip than to walking, and it inherits that
+// approach's weaknesses honestly:
+//
+//   - No animation. The character slides in whatever pose free aim holds them in.
+//   - Collision is whatever the game's physics does about finding the player inside geometry
+//     AFTER the fact. It resolves interpenetration, so walls may well push back - but this does
+//     not sweep, so a fast enough step could pass through something thin.
+//   - Height is not touched, so slopes and stairs are not followed.
+//
+// Deliberately independent of the MoveGateBranch patch: this does not need the game's movement
+// path to run at all, so the two can be judged separately.
+void FreeAimTranslateTick(VCSInputContext context) {
+	if (!g_settings.freeAimTranslate || !FreeAimActive(context)) {
 		return;
 	}
-	if (!IsAddrSet(VCSAddr::PedVelX) || !IsAddrSet(VCSAddr::CameraYaw)) {
+	if (!IsAddrSet(VCSAddr::PedPosX) || !IsAddrSet(VCSAddr::CameraYaw)) {
 		return;
 	}
 
-	float fwd = 0.0f, side = 0.0f;
-	if (IsHostKeyDown(NKCODE_W)) fwd += 1.0f;
-	if (IsHostKeyDown(NKCODE_S)) fwd -= 1.0f;
-	if (IsHostKeyDown(NKCODE_D)) side += 1.0f;
-	if (IsHostKeyDown(NKCODE_A)) side -= 1.0f;
-
-	if (fwd == 0.0f && side == 0.0f) {
-		// Don't write zeroes every frame - the game is already zeroing it, and writing over its
-		// own physics while the player isn't asking to move would fight anything else that moves
-		// them (knockback, slopes, being shoved).
-		return;
+	// Forward only, on W. Strafing was tried first and is not worth the complication: this is a
+	// translation, not a walk, so every extra direction is another way to slide somewhere the
+	// animation and the collision were not expecting.
+	if (!IsHostKeyDown(NKCODE_W)) {
+		return;   // don't touch the position while the player isn't asking to move
 	}
-
-	const float len = std::sqrt(fwd * fwd + side * side);
-	fwd /= len;
-	side /= len;
 
 	const std::optional<float> yaw = ReadAddrFloat(VCSAddr::CameraYaw);
-	if (!yaw) {
+	const std::optional<float> px = ReadAddrFloat(VCSAddr::PedPosX);
+	const std::optional<float> py = ReadAddrFloat(VCSAddr::PedPosY);
+	if (!yaw || !px || !py) {
 		return;
 	}
-	// CameraYaw is the camera matrix yaw plus PI/2, per docs/VCS_ADDRESSES.md, so undo that to get
-	// a heading whose sine and cosine line up with world X and Y.
-	const float h = *yaw - 1.57079633f;
-	const float sinH = std::sin(h);
-	const float cosH = std::cos(h);
 
-	const float speed = g_settings.freeAimMoveSpeed;
-	const float vx = (cosH * fwd - sinH * side) * speed;
-	const float vy = (sinH * fwd + cosH * side) * speed;
+	// Heading is CameraYaw - PI. The docs give CameraYaw as the matrix yaw plus PI/2, so undoing
+	// that alone should have been right - it was not, and it showed up as A walking the player
+	// forwards while W did nothing useful. A quarter turn more lines it up. Measured, not derived:
+	// whatever the extra offset means, the game's convention is not the one the note implies.
+	const float h = *yaw - 3.14159265f;
+	const float step = g_settings.freeAimMoveSpeed;
 
-	WriteAddrFloat(VCSAddr::PedVelX, vx);
-	WriteAddrFloat(VCSAddr::PedVelY, vy);
+	WriteAddrFloat(VCSAddr::PedPosX, *px + std::cos(h) * step);
+	WriteAddrFloat(VCSAddr::PedPosY, *py + std::sin(h) * step);
 }
+
+void FreeAimMoveTick(VCSInputContext context) {
+	// Patch the branch that makes aiming and moving mutually exclusive.
+	//
+	// The player control function processes aiming at 0x0894b85c and then branches straight over
+	// the movement call at 0x0894b888. That single `b` is the entire reason free aim freezes the
+	// player. Turning it into a nop lets the aim path fall through into the movement path.
+	//
+	// Found by breakpointing all four call sites of the movement applier and diffing walking
+	// against free-aiming: 0x0894b888 fired on 100% of walking frames and 24% of aiming ones,
+	// while every other site never ran at all.
+	//
+	// This is applied on CHANGE, not every frame, because it is code. Data this fork writes is
+	// re-asserted per frame because the game recomputes it; an instruction stays written.
+	//
+	// The JIT is the hazard. PPSSPP overwrites the first instruction of each compiled block with a
+	// block marker (0x68xxxxxx), so the live word here is NOT the original instruction. Invalidate
+	// the icache first - that destroys the block and restores the real opcode - then write, then
+	// invalidate again so the JIT recompiles from what we wrote. Skipping the first invalidate
+	// means comparing against, and clobbering, a JIT pointer.
+	static bool applied = false;
+	static bool haveOriginal = false;
+	static u32 original = 0;
+
+	// The patch is a BRAKE, not an accelerator, and that inversion is the whole trick.
+	//
+	// Entering free aim while already running latches the movement: the game keeps applying it,
+	// with the correct running-with-weapon animation, because the movement call is skipped and so
+	// nothing ever re-evaluates it. Movement in free aim was never impossible - only *changing* it
+	// was. So there is nothing to start.
+	//
+	// What was missing is a way to stop. Applying the patch lets that call run again, which
+	// re-reads the stick and finds it centred, and the player halts. So: hold W and stay patched
+	// out, so the latch keeps carrying you; release W and patch in for as long as it takes the
+	// game to notice.
+	//
+	// Only while free-aiming, so ordinary play is never running patched code.
+	const bool want = g_settings.moveInFreeAim && FreeAimActive(context) &&
+	                  !IsHostKeyDown(NKCODE_W);
+	if (want == applied || !IsAddrSet(VCSAddr::MoveGateBranch)) {
+		return;
+	}
+
+	const u32 addr = LookupAddr(VCSAddr::MoveGateBranch).address;
+	if (!Memory::IsValid4AlignedAddress(addr) || !currentMIPS) {
+		return;
+	}
+
+	currentMIPS->InvalidateICache(addr, 4);
+
+	if (!haveOriginal) {
+		original = Memory::ReadUnchecked_U32(addr);
+		// Refuse to touch anything that isn't the branch we identified. A wrong address here
+		// crashes the game rather than misbehaving, which is not true of anything else this fork
+		// writes, so this check is the difference between a bad setting and a bad afternoon.
+		if (original != 0x1000000a) {
+			WARN_LOG(Log::System, "VCS: move gate at %08x reads %08x, expected 1000000a - not patching",
+				addr, original);
+			g_settings.moveInFreeAim = false;
+			return;
+		}
+		haveOriginal = true;
+	}
+
+	Memory::WriteUnchecked_U32(want ? 0x00000000u : original, addr);
+	currentMIPS->InvalidateICache(addr, 4);
+	applied = want;
+	INFO_LOG(Log::System, "VCS: move gate at %08x %s", addr, want ? "patched to nop" : "restored");
+}
+
 
 void CameraReset() {
 	AimModelReset();

@@ -554,22 +554,38 @@ void ImVCSWindow::DrawCamera() {
 				"can do and are trading linearity back away. Aim range boost is what actually "
 				"buys headroom, and it needs the second stick.");
 		}
-		ImGui::Checkbox("Move while free-aiming (experimental)", &s.moveInFreeAim);
+		ImGui::Checkbox("Move while free-aiming (PATCHES GAME CODE)", &s.moveInFreeAim);
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip(
-				"Writes the player's velocity directly so WASD walks you during free aim.\n\n"
-				"The game gives free aim no movement channel: its one analog axis is the "
-				"crosshair, and the d-pad is inert there. So this is not input routing - it "
-				"overrides the game's own physics, which is heavier than anything else here. "
-				"Expect no walk animation; the character may slide.\n\n"
-				"If the directions come out wrong, say so - the sign convention is a first guess.");
+				"Patches one instruction so aiming and moving stop being mutually exclusive.\n\n"
+				"The player control function processes aiming and then branches straight over the "
+				"call that applies movement - that single branch at 0x0894b864 is the whole "
+				"reason free aim freezes you. This turns it into a nop so the aim path falls "
+				"through into the movement path and both run.\n\n"
+				"This is the only thing here that writes game CODE rather than data, and a wrong "
+				"address crashes rather than misbehaves. It refuses to patch unless the "
+				"instruction reads exactly as expected.\n\n"
+				"IMPORTANT: on its own this makes you walk wherever you sweep the crosshair, "
+				"because movement reads the same analog axis the aim uses. Turn on 'Drive the "
+				"game's second stick' as well - that moves the aim onto the d-pad and frees the "
+				"nub for WASD.");
 		}
-		if (s.moveInFreeAim) {
-			ImGui::SliderFloat("Free aim walk speed", &s.freeAimMoveSpeed, 0.02f, 0.30f,
-				"%.3f units/frame");
-			const std::optional<float> vx = VCS::ReadAddrFloat(VCS::VCSAddr::PedVelX);
-			const std::optional<float> vy = VCS::ReadAddrFloat(VCS::VCSAddr::PedVelY);
-			ImGui::Text("Velocity: x=%+.4f y=%+.4f", vx.value_or(0.0f), vy.value_or(0.0f));
+		if (s.moveInFreeAim && !s.usePadStick) {
+			ImGui::TextColored(kBadColor,
+				"  Needs 'Drive the game's second stick' too, or you walk where you aim.");
+		}
+		ImGui::Checkbox("Walk in free aim by translating (noclip-style)", &s.freeAimTranslate);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Adds a small step to the player's world position each frame while WASD is held "
+				"in free aim. A slow noclip rather than walking.\n\n"
+				"Velocity was tried first and cannot work - the game zeroes and recomputes it "
+				"every frame from the movement intent that free aim suppresses. Nothing "
+				"recomputes POSITION, so steps accumulate.\n\n"
+				"No animation, and height is not tracked, so slopes and stairs are not followed. "
+				"Collision is only whatever the physics does about finding you inside geometry "
+				"afterwards - it does not sweep, so a large step could pass through thin walls.\n\n"
+				"Needs neither the code patch nor the second stick.");
 		}
 		ImGui::Checkbox("Plain mapping for sniper / RPG", &s.aimScopedLinear);
 		if (ImGui::IsItemHovered()) {

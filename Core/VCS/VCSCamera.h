@@ -197,8 +197,20 @@ struct VCSCameraSettings {
 	// Off by default because it is unproven. See FreeAimMoveTick.
 	bool moveInFreeAim = false;
 
-	// World units per frame while doing so. The game's own walking speed measured about 0.10.
-	float freeAimMoveSpeed = 0.10f;
+	// World units per frame while doing so. The game's own walking speed measured about 0.10, but
+	// this defaults well below it: a translation has no collision sweep, so a smaller step gives
+	// the physics more chance to resolve a wall before the next one lands, and a slow creep reads
+	// far better against an animation that is not actually a walk cycle.
+	float freeAimMoveSpeed = 0.035f;
+
+	// Walk during free aim by TRANSLATING the player directly - a slow, collision-resolved noclip
+	// rather than an attempt to make the game move them.
+	//
+	// Independent of moveInFreeAim above: this needs neither the code patch nor the game's own
+	// movement path, so the two approaches can be judged separately. See FreeAimTranslateTick for
+	// what it inherits from being a position write - no animation, no slopes, and collision only
+	// as far as the physics resolves interpenetration after the fact.
+	bool freeAimTranslate = false;
 
 	// Consecutive still GAME frames before a stroke counts as over and the stop is allowed to fire.
 	//
@@ -434,6 +446,10 @@ void PadStickStats(u64 *frames, u64 *nonZero, float *peak, bool *modeFlagSet);
 // Walks the player during free aim by writing the ped's velocity. Emu thread only, once per frame,
 // and it must run every frame - the game rewrites the field. Experimental; see moveInFreeAim.
 void FreeAimMoveTick(VCSInputContext context);
+
+// Walks the player during free aim by adding a step to their world position each frame. Emu thread
+// only. Independent of the code patch above - see freeAimTranslate.
+void FreeAimTranslateTick(VCSInputContext context);
 
 // Applies the accumulated mouse movement to the game's camera. Emu thread only, once per frame.
 // Does not touch the camera in the Aiming context - there the mouse belongs to the reticle.
