@@ -305,33 +305,6 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 
 const size_t kVCSKeyMappingCount = ARRAY_SIZE(kVCSKeyMappings);
 
-// Whether the game's logic has stopped, which is what a menu looks like from here.
-//
-// Called once per tick from ResolveContext, so the stall count advances with the ticks. Reading
-// FrameCounter is cheap and it is already in the table for the aim model.
-static u32 g_lastLogicFrame = 0;
-static int g_logicStalledTicks = 0;
-static const int kMenuStallTicks = 9;
-
-static bool MenuLikelyOpen() {
-	const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
-	if (!frame) {
-		// No counter, no detection - fall through to the gameplay contexts exactly as before, so
-		// a build without this address behaves the way it always did.
-		g_logicStalledTicks = 0;
-		return false;
-	}
-	if (*frame != g_lastLogicFrame) {
-		g_lastLogicFrame = *frame;
-		g_logicStalledTicks = 0;
-		return false;
-	}
-	if (g_logicStalledTicks < 1000) {
-		g_logicStalledTicks++;
-	}
-	return g_logicStalledTicks >= kMenuStallTicks;
-}
-
 VCSInputContext ResolveContext(const VCSState &state) {
 	// With an empty address table there is nothing to base a decision on, and guessing would
 	// mean remapping the player's buttons at random. Stay out of the way instead.
@@ -339,23 +312,9 @@ VCSInputContext ResolveContext(const VCSState &state) {
 		return VCSInputContext::Unknown;
 	}
 
-	// A menu is detected by the game's LOGIC STOPPING, not by a state flag.
-	//
-	// GameState was hunted for and not found: a 192KB sweep of the globals produced 1249
-	// candidates from two rounds and none of them survived a proper correlation run. But the hunt
-	// itself kept detecting menus perfectly, and it did so with something already in the table -
-	// FrameCounter stops advancing while a menu is up, because the game pauses its logic. The
-	// detector was the tool the whole time.
-	//
-	// So no address is needed. Nine ticks is unambiguous: this runs at ~60Hz against 30fps logic,
-	// so the counter normally moves every other tick, and nine still ticks is about 150ms - far
-	// longer than any ordinary gap and far shorter than a player would notice.
-	//
-	// This also fires during loading screens and anywhere else the logic is halted, which is
-	// harmless: those are precisely the times gameplay bindings should not be live either.
-	if (MenuLikelyOpen()) {
-		return VCSInputContext::Menu;
-	}
+	// TODO: needs VCSAddr::GameState - check it here and return Menu before anything else, once
+	// the menu/gameplay values are known. Until then a paused game looks like normal gameplay
+	// and gets gameplay bindings.
 
 	if (state.inVehicle.value_or(false)) {
 		return VCSInputContext::InVehicle;
