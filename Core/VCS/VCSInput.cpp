@@ -166,6 +166,19 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::OnFoot,    NKCODE_SPACE,              CTRL_SQUARE,    "Jump" },
 	{ VCSInputContext::OnFoot,    NKCODE_SHIFT_LEFT,         CTRL_CROSS,     "Sprint" },
 	{ VCSInputContext::OnFoot,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Attack / fire" },
+	// Menu keys, living in the OnFoot context on purpose.
+	//
+	// Menus run under OnFoot, because the Menu context never resolves - it needs GameState, which
+	// is still unset. So the rows further down under Menu are dead, and what actually drives a menu
+	// is whatever OnFoot maps to Cross and Circle: Shift (Sprint) confirms and left-click (Attack)
+	// goes back, which is what "better in menu controls" was about.
+	//
+	// These ADD Enter and Backspace alongside them. Shift and left-click cannot be taken away
+	// without losing sprint and firing, since nothing here can tell a menu from gameplay - that
+	// genuinely needs GameState. Costs: Enter also sprints and Backspace also fires, neither of
+	// which collides with anything.
+	{ VCSInputContext::OnFoot,    NKCODE_ENTER,              CTRL_CROSS,     "Confirm in menus (also sprint)" },
+	{ VCSInputContext::OnFoot,    NKCODE_DEL,                CTRL_CIRCLE,    "Back in menus, Backspace (also fires)" },
 	{ VCSInputContext::OnFoot,    kVCSAimKey,                CTRL_RTRIGGER,  "Aim (verified)" },
 	{ VCSInputContext::OnFoot,    NKCODE_F,                  CTRL_TRIANGLE,  "Enter vehicle" },
 	{ VCSInputContext::OnFoot,    NKCODE_E,                  CTRL_RIGHT,     "Next weapon" },
@@ -247,6 +260,28 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// PC. Listed here so it shows up in the debugger's mapping table rather than being invisible.
 	{ VCSInputContext::OnFoot,    NKCODE_G,                 0,              "Toggle lock-on mode (for melee) instead of free aim" },
 	{ VCSInputContext::Aiming,    NKCODE_G,                 0,              "Toggle lock-on mode (for melee) instead of free aim" },
+	// Sniper zoom.
+	//
+	// Space is claimed silently here because it maps to Square on foot, and pressing it while
+	// aiming a sniper opens a menu - which is what you get when you reach for the obvious zoom key.
+	// A psp = 0 row stops that without giving up Jump anywhere else.
+	//
+	// Square zooms IN and Cross zooms OUT - measured, not guessed. Each PSP button was injected
+	// over the debugger while scoped and the camera block diffed: Square took the FOV at
+	// CCamera+0x198 from 70 to 33 with the zoom level at +0x7a0 stepping 1.0 to 2.0, and Cross
+	// reversed it. Nothing else moved.
+	//
+	// The first attempt bound d-pad up/down, on the reasoning that GTA usually puts scope zoom
+	// there. It was already the aim axis in free aim - which had been reported in play - so the
+	// one pair that could not possibly work is the pair that got chosen. Injecting buttons and
+	// watching what moves took two minutes and needed no priors at all.
+	//
+	// Space is NOT suppressed: it maps to Square, which is zoom in. Reaching for it while scoped
+	// was right; it only opens a menu when pressed unscoped, where Square is still Jump.
+	{ VCSInputContext::Aiming,    NKCODE_Z,                 CTRL_SQUARE,    "Sniper zoom in (verified)" },
+	{ VCSInputContext::Aiming,    NKCODE_Y,                 CTRL_CROSS,     "Sniper zoom out (verified)" },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_UP,   CTRL_SQUARE,  "Sniper zoom in (verified)" },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_DOWN, CTRL_CROSS,   "Sniper zoom out (verified)" },
 
 	// --- Menus / pause screens ---
 	// Keyboard navigation, so the player never has to think in PSP buttons.

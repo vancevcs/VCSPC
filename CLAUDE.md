@@ -960,6 +960,30 @@ A methodology note, because it cost several rounds: the first diagnosis of the c
 taken before mouse look existed. The live readout in the Camera tab settled it in one screenshot.
 Prefer the live diagnostic over archived snapshots when asking "what range does this take".
 
+### Ask the game which button does what, don't guess
+
+`input.buttons.send` injects a PSP button over the WebSocket debugger, and the memory it moves
+identifies it. Sniper zoom was found this way in about two minutes: press each button while
+scoped, diff the `CCamera` block, see what changed.
+
+```
+square    CCamera+0x198  70.000 -> 33.068     (FOV: zoom IN)
+          CCamera+0x7a0   1.000 ->  2.000     (zoom level)
+cross     CCamera+0x198  31.719 -> 64.404     (zoom OUT)
+select    CCamera+0x7b4   2.000 ->  1.000     (camera mode)
+```
+
+So **Square zooms in, Cross zooms out** while scoped, and `CCamera+0x7a0` is the zoom level.
+
+The attempt before that bound zoom to **d-pad up/down**, reasoning from where GTA usually puts it.
+That was the one pair that could not possibly work - the d-pad is the aim axis in free aim, which
+had already been reported in play. **A prior from other games beat evidence already in hand**, which
+is the same failure as trusting the "matrix yaw + PI/2" note over a measurement.
+
+Use this for the remaining `?` rows in the button table below, and to check the ones marked
+unverified. Take a baseline diff of the block first with nothing pressed - a few fields drift on
+their own, and subtracting them is what makes a single press legible.
+
 ### Only release buttons you pressed
 
 `ApplyMapping` clears `g_lastAppliedMask & ~setMask` - the bits *we* set last frame - and nothing
