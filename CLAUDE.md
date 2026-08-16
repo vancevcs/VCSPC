@@ -602,6 +602,29 @@ and the movement maths is VFPU, which capstone does not decode - listings show `
 where the answer is. **That is the boundary between the two tools**: static disassembly for control
 flow and scalar constants, the live debugger for anything the vector unit computes.
 
+### The crosshair is drawn from the camera; the shot is not
+
+Re-tested directly, because the old note that writing `CameraYaw` "swings the VIEW, gun keeps
+pointing where it was" was doubted here on the grounds that it predated knowing the camera modes.
+It did predate that. **It was right anyway.**
+
+Driving `CameraYaw`/`CameraPitch` in free aim — the exact path that makes mouse look smooth — moves
+the crosshair, smoothly, and **the shot goes somewhere else**. So the crosshair is *drawn* from the
+camera while the shot is resolved from the ped's own aim state, and the two agree only because the
+stick normally drives both. Steering the camera alone desynchronises them, which is worse than
+doing nothing: it looks correct and misses.
+
+`mouseLookInFreeAim` is off, and stays visible in the UI marked DISPROVEN so the result is not
+rediscovered by someone reasoning their way to the same idea.
+
+**The consequence is the important part: the stick is the only path to the gun.** The game's
+integrator cannot be removed from aiming, only inverted — so `aimResponseModel` is not a
+workaround for lacking a better route, it *is* the route. That also caps how smooth aiming can
+ever be against mouse look, which writes an angle with nothing in between.
+
+Method note, since this cost a build: re-testing the old claim was right, and *assuming it was
+wrong* was not. A doubted note is a hypothesis, not a fact to build on.
+
 ### There is no stored aim direction
 
 `AimYaw` / `AimPitch` are permanently unset, and that is a **result, not a gap**. Do not resume

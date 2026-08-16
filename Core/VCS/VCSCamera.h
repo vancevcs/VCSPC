@@ -89,6 +89,23 @@ struct VCSCameraSettings {
 	// this setting used to be (0.015 stick/count).
 	float aimSensitivity = 0.00128f;
 
+	// Mouse acceleration for aiming: extra gain per count of mouse movement in a frame.
+	//
+	// 0 disables it entirely and the response stays purely linear. At 0.012, a slow 5-count frame
+	// gets 1.06x - imperceptible - while a 40-count sweep gets 1.5x, so small corrections keep
+	// their precision and deliberate movements cover ground.
+	//
+	// This deliberately adds back a nonlinearity that aimResponseModel exists to remove, and the
+	// distinction matters: the game's own curve is a signed square nobody chose, which crushes slow
+	// movement and cannot be tuned because it is a shape. This one is chosen, bounded, and applied
+	// to the wanted rotation rather than to the stick, so it never eats the low end.
+	float aimAccel = 0.012f;
+
+	// Ceiling on that multiplier. The aim channel saturates, and past that point extra gain only
+	// fills the carry - which arrives late and reads as the aim running away. 2.5x is about where
+	// the nub runs out on ordinary sensitivities.
+	float aimAccelMax = 2.5f;
+
 	// Aim by inverting the game's own axis response, rather than pushing the stick proportionally
 	// to the mouse. This is what makes free aim feel like a mouse instead of a thumbstick.
 	//
@@ -260,17 +277,26 @@ struct VCSCameraSettings {
 	// CameraYaw/CameraPitch moves the crosshair with the same 1:1 mouse feel that mouse look
 	// already has, and the nub can be left alone entirely.
 	//
-	// INERT, and kept only so the reasoning stays attached to the code that embodies it.
+	// DISPROVEN, and left here only so nobody spends another evening on it.
 	//
-	// The idea was to write a stored gun direction the way mouse look writes CameraYaw. There is
-	// no such value: the weapon camera integrates the look axis into its own angle and the gun is
-	// resolved from that, so nothing holds an aim direction to be written. See the AimYaw note in
-	// VCSAddresses.h for how that was established and what was ruled out.
+	// Writes CameraYaw/CameraPitch directly in free aim, the same path that makes mouse look smooth
+	// on foot. It does move the crosshair, and it is beautifully smooth - and the shot goes
+	// somewhere else entirely. Confirmed in play.
 	//
-	// Everything gated on this is therefore unreachable - AimTick and the ReticleActive branch
-	// both also require IsAddrSet(AimYaw), which is false and will stay false. aimResponseModel
-	// is what actually solved the problem this was aimed at.
-	bool mouseLookInFreeAim = true;
+	// So the crosshair is DRAWN from the camera while the shot is resolved from the ped's own aim
+	// state, and the two are only kept in agreement because the stick normally drives both. Steering
+	// the camera alone desynchronises them, which is worse than doing nothing: it looks correct and
+	// misses.
+	//
+	// This is the same claim docs/VCS_ADDRESSES.md recorded years of work ago - "swings the VIEW,
+	// gun keeps pointing where it was" - which was doubted here on the grounds that the note predated
+	// knowing the camera modes. It did predate it, and it was right anyway. Re-testing it was still
+	// worth doing; assuming it was wrong was not.
+	//
+	// The consequence worth internalising: the stick is the ONLY path to the gun, so the game's
+	// integrator cannot be removed from aiming, only inverted. aimResponseModel is not a workaround
+	// for lacking a better route - it IS the better route.
+	bool mouseLookInFreeAim = false;
 
 	// --- The pad's synthesised second stick ---
 	//
@@ -335,6 +361,9 @@ struct VCSAimAxis {
 // timestep. Call exactly once per axis per frame, including with want == 0: a frame with no mouse
 // movement is what tells the model to cancel the glide.
 float AimAxisStep(VCSAimAxis *axis, float want, VCSAddr incAddr);
+
+// The acceleration multiplier applied on the last solve, for the debugger.
+float AimAccelGain();
 
 // The two axes the aim uses, exposed so the debugger can show what the model is doing.
 void AimModelState(const VCSAimAxis **x, const VCSAimAxis **y, float *timeStep);

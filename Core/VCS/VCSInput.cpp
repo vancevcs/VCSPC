@@ -658,6 +658,20 @@ void ApplyAnalog(VCSInputContext context) {
 			const VCSCameraSettings &s = CameraSettings();
 			AimDeflectionFromMouse(dx, dy, s.aimSensitivity, s.aimInvertY, &x, &y);
 		}
+	} else if (CameraSettings().mouseLookInFreeAim && FreeAimActive(context)) {
+		// Free aim with the camera driven directly: the stick must stay CENTRED. It is the game's
+		// aim axis here, so letting WASD onto it would sweep the crosshair sideways while the mouse
+		// was also moving it - two things aiming at once. Movement is not lost by this; it comes
+		// from the latch, see MoveGateBranch.
+		g_analogIsReticle = false;
+		AimModelReset();
+		if (g_analogHeld) {
+			__CtrlSetAnalogXY(CTRL_STICK_LEFT, 0.0f, 0.0f);
+			g_analogHeld = false;
+			g_analogX = 0.0f;
+			g_analogY = 0.0f;
+		}
+		return;
 	} else {
 		g_analogIsReticle = false;
 		// The model keeps state between frames, so it has to be dropped when aiming stops -
@@ -811,11 +825,18 @@ bool ReticleActive(VCSInputContext context) {
 	if (!FreeAimActive(context)) {
 		return false;
 	}
-	// Stand down only if the direct-aim path can actually run. It needs AimYaw, which is not
-	// found yet - and standing down without it left free aim with NO driver at all, since
-	// PadStickActive keys off this too. "Prefer the better mechanism" must always be conditional
-	// on that mechanism being available, or the fallback disappears with it.
-	if (CameraSettings().mouseLookInFreeAim && IsAddrSet(VCSAddr::AimYaw)) {
+	// Stand down so the mouse drives CameraYaw directly, exactly as mouse look does on foot.
+	//
+	// This used to require AimYaw, an address that does not exist, so it never fired. The target
+	// was wrong rather than missing: in free aim the crosshair follows the weapon camera's own
+	// Beta, and Beta IS CameraYaw - CCam[0]+0x7c, the value mouse look already writes. There was
+	// never a separate aim angle to find.
+	//
+	// Why bother, when the response model already linearises the stick: the stick still goes
+	// through the game's integrator, and no amount of inverting that produces the same feel as
+	// writing the angle. Mouse look is smooth because it is a position control with nothing in
+	// between. This makes free aim one too.
+	if (CameraSettings().mouseLookInFreeAim) {
 		return false;
 	}
 	// Any other aim mechanism takes precedence, and the left-stick reticle stands down. Two of

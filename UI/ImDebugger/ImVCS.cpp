@@ -525,6 +525,18 @@ void ImVCSWindow::DrawCamera() {
 		"Input tab: it reads 'reticle/mouse' only when free aim is actually engaged.");
 	ImGui::Spacing();
 
+	ImGui::Checkbox("Aim by moving the camera (DISPROVEN - see tooltip)", &s.mouseLookInFreeAim);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Leave this OFF.\n\n"
+			"Writes CameraYaw/CameraPitch directly, the path that makes mouse look smooth. It "
+			"does move the crosshair, and it is smooth - and the shot goes somewhere else.\n\n"
+			"The crosshair is DRAWN from the camera; the shot comes from the ped's own aim "
+			"state. The stick normally drives both, which is what keeps them agreeing. Steering "
+			"only the camera desynchronises them - worse than doing nothing, because it looks "
+			"right and misses.\n\n"
+			"Kept visible so the result is not re-discovered the hard way.");
+	}
 	ImGui::Checkbox("Aim response model (invert the game's curve)", &s.aimResponseModel);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
@@ -597,6 +609,24 @@ void ImVCSWindow::DrawCamera() {
 					"the point where ordinary movement pins the stick, more sensitivity buys "
 					"nothing but snapping - the game's own rate limit is the ceiling.");
 			}
+		}
+		ImGui::SliderFloat("Mouse acceleration", &s.aimAccel, 0.0f, 0.05f, "%.3f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Extra gain for fast mouse movement. 0 is off and the response stays purely "
+				"linear.\n\n"
+				"This adds back a nonlinearity the model exists to remove, and that is deliberate: "
+				"the game's own curve is a signed square nobody chose, which crushes slow movement "
+				"and cannot be tuned because it is a shape. This one is chosen and bounded, and it "
+				"scales the wanted ROTATION rather than the stick, so it never eats the low end.\n\n"
+				"At the default a slow 5-count frame gets 1.06x and a 40-count sweep gets 1.5x.");
+		}
+		ImGui::SliderFloat("Acceleration cap", &s.aimAccelMax, 1.0f, 5.0f, "%.1fx");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Ceiling on the multiplier. The aim channel saturates - past that, extra gain only "
+				"fills the carry, which arrives late and reads as the aim running away rather than "
+				"as speed.");
 		}
 		ImGui::SliderFloat("Stop strength", &s.aimCancel, 0.0f, 1.0f, "%.2f");
 		if (ImGui::IsItemHovered()) {
@@ -792,6 +822,7 @@ void ImVCSWindow::DrawCamera() {
 		// The ceiling the model is solving against. It must match what the live channel can really
 		// deliver: if the model solves past what gets written, its mirror records rotation that
 		// never happened and the next frame's correction shows up as the aim snapping backwards.
+		ImGui::Text("Accel gain: %.2fx", VCS::AimAccelGain());
 		ImGui::Text("Deflection asked for:  x=%+.3f  y=%+.3f   (channel limit %.1f)",
 			ax->lastAxis, ay->lastAxis, VCS::AimChannelLimit());
 

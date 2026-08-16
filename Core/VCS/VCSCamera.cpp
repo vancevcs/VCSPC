@@ -207,6 +207,8 @@ static u64 g_aimFrame = 0;
 static u64 g_aimSolvedFrame = (u64)-1;
 static float g_aimOutX = 0.0f;
 static float g_aimOutY = 0.0f;
+// Last acceleration multiplier applied, for the debugger.
+static float g_aimAccelGain = 1.0f;
 
 // Consecutive GAME frames with no mouse movement at all.
 //
@@ -490,6 +492,10 @@ float AimAxisStep(VCSAimAxis *axis, float want, VCSAddr incAddr) {
 	return n;
 }
 
+float AimAccelGain() {
+	return g_aimAccelGain;
+}
+
 void AimModelState(const VCSAimAxis **x, const VCSAimAxis **y, float *timeStep) {
 	*x = &g_aimX;
 	*y = &g_aimY;
@@ -629,8 +635,30 @@ void AimDeflectionFromMouse(float dx, float dy, float scale, bool invertY,
 		} else if (g_aimStillFrames < 1000) {
 			g_aimStillFrames++;
 		}
-		g_aimOutX = AimAxisStep(&g_aimX, dx * g_settings.aimSensitivity, VCSAddr::CamAimIncX);
-		g_aimOutY = AimAxisStep(&g_aimY, -dy * g_settings.aimSensitivity * ySign, VCSAddr::CamAimIncY);
+		// Mouse acceleration: fast movements get extra gain, slow ones are left alone.
+		//
+		// Worth being clear about what this is, because the model exists to REMOVE a nonlinearity.
+		// The game's own response is a signed square - an acceleration curve nobody chose, that
+		// crushes slow movement and blows up fast movement, and cannot be tuned because it is a
+		// shape rather than a scale. The model cancels it. This adds a curve back, but a chosen
+		// one, bounded, and applied to the wanted ROTATION rather than to the stick - so precision
+		// at low speed is untouched and only deliberate movements are amplified.
+		//
+		// Gain is computed from the whole 2D speed, not per axis, so a diagonal flick accelerates
+		// the same as a horizontal one and the direction is preserved exactly.
+		float gain = 1.0f;
+		if (g_settings.aimAccel > 0.0f) {
+			const float speed = std::sqrt(dx * dx + dy * dy);
+			gain = 1.0f + g_settings.aimAccel * speed;
+			if (gain > g_settings.aimAccelMax) {
+				gain = g_settings.aimAccelMax;
+			}
+		}
+		const float sens = g_settings.aimSensitivity * gain;
+		g_aimAccelGain = gain;
+
+		g_aimOutX = AimAxisStep(&g_aimX, dx * sens, VCSAddr::CamAimIncX);
+		g_aimOutY = AimAxisStep(&g_aimY, -dy * sens * ySign, VCSAddr::CamAimIncY);
 	}
 
 	g_aimSolvedFrame = g_aimFrame;
