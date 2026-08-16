@@ -574,29 +574,6 @@ void ImVCSWindow::DrawCamera() {
 			ImGui::TextColored(kBadColor,
 				"  Needs 'Drive the game's second stick' too, or you walk where you aim.");
 		}
-		if (s.moveInFreeAim) {
-			ImGui::Checkbox("Face the camera while moving", &s.freeAimFaceCamera);
-			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip(
-					"Turns the character to face where you are aiming while moving in free aim.\n\n"
-					"Free aim latches a movement direction when it engages and never revisits it, "
-					"so without this the body keeps travelling the way it was pointed while only "
-					"the arm tracks the aim. Turning the body turns the movement with it.");
-			}
-		}
-		ImGui::Checkbox("Walk in free aim by translating (noclip-style)", &s.freeAimTranslate);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip(
-				"Adds a small step to the player's world position each frame while WASD is held "
-				"in free aim. A slow noclip rather than walking.\n\n"
-				"Velocity was tried first and cannot work - the game zeroes and recomputes it "
-				"every frame from the movement intent that free aim suppresses. Nothing "
-				"recomputes POSITION, so steps accumulate.\n\n"
-				"No animation, and height is not tracked, so slopes and stairs are not followed. "
-				"Collision is only whatever the physics does about finding you inside geometry "
-				"afterwards - it does not sweep, so a large step could pass through thin walls.\n\n"
-				"Needs neither the code patch nor the second stick.");
-		}
 		ImGui::Checkbox("Plain mapping for sniper / RPG", &s.aimScopedLinear);
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip(

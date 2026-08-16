@@ -195,31 +195,10 @@ struct VCSCameraSettings {
 	// Expect the walk animation not to play; the character may slide.
 	//
 	// Off by default because it is unproven. See FreeAimMoveTick.
-	bool moveInFreeAim = false;
+	bool moveInFreeAim = true;
 
-	// World units per frame while doing so. The game's own walking speed measured about 0.10, but
-	// this defaults well below it: a translation has no collision sweep, so a smaller step gives
-	// the physics more chance to resolve a wall before the next one lands, and a slow creep reads
-	// far better against an animation that is not actually a walk cycle.
-	float freeAimMoveSpeed = 0.035f;
 
-	// Walk during free aim by TRANSLATING the player directly - a slow, collision-resolved noclip
-	// rather than an attempt to make the game move them.
-	//
-	// Independent of moveInFreeAim above: this needs neither the code patch nor the game's own
-	// movement path, so the two approaches can be judged separately. See FreeAimTranslateTick for
-	// what it inherits from being a position write - no animation, no slopes, and collision only
-	// as far as the physics resolves interpenetration after the fact.
-	bool freeAimTranslate = false;
 
-	// Turn the character to face the camera while moving in free aim, so they travel where you are
-	// pointing rather than the way they happened to be facing when the aim latched.
-	//
-	// OFF: it does not work. Writing the entity matrix does not redirect the latched movement -
-	// most likely the game rewrites the orientation from its own animation state after we do, the
-	// same way it owns velocity. Kept because the addresses are correct and useful, and because
-	// knowing this route fails is worth as much as the route itself.
-	bool freeAimFaceCamera = false;
 
 	// Consecutive still GAME frames before a stroke counts as over and the stop is allowed to fire.
 	//
@@ -456,13 +435,7 @@ void PadStickStats(u64 *frames, u64 *nonZero, float *peak, bool *modeFlagSet);
 // and it must run every frame - the game rewrites the field. Experimental; see moveInFreeAim.
 void FreeAimMoveTick(VCSInputContext context);
 
-// Walks the player during free aim by adding a step to their world position each frame. Emu thread
-// only. Independent of the code patch above - see freeAimTranslate.
-void FreeAimTranslateTick(VCSInputContext context);
 
-// Turns the character to face the camera while moving in free aim, so the latched movement follows
-// where you point. Emu thread only, every frame - the game rewrites the matrix.
-void FreeAimFaceTick(VCSInputContext context);
 
 // Applies the accumulated mouse movement to the game's camera. Emu thread only, once per frame.
 // Does not touch the camera in the Aiming context - there the mouse belongs to the reticle.

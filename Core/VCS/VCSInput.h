@@ -232,4 +232,8 @@ VCSInputContext GetCurrentContext();
 // Exists for melee, whose lock-on does not register in IsAiming.
 bool LockOnModeActive();
 
+// Whether any of WASD is held. The free-aim brake keys on this: while a movement key is down the
+// latched run is left to carry the player, and releasing them all is what applies the brake.
+bool MovementKeysHeld();
+
 }  // namespace VCS

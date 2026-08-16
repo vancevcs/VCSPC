@@ -117,6 +117,16 @@ static const int kFreeAimPulse = 4;
 static int g_latchTimer = 0;
 static const int kLatchStart = 16;        // ~8 game frames at 60Hz ticks
 static const int kLatchDropSprintAt = 7;  // sprint for the first half, run for the rest
+
+// Forward only, on W.
+//
+// Full WASD works and was built: the stick is camera-relative during the latch window, so holding A
+// latches a run to the left of where you are looking exactly as W latches forwards, and a change of
+// key simply re-runs the latch. It is kept to one key deliberately - every extra direction is
+// another latched heading to get stuck in, and the movement cannot be steered once latched.
+bool MovementKeysHeld() {
+	return IsHostKeyDown(NKCODE_W);
+}
 static VCSInputContext g_prevAppliedContext = VCSInputContext::Unknown;
 
 const char *VCSInputContextName(VCSInputContext context) {
@@ -524,7 +534,7 @@ u32 ApplyMapping(VCSInputContext context) {
 			// If the player is already asking to move, spend a few ticks establishing a running
 			// state before pressing Free Aim, so the game has something worth latching. The pulse
 			// is armed when that finishes rather than now.
-			if (CameraSettings().moveInFreeAim && IsHostKeyDown(NKCODE_W)) {
+			if (CameraSettings().moveInFreeAim && MovementKeysHeld()) {
 				g_latchTimer = kLatchStart;
 				g_freeAimTimer = 0;
 			} else {

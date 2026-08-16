@@ -125,20 +125,6 @@ enum class VCSAddr {
 	// speed. Based on PlayerBase, because the ped is heap-allocated and moves between runs.
 	PedVelX,
 	PedVelY,
-	PedPosX,
-	PedPosY,
-
-	// The ped's orientation, from the same matrix the position sits in. Right vector at +0x00,
-	// forward at +0x10, up at +0x20, position at +0x30 - observed as right=(0,-1,0),
-	// forward=(1,0,0), up=(0,0,1) with the player facing world +X.
-	//
-	// Written to turn the character toward the camera while moving in free aim: the game latches a
-	// movement direction on entry and never revisits it, so the body carries on the way it was
-	// pointed while only the arm tracks the aim. Turning the body turns the movement with it.
-	PedRightX,
-	PedRightY,
-	PedFwdX,
-	PedFwdY,
 
 	// CODE, not data: the branch that makes aiming and moving mutually exclusive.
 	//
@@ -259,12 +245,6 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// World position, from the entity matrix. Unlike velocity, nothing recomputes this from the
 	// movement state - so a small step added each frame accumulates instead of being wiped, which
 	// is what makes translating the player directly a viable way to move during free aim.
-	{ VCSAddr::PedPosX,       "PedPosX",       VCSAddrType::Float, 0x30,          VCSAddr::PlayerBase,  "World X. Matrix position at PlayerBase+0x30" },
-	{ VCSAddr::PedPosY,       "PedPosY",       VCSAddrType::Float, 0x34,          VCSAddr::PlayerBase,  "World Y. Pairs with PedPosX" },
-	{ VCSAddr::PedRightX,     "PedRightX",     VCSAddrType::Float, 0x00,          VCSAddr::PlayerBase,  "Entity matrix, right vector X" },
-	{ VCSAddr::PedRightY,     "PedRightY",     VCSAddrType::Float, 0x04,          VCSAddr::PlayerBase,  "Entity matrix, right vector Y" },
-	{ VCSAddr::PedFwdX,       "PedFwdX",       VCSAddrType::Float, 0x10,          VCSAddr::PlayerBase,  "Entity matrix, forward vector X" },
-	{ VCSAddr::PedFwdY,       "PedFwdY",       VCSAddrType::Float, 0x14,          VCSAddr::PlayerBase,  "Entity matrix, forward vector Y" },
 	// `b 0x0894b890` (0x1000000a), reached after the aim call at 0x0894b85c and jumping over the
 	// movement call at 0x0894b888. Found by breakpointing all four call sites of the movement
 	// applier and diffing: 0x0894b888 ran on 100% of walking frames and 24% of aiming ones.

@@ -1077,111 +1077,7 @@ void CameraTick(VCSInputContext context) {
 
 }
 
-// Walk the player during free aim, by writing the ped's velocity directly.
-//
-// EXPERIMENTAL, and off by default. The PSP has one analog axis, so free aim genuinely cannot both
-// place the crosshair and steer - the stick is the crosshair, and the d-pad is inert there
-// (confirmed in play with the arrow keys). The game therefore exposes no input channel for
-// movement while free-aiming, which makes this the only route that does not involve patching the
-// game's own decision.
-//
-// PedVelX/Y were found by diffing the ped struct between walking and free-aiming with the stick
-// deflected in both cases: they are alive in the first and dead in the second, and nothing further
-// upstream is. The game rewrites them every frame, so like CameraYaw this has to be re-asserted on
-// every tick or it is wiped - a one-shot write from the WebSocket debugger is erased before the
-// game reads it, which is why this could only be settled by building it.
-//
-// The direction is camera-relative, which is what a mouse-look game wants: W goes where you are
-// looking. Sign conventions here are a first guess and may need swapping.
-// Walk during free aim by TRANSLATING the player, rather than by asking the game to move them.
-//
-// Velocity was tried first and cannot work: the ped movement update zeroes it at the start of
-// every frame and recomputes it from the movement intent, which free aim is what suppresses. So a
-// written velocity is wiped before anything reads it - measured, with the game verifiably running.
-//
-// Position has no such owner. Nothing recomputes it from the movement state, so a small step added
-// each frame simply accumulates. It is closer to a noclip than to walking, and it inherits that
-// approach's weaknesses honestly:
-//
-//   - No animation. The character slides in whatever pose free aim holds them in.
-//   - Collision is whatever the game's physics does about finding the player inside geometry
-//     AFTER the fact. It resolves interpenetration, so walls may well push back - but this does
-//     not sweep, so a fast enough step could pass through something thin.
-//   - Height is not touched, so slopes and stairs are not followed.
-//
-// Deliberately independent of the MoveGateBranch patch: this does not need the game's movement
-// path to run at all, so the two can be judged separately.
-void FreeAimTranslateTick(VCSInputContext context) {
-	if (!g_settings.freeAimTranslate || !FreeAimActive(context)) {
-		return;
-	}
-	if (!IsAddrSet(VCSAddr::PedPosX) || !IsAddrSet(VCSAddr::CameraYaw)) {
-		return;
-	}
 
-	// Forward only, on W. Strafing was tried first and is not worth the complication: this is a
-	// translation, not a walk, so every extra direction is another way to slide somewhere the
-	// animation and the collision were not expecting.
-	if (!IsHostKeyDown(NKCODE_W)) {
-		return;   // don't touch the position while the player isn't asking to move
-	}
-
-	const std::optional<float> yaw = ReadAddrFloat(VCSAddr::CameraYaw);
-	const std::optional<float> px = ReadAddrFloat(VCSAddr::PedPosX);
-	const std::optional<float> py = ReadAddrFloat(VCSAddr::PedPosY);
-	if (!yaw || !px || !py) {
-		return;
-	}
-
-	// Heading is CameraYaw - PI. The docs give CameraYaw as the matrix yaw plus PI/2, so undoing
-	// that alone should have been right - it was not, and it showed up as A walking the player
-	// forwards while W did nothing useful. A quarter turn more lines it up. Measured, not derived:
-	// whatever the extra offset means, the game's convention is not the one the note implies.
-	const float h = *yaw - 3.14159265f;
-	const float step = g_settings.freeAimMoveSpeed;
-
-	WriteAddrFloat(VCSAddr::PedPosX, *px + std::cos(h) * step);
-	WriteAddrFloat(VCSAddr::PedPosY, *py + std::sin(h) * step);
-}
-
-// Turn the character to face where the camera is pointing, while moving in free aim.
-//
-// Free aim latches a movement direction when it engages and never revisits it, so the body keeps
-// travelling the way it was pointed while only the arm tracks the aim - "he only goes in one
-// direction but stretches his hand around". Turning the body turns the movement with it, because
-// the latched motion is along the ped's own forward.
-//
-// Only while actually moving. Standing still in free aim should leave the aiming pose alone; the
-// arm already tracks the camera perfectly well on its own.
-void FreeAimFaceTick(VCSInputContext context) {
-	if (!g_settings.freeAimFaceCamera || !g_settings.moveInFreeAim) {
-		return;
-	}
-	if (!FreeAimActive(context) || !IsHostKeyDown(NKCODE_W)) {
-		return;
-	}
-	if (!IsAddrSet(VCSAddr::PedFwdX) || !IsAddrSet(VCSAddr::CameraYaw)) {
-		return;
-	}
-
-	const std::optional<float> yaw = ReadAddrFloat(VCSAddr::CameraYaw);
-	if (!yaw) {
-		return;
-	}
-
-	// Same heading convention the translation path had to be corrected to - CameraYaw - PI, found
-	// by trying it rather than derived, since the documented "matrix yaw + PI/2" was a quarter turn
-	// out. Observed matrix with the player facing world +X: forward (1,0,0), right (0,-1,0), which
-	// fixes the right vector as (sin, -cos) for a forward of (cos, sin).
-	const float h = *yaw - 3.14159265f;
-	const float c = std::cos(h);
-	const float s = std::sin(h);
-
-	WriteAddrFloat(VCSAddr::PedFwdX, c);
-	WriteAddrFloat(VCSAddr::PedFwdY, s);
-	WriteAddrFloat(VCSAddr::PedRightX, s);
-	WriteAddrFloat(VCSAddr::PedRightY, -c);
-}
 
 void FreeAimMoveTick(VCSInputContext context) {
 	// Patch the branch that makes aiming and moving mutually exclusive.
@@ -1220,7 +1116,7 @@ void FreeAimMoveTick(VCSInputContext context) {
 	//
 	// Only while free-aiming, so ordinary play is never running patched code.
 	const bool want = g_settings.moveInFreeAim && FreeAimActive(context) &&
-	                  !IsHostKeyDown(NKCODE_W);
+	                  !MovementKeysHeld();
 	if (want == applied || !IsAddrSet(VCSAddr::MoveGateBranch)) {
 		return;
 	}
