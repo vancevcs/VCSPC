@@ -127,6 +127,9 @@ static const int kLatchDropSprintAt = 7;  // sprint for the first half, run for 
 bool MovementKeysHeld() {
 	return IsHostKeyDown(NKCODE_W);
 }
+
+// Defined further down, next to the explanation of why a scope changes the answer.
+static bool CameraAimActive(VCSInputContext context);
 static VCSInputContext g_prevAppliedContext = VCSInputContext::Unknown;
 
 const char *VCSInputContextName(VCSInputContext context) {
@@ -658,7 +661,7 @@ void ApplyAnalog(VCSInputContext context) {
 			const VCSCameraSettings &s = CameraSettings();
 			AimDeflectionFromMouse(dx, dy, s.aimSensitivity, s.aimInvertY, &x, &y);
 		}
-	} else if (CameraSettings().mouseLookInFreeAim && FreeAimActive(context)) {
+	} else if (CameraAimActive(context)) {
 		// Free aim with the camera driven directly: the stick must stay CENTRED. It is the game's
 		// aim axis here, so letting WASD onto it would sweep the crosshair sideways while the mouse
 		// was also moving it - two things aiming at once. Movement is not lost by this; it comes
@@ -800,6 +803,33 @@ void GetAppliedAimStick(float *x, float *y) {
 	*y = g_aimStickY;
 }
 
+// Sniper and RPG - the manually-aimed, scoped weapons. Weapon camera modes 7 and 8, measured.
+bool ScopedWeaponActive() {
+	const std::optional<u32> mode = ReadAddrU32(VCSAddr::WeaponCamMode);
+	return mode && (*mode == 7 || *mode == 8);
+}
+
+// Whether the mouse should steer the CAMERA rather than the stick.
+//
+// For scoped weapons this is not just better, it is correct. Looking down a scope means the camera
+// direction IS the firing direction - there is no separate ped aim state to desynchronise from, so
+// writing CameraYaw moves the shot as well as the view. Confirmed in play: sniper and RPG aim
+// beautifully this way.
+//
+// That is exactly why it FAILS for everything else. In third person the crosshair is drawn from the
+// camera while the shot comes from the ped, and steering only the camera splits them - it looks
+// right and misses. Same write, opposite outcome, decided entirely by whether the weapon has a
+// scope. See the disproven note on mouseLookInFreeAim.
+static bool CameraAimActive(VCSInputContext context) {
+	if (!FreeAimActive(context)) {
+		return false;
+	}
+	if (CameraSettings().mouseLookInFreeAim) {
+		return true;   // disproven for general use, kept switchable
+	}
+	return CameraSettings().aimScopedCamera && ScopedWeaponActive();
+}
+
 bool FreeAimActive(VCSInputContext context) {
 	if (context != VCSInputContext::Aiming) {
 		return false;
@@ -836,7 +866,7 @@ bool ReticleActive(VCSInputContext context) {
 	// through the game's integrator, and no amount of inverting that produces the same feel as
 	// writing the angle. Mouse look is smooth because it is a position control with nothing in
 	// between. This makes free aim one too.
-	if (CameraSettings().mouseLookInFreeAim) {
+	if (CameraAimActive(context)) {
 		return false;
 	}
 	// Any other aim mechanism takes precedence, and the left-stick reticle stands down. Two of

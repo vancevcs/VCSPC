@@ -236,4 +236,8 @@ bool LockOnModeActive();
 // latched run is left to carry the player, and releasing them all is what applies the brake.
 bool MovementKeysHeld();
 
+// Whether a scoped weapon (sniper, RPG - weapon camera modes 7 and 8) is equipped. Those aim by
+// moving the camera, because down a scope the camera direction is the firing direction.
+bool ScopedWeaponActive();
+
 }  // namespace VCS

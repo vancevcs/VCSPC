@@ -190,7 +190,23 @@ struct VCSCameraSettings {
 	//
 	// They aimed correctly before the model existed, which is the evidence that matters. This puts
 	// them back on that mapping and leaves everything else on the model.
-	bool aimScopedLinear = true;
+	bool aimScopedLinear = false;
+
+	// Aim scoped weapons by moving the CAMERA - the same direct write that makes mouse look smooth.
+	//
+	// For a scope this is not merely nicer, it is correct: looking down the sights means the camera
+	// direction IS the firing direction, so there is no separate ped aim state to desynchronise from.
+	// Sniper and RPG aim beautifully this way, confirmed in play.
+	//
+	// Which is exactly why the same write FAILS for every other weapon - in third person the
+	// crosshair is drawn from the camera while the shot comes from the ped, so steering the camera
+	// alone splits them. Same mechanism, opposite result, decided entirely by whether the weapon has
+	// a scope. See mouseLookInFreeAim for the disproof.
+	//
+	// This supersedes aimScopedLinear, which gave those weapons a plain proportional stick mapping.
+	// That was correct as far as it went - they were already linear, so the model's sqrt was
+	// amplifying them - but the stick was never the best channel available for them.
+	bool aimScopedCamera = true;
 
 	// Deflection per count of mouse movement for the above. Not radians - this path does not model
 	// the game's response, it just pushes the stick in proportion, so the units are the old ones.

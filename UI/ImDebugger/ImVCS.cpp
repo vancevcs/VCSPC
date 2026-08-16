@@ -525,7 +525,18 @@ void ImVCSWindow::DrawCamera() {
 		"Input tab: it reads 'reticle/mouse' only when free aim is actually engaged.");
 	ImGui::Spacing();
 
-	ImGui::Checkbox("Aim by moving the camera (DISPROVEN - see tooltip)", &s.mouseLookInFreeAim);
+	ImGui::Checkbox("Camera aim for sniper / RPG", &s.aimScopedCamera);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Scoped weapons aim by moving the camera directly - the same smooth path as mouse "
+			"look, and for a scope it is not just nicer but correct: down the sights, the camera "
+			"direction IS the firing direction.\n\n"
+			"Which is exactly why the same write fails for every other weapon. In third person "
+			"the crosshair is drawn from the camera while the shot comes from the ped, so "
+			"steering the camera alone splits them - it looks right and misses.\n\n"
+			"Uses the Sensitivity slider at the top, not Aim sensitivity.");
+	}
+	ImGui::Checkbox("Camera aim for ALL weapons (DISPROVEN - see tooltip)", &s.mouseLookInFreeAim);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
 			"Leave this OFF.\n\n"
