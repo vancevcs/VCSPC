@@ -1,6 +1,9 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <Filter Include="VCS">
+      <UniqueIdentifier>{9c2b7a11-4d3e-4a6f-8e21-5f0b7c3d1a44}</UniqueIdentifier>
+    </Filter>
     <Filter Include="ELF">
       <UniqueIdentifier>{f34f69bc-5d7c-44d1-90b6-aa20c435b546}</UniqueIdentifier>
     </Filter>
@@ -230,6 +233,21 @@
     </ClCompile>
     <ClCompile Include="HLE\sceCtrl.cpp">
       <Filter>HLE\Libraries</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSCamera.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSGame.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSInput.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSMemory.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSState.cpp">
+      <Filter>VCS</Filter>
     </ClCompile>
     <ClCompile Include="HLE\sceDisplay.cpp">
       <Filter>HLE\Libraries</Filter>
@@ -1523,6 +1541,24 @@
     </ClInclude>
     <ClInclude Include="HLE\sceCtrl.h">
       <Filter>HLE\Libraries</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSCamera.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSAddresses.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSGame.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSInput.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSMemory.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSState.h">
+      <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="HLE\sceDisplay.h">
       <Filter>HLE\Libraries</Filter>

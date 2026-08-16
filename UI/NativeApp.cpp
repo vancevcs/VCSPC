@@ -100,6 +100,8 @@
 #include "Common/UI/PopupScreens.h"
 #include "Core/CmdLine.h"
 #include "Core/ControlMapper.h"
+#include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSInput.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/Core.h"
@@ -1609,7 +1611,13 @@ bool NativeKey(const KeyInput &key) {
 	}
 
 	if (passKeyThrough) {
-		g_controlMapper.Key(key);
+		// Fork-specific: GTA VCS context-aware mapping. Claims a key only when the VCS layer is
+		// active AND has resolved a context AND actually maps that key, in which case the normal
+		// mapper must not also see it, or a key bound in both places would fire twice. Returns
+		// false in every other case, including for every other game.
+		if (!VCS::HandleHostKey(key)) {
+			g_controlMapper.Key(key);
+		}
 	}
 
 	// Ignore volume keys and stuff here - though we do send them through to the control mapper, so they can be mapped to PSP buttons.
@@ -1766,6 +1774,15 @@ static void SendMouseDeltaAxis() {
 }
 
 void NativeMouseDelta(float dx, float dy) {
+	// Fork-specific: GTA VCS mouse look. Claims the movement when it's actually driving the
+	// camera, so PPSSPP's own mouse-to-analog handling doesn't fight it. Returns false for every
+	// other game. Skipped entirely while the ImGui debugger wants the mouse, so dragging its
+	// windows around doesn't spin the camera.
+	const bool imguiWantsMouse = g_Config.bShowImDebugger && imguiInited_ && ImGui::GetIO().WantCaptureMouse;
+	if (!imguiWantsMouse && VCS::HandleMouseDelta(dx, dy)) {
+		return;
+	}
+
 	if (!g_Config.bMouseControl)
 		return;
 

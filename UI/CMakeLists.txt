@@ -21,6 +21,8 @@ list(APPEND UISource
 	ImDebugger/ImStructViewer.h
 	ImDebugger/ImJitViewer.cpp
 	ImDebugger/ImJitViewer.h
+	ImDebugger/ImVCS.cpp
+	ImDebugger/ImVCS.h
 	DiscordIntegration.cpp
 	NativeApp.cpp
 	AdhocServerScreen.h

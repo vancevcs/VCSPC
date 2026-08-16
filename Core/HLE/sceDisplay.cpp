@@ -55,6 +55,7 @@
 #include "Core/Util/PPGeDraw.h"
 #include "Core/RetroAchievements.h"
 #include "Core/ControlMapper.h"
+#include "Core/VCS/VCSGame.h"
 
 #include "GPU/GPU.h"
 #include "GPU/GPUState.h"
@@ -545,6 +546,12 @@ void hleEnterVblank(u64 userdata, int cyclesLate) {
 
 	// We use the emulation timebase here, for auto movements to be smooth as seen from the game.
 	g_controlMapper.UpdateAutoMovements(CoreTiming::GetGlobalTimeUs() / 1000000.0);
+
+	// Fork-specific: GTA VCS input overhaul. Returns immediately unless active, which requires
+	// both the VCSInputOverhaul compat flag and a matching disc ID. This is the per-frame seam
+	// for the whole module - it runs once per vblank, on the emu thread, which is where PSP
+	// memory is safe to read.
+	VCS::Tick();
 
 	numVBlanksSinceFlip++;
 

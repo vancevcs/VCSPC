@@ -606,6 +606,11 @@
     <ClCompile Include="HLE\sceCcc.cpp" />
     <ClCompile Include="HLE\sceChnnlsv.cpp" />
     <ClCompile Include="HLE\sceCtrl.cpp" />
+    <ClCompile Include="VCS\VCSCamera.cpp" />
+    <ClCompile Include="VCS\VCSGame.cpp" />
+    <ClCompile Include="VCS\VCSInput.cpp" />
+    <ClCompile Include="VCS\VCSMemory.cpp" />
+    <ClCompile Include="VCS\VCSState.cpp" />
     <ClCompile Include="HLE\sceDeflt.cpp" />
     <ClCompile Include="HLE\sceDisplay.cpp" />
     <ClCompile Include="HLE\sceDmac.cpp" />
@@ -1108,6 +1113,12 @@
     <ClInclude Include="HLE\sceAudioRouting.h" />
     <ClInclude Include="HLE\sceCcc.h" />
     <ClInclude Include="HLE\sceCtrl.h" />
+    <ClInclude Include="VCS\VCSCamera.h" />
+    <ClInclude Include="VCS\VCSAddresses.h" />
+    <ClInclude Include="VCS\VCSGame.h" />
+    <ClInclude Include="VCS\VCSInput.h" />
+    <ClInclude Include="VCS\VCSMemory.h" />
+    <ClInclude Include="VCS\VCSState.h" />
     <ClInclude Include="HLE\sceChnnlsv.h" />
     <ClInclude Include="HLE\sceDeflt.h" />
     <ClInclude Include="HLE\sceDisplay.h" />

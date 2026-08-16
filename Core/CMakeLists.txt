@@ -426,6 +426,20 @@ add_library(Core STATIC
 	HLE/sceChnnlsv.h
 	HLE/sceCtrl.cpp
 	HLE/sceCtrl.h
+
+	# GTA: Vice City Stories input overhaul (fork-specific)
+	VCS/VCSAddresses.h
+	VCS/VCSCamera.cpp
+	VCS/VCSCamera.h
+	VCS/VCSGame.cpp
+	VCS/VCSGame.h
+	VCS/VCSInput.cpp
+	VCS/VCSInput.h
+	VCS/VCSMemory.cpp
+	VCS/VCSMemory.h
+	VCS/VCSState.cpp
+	VCS/VCSState.h
+
 	HLE/sceDeflt.cpp
 	HLE/sceDeflt.h
 	HLE/sceDisplay.cpp

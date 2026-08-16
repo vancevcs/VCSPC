@@ -707,6 +707,11 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceChnnlsv.cpp \
   $(SRC)/Core/HLE/sceCcc.cpp \
   $(SRC)/Core/HLE/sceCtrl.cpp.arm \
+  $(SRC)/Core/VCS/VCSCamera.cpp.arm \
+  $(SRC)/Core/VCS/VCSGame.cpp.arm \
+  $(SRC)/Core/VCS/VCSInput.cpp.arm \
+  $(SRC)/Core/VCS/VCSMemory.cpp.arm \
+  $(SRC)/Core/VCS/VCSState.cpp.arm \
   $(SRC)/Core/HLE/sceDeflt.cpp \
   $(SRC)/Core/HLE/sceDisplay.cpp \
   $(SRC)/Core/HLE/sceDmac.cpp \
@@ -934,6 +939,7 @@ LOCAL_SRC_FILES := \
   $(SRC)/UI/ImDebugger/ImDisasmView.cpp \
   $(SRC)/UI/ImDebugger/ImMemView.cpp \
   $(SRC)/UI/ImDebugger/ImJitViewer.cpp \
+  $(SRC)/UI/ImDebugger/ImVCS.cpp \
   $(SRC)/UI/ImDebugger/ImStructViewer.cpp \
   $(SRC)/UI/AudioCommon.cpp \
   $(SRC)/UI/BackgroundAudio.cpp \

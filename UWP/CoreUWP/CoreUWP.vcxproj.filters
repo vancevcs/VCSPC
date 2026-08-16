@@ -92,6 +92,11 @@
     <ClCompile Include="..\..\Core\HLE\sceCcc.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceChnnlsv.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceCtrl.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSCamera.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSGame.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSInput.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSMemory.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSState.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceDeflt.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceDisplay.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceDmac.cpp" />
@@ -511,6 +516,12 @@
     <ClInclude Include="..\..\Core\HLE\sceCcc.h" />
     <ClInclude Include="..\..\Core\HLE\sceChnnlsv.h" />
     <ClInclude Include="..\..\Core\HLE\sceCtrl.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSCamera.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSAddresses.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSGame.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSInput.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSMemory.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSState.h" />
     <ClInclude Include="..\..\Core\HLE\sceDeflt.h" />
     <ClInclude Include="..\..\Core\HLE\sceDisplay.h" />
     <ClInclude Include="..\..\Core\HLE\sceDmac.h" />

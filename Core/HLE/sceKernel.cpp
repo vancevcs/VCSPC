@@ -94,6 +94,7 @@
 #include "sceOpenPSID.h"
 #include "sceHttp.h"
 #include "Core/Util/PPGeDraw.h"
+#include "Core/VCS/VCSGame.h"
 
 /*
 17: [MIPS32 R4K 00000000 ]: Loader: Type: 1 Vaddr: 00000000 Filesz: 2856816 Memsz: 2856816 
@@ -172,6 +173,10 @@ void __KernelInit()
 	// "Internal" PSP libraries
 	__PPGeInit();
 
+	// Fork-specific: GTA VCS input overhaul. No-op unless the VCSInputOverhaul compat flag is
+	// set and the disc ID matches. Must come after __CtrlInit, since it drives sceCtrl.
+	VCS::Init();
+
 	kernelRunning = true;
 	g_GPOBits = 0;
 	INFO_LOG(Log::sceKernel, "Kernel initialized.");
@@ -207,6 +212,9 @@ void __KernelShutdown()
 	__MpegShutdown();
 	__PsmfShutdown();
 	__PPGeShutdown();
+
+	// Before __CtrlShutdown, so held buttons get released while sceCtrl is still alive.
+	VCS::Shutdown();
 
 	__CtrlShutdown();
 	__UtilityShutdown();

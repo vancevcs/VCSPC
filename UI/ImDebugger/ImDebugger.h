@@ -24,6 +24,7 @@
 #include "UI/ImDebugger/ImGe.h"
 #include "UI/ImDebugger/ImConsole.h"
 #include "UI/ImDebugger/ImCommand.h"
+#include "UI/ImDebugger/ImVCS.h"
 
 // This is the main state container of the whole Dear ImGUI-based in-game cross-platform debugger.
 //
@@ -93,6 +94,7 @@ struct ImConfig {
 	bool audioOutOpen;
 	bool paramSFOOpen;
 	bool jitViewerOpen;
+	bool vcsOpen;
 
 	// HLE explorer settings
 	// bool filterByUsed = true;
@@ -203,6 +205,7 @@ private:
 	ImConsole luaConsole_;
 	ImLogWindow logWindow_;
 	ImJitViewerWindow jitViewer_;
+	ImVCSWindow vcsWindow_;
 
 	ImSnapshotState newSnapshot_;
 	ImSnapshotState snapshot_;
