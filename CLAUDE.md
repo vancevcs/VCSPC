@@ -1092,8 +1092,24 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
 - **Vertical look while driving.** Off behind `pitchInVehicle`; see the pitch section above.
   Unresolved, not abandoned.
 
-- **`Menu` context never triggers.** Needs `GameState`. Until then a paused game gets gameplay
-  bindings.
+- **`Menu` context never triggers.** Needs `GameState`, which was hunted for and NOT found: a 192KB
+  sweep of the globals gave 1249 candidates from two rounds, and a proper correlation run over the
+  most promising cluster (around `IsFreeAiming`, where the boolean-shaped ones landed) ruled it out.
+  Until it is found, a paused game gets gameplay bindings.
+
+  **Do not "solve" this by watching `FrameCounter` stall.** It was tried, shipped, and broke the
+  controls. The game's logic also stops during loading screens, cutscenes and frame-rate hitches,
+  so "logic stopped" is not a synonym for "menu open" - it is a superset that catches the game
+  mid-play. Reverted in `03c1f3cfe0`.
+
+  The idea was seductive because every script written to hunt `GameState` used exactly that signal
+  to label its own samples, and it worked perfectly *there* - a capture only has to be right on
+  average, whereas a control scheme has to be right on every frame. **Elegance was doing the
+  persuading, and elegance is not evidence.** The caveat was even written into the commit message
+  as "harmless" rather than treated as the reason not to do it.
+
+  Working around it is cheap anyway: Enter and Backspace are bound in the OnFoot context alongside
+  Shift and left-click, so menus have working keys without any detection at all.
 - **Most bindings are unverified guesses.** Only the ones marked "verified" in
   `kVCSKeyMappings` were checked against the real game. Aim sat on the wrong trigger (L instead
   of R) for a long time and silently did nothing - assume crouch, horn, radio and camera are
