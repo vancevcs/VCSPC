@@ -30,6 +30,37 @@
 
 namespace VCS {
 
+// How the game flies/drives this vehicle, which is what decides the bindings.
+//
+// The names are the game's own - it keeps a type-name table at 0x08bafc6c reading
+// "car boat jetski train heli plane bike ferry bmx quad". Only the distinctions the control
+// scheme actually cares about are modelled here: a jetski steers like a boat and a bmx like a
+// bike, so they collapse. Heli and plane stay separate only because a plane may yet turn out
+// to need something a helicopter doesn't; today they get identical bindings.
+enum class VehicleClass {
+	Unknown,
+	Car,
+	Bike,
+	Boat,
+	Heli,
+	Plane,
+};
+
+const char *VehicleClassName(VehicleClass klass);
+
+// Model id -> class, from the game's own model-name table (stride 0x1c, entry 213 is
+// "maverick") cross-checked against gtamods' VCS vehicle list. Anything unrecognised is
+// Unknown, which the input layer treats as a car - the safe default, since that is what the
+// single in-vehicle binding set has always assumed.
+VehicleClass VehicleClassForModel(u32 model);
+
+// Whether this class flies, i.e. whether the aircraft bindings apply.
+bool VehicleClassIsAircraft(VehicleClass klass);
+
+// Whether the selected weapon is fists or melee - i.e. the player is holding nothing that shoots,
+// so there is no free aim to hand the mouse. Takes the SLOT, not the weapon id.
+bool WeaponSlotIsMelee(u32 slot);
+
 struct VCSState {
 	// Mutually exclusive in practice, but kept separate because early on we may be able to
 	// determine one and not the other.
@@ -41,7 +72,12 @@ struct VCSState {
 	// Free-aiming (sniper / RPG). Stays false when locked on, so the two are independent and
 	// together give three states: neither, locked on, free aim.
 	std::optional<bool> isFreeAiming;
+	// The selected weapon SLOT (0-9), not a weapon id - see WeaponIndex in VCSAddresses.h. Slots
+	// are ordered by category, which is what makes the melee test below possible.
 	std::optional<u32> weaponIndex;
+	// The weapon id sitting in that slot, read out of the ped's weapon array. The slot alone does
+	// not say what the weapon is, and the aim layer has to tell melee from a gun.
+	std::optional<u32> weaponType;
 
 	// Radians. Sign convention is whatever the game uses; task 2 will pin it down once
 	// CameraYaw is known.
@@ -53,6 +89,14 @@ struct VCSState {
 	// Raw pointer values, useful in the debugger for chasing struct offsets.
 	std::optional<u32> playerBase;
 	std::optional<u32> playerVehicle;
+
+	// Non-zero while the player is committed to entering a vehicle, before playerVehicle is set.
+	// See PedEnteringVehicle in VCSAddresses.h - this is the window pitch must be normalised in.
+	std::optional<u32> enteringVehicle;
+
+	// The occupied vehicle's model id, and what that model is. Both stay unset/Unknown on foot.
+	std::optional<u32> vehicleModel;
+	VehicleClass vehicleClass = VehicleClass::Unknown;
 
 	// True if we managed to read anything at all this frame. False with an empty table.
 	bool anyValid = false;

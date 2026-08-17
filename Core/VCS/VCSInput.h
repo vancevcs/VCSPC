@@ -52,6 +52,13 @@ enum class VCSInputContext {
 	OnFoot,
 	InVehicle,
 
+	// Helicopters and planes. Split from InVehicle because VCS genuinely controls them
+	// differently - L/R yaw instead of glance/handbrake, and the nub is pitch and roll rather
+	// than steering - and because the car bindings cannot fly at all: they drive the stick's X
+	// axis only, and pitch is what makes an aircraft move forward. Entered on the vehicle's
+	// model id, see VehicleClassForModel.
+	InAircraft,
+
 	// Weapon aiming. Entered by HOLDING the aim key, not by the game's own aim flag - see
 	// ResolveContext for why. This context is about BINDINGS (Q/E cycle targets rather than
 	// weapons, the aim trigger stays held); it does NOT by itself mean the mouse becomes a

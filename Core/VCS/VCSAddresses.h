@@ -61,6 +61,14 @@ enum class VCSAddr {
 	// --- Vehicle state ---
 	PlayerVehicle,     // Pointer to the vehicle the player currently occupies, 0 when on foot.
 
+	// The vehicle the player is COMMITTED TO ENTERING, latched while still on foot. See the table.
+	PedEnteringVehicle,
+
+	// Which vehicle it is. VCS controls a helicopter completely differently from a car - L/R are
+	// yaw, the nub is pitch and roll - so one in-vehicle binding set cannot be right for both,
+	// and this is what tells them apart. See VehicleClassForModel in VCSState.
+	VehicleModel,
+
 	// --- Weapons ---
 	WeaponIndex,       // Currently selected weapon slot/id.
 	IsAiming,          // Nonzero while LOCKED ON to a target.
@@ -136,6 +144,7 @@ enum class VCSAddr {
 
 	LookSensitivity,   // The game's own look sensitivity setting. Squared, in the mode 11 response.
 	AimAxisScale,      // CPad+0xd0. The game scales the axis by this in weapon camera modes.
+	AimAxisScaleY,     // CPad+0xd4. The Y counterpart, written alongside it by opcode 03E9.
 	WeaponCamMode,     // CCamera+0x7b8. Decides whether AimAxisScale applies at all.
 
 	Count,
@@ -169,14 +178,53 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	{ VCSAddr::PlayerHealth,  "PlayerHealth",  VCSAddrType::Float, 0x4e4,         VCSAddr::PlayerBase,  "Confirmed: HUD bar scales exactly with this (25.0 -> quarter bar)" },
 	{ VCSAddr::PlayerOnFoot,  "PlayerOnFoot",  VCSAddrType::U32,   kUnsetAddress, kNoBase,              "Not needed - VCSState derives it from PlayerVehicle == 0" },
 	{ VCSAddr::PlayerVehicle, "PlayerVehicle", VCSAddrType::U32,   0x08bb4064,    kNoBase,              "0 on foot, pointer to the occupied vehicle while driving" },
-	// Now blocking a real bug, not just the direct-weapon-selection feature. Melee lock-on does not
+	// The entry-in-progress signal, and the answer to "when does pitch stop belonging to the on-foot
+	// camera". Holds the target vehicle's pointer from the moment entry commits - after the door is
+	// opened, when walking away can no longer cancel it - until PlayerVehicle catches up.
+	//
+	// Found by sampling the ped struct 10x/second through a real entry and diffing. Verified
+	// separately: 0 while on foot, still 0 with a car spawned right alongside (so it is "entering
+	// this vehicle", NOT "a vehicle is near"), set 0.45s after pressing enter while PlayerVehicle was
+	// still 0, and equal to PlayerVehicle once seated - about 1.65s of advance warning.
+	//
+	// Why it matters: the game does not reset CameraPitch when you get in, so whatever the on-foot
+	// camera was left at carries into the vehicle context and becomes the anchor, hence the ceiling.
+	// This is the window in which to normalise it.
+	{ VCSAddr::PedEnteringVehicle, "PedEnteringVehicle", VCSAddrType::U32, 0x480, VCSAddr::PlayerBase, "Target vehicle while entering, before PlayerVehicle is set. 0 otherwise" },
+	// Based on PlayerVehicle, so on foot it resolves to 0x56 and reads as unset rather than as
+	// garbage - which is exactly the behaviour a based entry is for.
+	//
+	// Found by entering a car over the WebSocket debugger and scanning its struct for a u16 in
+	// the vehicle id range: +0x56 read 209 (patriot). Confirmed by scanning RAM for entities
+	// carrying a valid id at that offset, which produced the vehicle pool - ~30 objects on a
+	// 0x820 stride, each with a sensible model and a distinct world position. +0x58 holds the
+	// same value; which of the two is the "real" one doesn't matter for reading.
+	{ VCSAddr::VehicleModel,  "VehicleModel",  VCSAddrType::U16,   0x56,          VCSAddr::PlayerVehicle, "Vehicle model id (213 maverick, 251 forklift...). Decides the control scheme" },
+	// This unblocked a real bug, not just the direct-weapon-selection feature. Melee lock-on does not
 	// register in IsAiming (measured: the flag reads 0 while visibly locked on), so the aim layer
-	// concludes free aim and hands the stick to the mouse - which in lock-on is movement, so the
-	// mouse walks the player and WASD goes dead.
+	// concluded free aim and handed the stick to the mouse - which in lock-on is movement, so the
+	// mouse walked the player and WASD went dead. FIXED: FreeAimActive in VCSInput.cpp now stands
+	// down when WeaponSlotIsMelee, confirmed in play - the overlay read slot 1 (melee) and WASD
+	// worked normally while locked on.
 	//
 	// Weapon CAMERA mode cannot separate them: melee-locked-on and pistol-aiming both report 11,
-	// measured. Only the weapon identity can. Cycle weapons and diff the ped struct.
-	{ VCSAddr::WeaponIndex,   "WeaponIndex",   VCSAddrType::U32,   kUnsetAddress, kNoBase,              "TODO: likely a PlayerBase offset. Needed to tell melee from a gun - see the note above" },
+	// measured. Only the weapon identity can.
+	//
+	// FOUND, and from the game's own code rather than by correlation: the script command
+	// 02C0 get_current_char_weapon is dispatched through a table at 0x08b846e0 (8 bytes per
+	// opcode, {member-ptr discriminator, handler}), and its handler at 0x08b2bb88 does exactly
+	//     lb  a0, 0x789(ped)      ; the slot
+	//     slot * 28               ; sll 5 minus sll 2
+	//     addiu a0, a0, 0x574     ; weapon array base
+	//     lw  a0, 4(a0)           ; -> weapon TYPE
+	// so this is a SLOT, not a weapon id, and the id lives in the array it indexes. To tell melee
+	// from a gun read the type: PlayerBase + 0x574 + slot * 28 + 4. Records are 28 bytes,
+	// {?, type, state, ammoInClip, ammoTotal, ?}; slots 0 and 9 read type 0 in a savestate where
+	// 1..8 held 10, 13, 19, 23, 26, 28, 32, 31.
+	//
+	// Declared U8 because VCSAddrType has no signed byte. The game reads it with `lb`, so if it
+	// ever stores -1 for "no weapon" that arrives here as 255 - range-check before indexing.
+	{ VCSAddr::WeaponIndex,   "WeaponIndex",   VCSAddrType::U8,    0x789,         VCSAddr::PlayerBase,  "Current weapon SLOT (0-9), not a weapon id. Type = PlayerBase + 0x574 + slot*28 + 4" },
 	{ VCSAddr::IsAiming,      "IsAiming",      VCSAddrType::U32,   0x08bb32a0,    kNoBase,              "1 while LOCKED ON to a target. Stays 0 during free aim" },
 	{ VCSAddr::IsFreeAiming,  "IsFreeAiming",  VCSAddrType::U32,   0x08bafb54,    kNoBase,              "SUSPECT: tracks sniper aim but likely means cinematic/control-restricted - also 1 in cutscenes. Not used for context" },
 	{ VCSAddr::CameraYaw,     "CameraYaw",     VCSAddrType::Float, 0x08bc7f1c,    kNoBase,              "Radians in [0, 2PI). Writing it rotates the view - this is the mouse-look input" },
@@ -260,6 +308,13 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// 10% of over-cancellation, because the game's response is 1.05^2 stronger than a model without
 	// it - which showed up as the aim snapping back at the end of every movement.
 	{ VCSAddr::AimAxisScale,  "AimAxisScale",  VCSAddrType::Float, 0x08bde6e0,    kNoBase,              "CPad+0xd0. Axis multiplier, applied only in weapon camera modes 45 and 11" },
+	// The pair to AimAxisScale, and the answer to what script opcode 03E9 does. Its handler
+	// (0x089e0b14, found via the command table at 0x08b846e0 - see docs/VCS_ADDRESSES.md) calls
+	// CPad::GetPad(0) twice and stores its two float params to CPad+0xd0 and CPad+0xd4. So 03E9 is
+	// "set aim axis scale x, y". The retail script calls it once, `03E9 2.5 0.5`, setting up a
+	// passenger drive-by - wide horizontally, damped vertically; the CLEO plugin's mouse.txt calls
+	// `03E9 1.4 0.0`, zeroing Y because it supplies Y itself.
+	{ VCSAddr::AimAxisScaleY, "AimAxisScaleY", VCSAddrType::Float, 0x08bde6e4,    kNoBase,              "CPad+0xd4. Y counterpart of AimAxisScale; opcode 03E9 writes both" },
 	{ VCSAddr::WeaponCamMode, "WeaponCamMode", VCSAddrType::U16,   0x08bc85e8,    kNoBase,              "CCamera+0x7b8, PlayerWeaponMode.Mode. AimAxisScale applies only when this is 45 or 11" },
 };
 

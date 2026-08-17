@@ -69,8 +69,9 @@ static float g_aimStickY = 0.0f;
 // written out at each of its three use sites.
 const InputKeyCode kVCSAimKey = NKCODE_EXT_MOUSEBUTTON_2;
 
-// TOGGLES the PSP's lock-on instead of free aim. G because PPSSPP binds nothing to it (checked
-// against Core/KeyMapDefaults.cpp) and neither does the table below, so claiming it costs nothing.
+// TOGGLES the PSP's lock-on instead of free aim. L as of 2026-08-17 (was G); checked free first -
+// nothing in PPSSPP's own defaults binds it and neither does the table below, so claiming it costs
+// nothing.
 //
 // This was CapsLock, held, and it never worked once - reported after living with it for a long
 // time. CapsLock is mapped (Windows/RawInput.cpp maps VK_CAPITAL) and was claimed here with a
@@ -81,8 +82,13 @@ const InputKeyCode kVCSAimKey = NKCODE_EXT_MOUSEBUTTON_2;
 //
 // A toggle rather than a hold because the thing it is for is melee, whose lock-on does not register
 // in IsAiming - and holding a third key alongside the aim button and WASD, for a whole fight, is
-// not a control scheme. Flip it when you switch to fists and flip it back after.
-const InputKeyCode kVCSLockOnKey = NKCODE_G;
+// not a control scheme.
+//
+// It is a manual OVERRIDE now rather than the melee ritual it started as. MeleeEquipped answers the
+// same question automatically, on both the free-aim routing and the automatic entry into it, so
+// fists need no flipping before a fight - reach for this only when the weapon read is wrong or a
+// gun should be aimed under lock-on deliberately.
+const InputKeyCode kVCSLockOnKey = NKCODE_L;
 
 // Set on the input thread by the key above, read on the emu thread by FreeAimActive.
 static std::atomic<bool> g_lockOnMode{false};
@@ -136,6 +142,7 @@ const char *VCSInputContextName(VCSInputContext context) {
 	switch (context) {
 	case VCSInputContext::OnFoot: return "OnFoot";
 	case VCSInputContext::InVehicle: return "InVehicle";
+	case VCSInputContext::InAircraft: return "InAircraft";
 	case VCSInputContext::Aiming: return "Aiming";
 	case VCSInputContext::Menu: return "Menu";
 	case VCSInputContext::Unknown:
@@ -191,6 +198,24 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// claimed key is withheld from PPSSPP's mapper, which is the inverse Escape trap, accepted
 	// deliberately here. Rebind fast-forward in PPSSPP's own controls if you want it back.
 	{ VCSInputContext::OnFoot,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
+
+	// --- vehicle spawner (patched-ISO feature) ---------------------------------------------------
+	//
+	// DBGCARS, the debug spawner the patched ISO enables, wants L HELD plus d-pad left/right. Making
+	// the player hold a modifier for it is horrible, so the chord is synthesised here instead: two
+	// rows for one key OR together in ComputeButtonMask, so each of these presses L and a direction
+	// at once. Tab keeps its own meaning and is no longer part of the trigger.
+	//
+	// F9 duplicates arrow-right on purpose, and this is a limitation of the script rather than a
+	// choice: DBGCARS sets its spawn state (8@ = 1) at the END of both cycle paths, so advancing the
+	// selection IS the spawn. There is no "spawn what is already selected" to bind, so F9 means
+	// "next vehicle, and spawn it".
+	{ VCSInputContext::OnFoot,    NKCODE_F9,                 CTRL_LTRIGGER,  "Spawn next vehicle (with the row below)" },
+	{ VCSInputContext::OnFoot,    NKCODE_F9,                 CTRL_RIGHT,     "Spawn next vehicle" },
+	{ VCSInputContext::OnFoot,    NKCODE_DPAD_RIGHT,         CTRL_LTRIGGER,  "Spawner: next model (with the row below)" },
+	{ VCSInputContext::OnFoot,    NKCODE_DPAD_RIGHT,         CTRL_RIGHT,     "Spawner: next model" },
+	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LTRIGGER,  "Spawner: previous model (with the row below)" },
+	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LEFT,      "Spawner: previous model" },
 	{ VCSInputContext::OnFoot,    NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)" },
 	{ VCSInputContext::OnFoot,    NKCODE_P,                  CTRL_START,     "Pause (Start)" },
 
@@ -201,8 +226,13 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InVehicle, NKCODE_F,                  CTRL_TRIANGLE,  "Exit vehicle" },
 	{ VCSInputContext::InVehicle, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Drive-by fire" },
 	{ VCSInputContext::InVehicle, NKCODE_H,                  CTRL_DOWN,      "Horn (verified)" },
-	{ VCSInputContext::InVehicle, NKCODE_R,                  CTRL_RIGHT,     "Next radio station (verified)" },
-	{ VCSInputContext::InVehicle, NKCODE_T,                  CTRL_LEFT,      "Previous radio station (verified)" },
+	// These two are the radio in an ordinary vehicle - and, verified in play, the FORKS in a
+	// forklift: R raises and T lowers. The game repurposes d-pad left/right there rather than
+	// leaving them on the radio, so no new binding was needed; the keys already did it and
+	// nobody had pressed them in one. The description below is therefore wrong for exactly one
+	// vehicle, which a per-vehicle context could fix and isn't worth adding for a string.
+	{ VCSInputContext::InVehicle, NKCODE_T,                  CTRL_RIGHT,     "Next radio station / raise forks (verified)" },
+	{ VCSInputContext::InVehicle, NKCODE_R,                  CTRL_LEFT,      "Previous radio station / lower forks (verified)" },
 	{ VCSInputContext::InVehicle, NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)" },
 	{ VCSInputContext::InVehicle, NKCODE_P,                  CTRL_START,     "Pause (Start)" },
 	// Claimed but deliberately mapped to nothing. Sprint is meaningless in a car, and leaving
@@ -214,6 +244,45 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 
 	// Q and E in a vehicle are NOT here: they are glances, which on the PSP are L trigger
 	// plus a stick direction, so they need both a button and an axis. See GlanceDirection.
+
+	// --- Helicopters and planes ---
+	//
+	// A separate context because the car bindings physically cannot fly. In a car W/S are
+	// buttons and A/D are the stick's X axis, so nothing anywhere drives the stick's Y axis -
+	// and in an aircraft Y is PITCH, which is the only thing that makes it move forward. The
+	// game's own scheme (Controls screen, and the manual): Cross climbs, Square descends, L and
+	// R yaw, and the nub is pitch and roll.
+	//
+	// Laid out like flying in GTA San Andreas: W/S climb and descend, Q/E yaw, arrow keys pitch
+	// and roll. A/D roll as well, so short hops don't need the right hand to leave the mouse -
+	// delete those two rows if that feels like a mistake, nothing else depends on them.
+	{ VCSInputContext::InAircraft, NKCODE_W,                  CTRL_CROSS,     "Climb / throttle up" },
+	{ VCSInputContext::InAircraft, NKCODE_S,                  CTRL_SQUARE,    "Descend / throttle down" },
+	// Yaw. On the PSP these are the two shoulder buttons directly, NOT the glance modifier they
+	// are in a car - which is why GlanceDirection deliberately answers only for InVehicle.
+	{ VCSInputContext::InAircraft, NKCODE_Q,                  CTRL_LTRIGGER,  "Yaw left" },
+	{ VCSInputContext::InAircraft, NKCODE_E,                  CTRL_RTRIGGER,  "Yaw right" },
+	{ VCSInputContext::InAircraft, NKCODE_F,                  CTRL_TRIANGLE,  "Exit aircraft" },
+	{ VCSInputContext::InAircraft, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire (Hunter)" },
+	{ VCSInputContext::InAircraft, NKCODE_T,                  CTRL_RIGHT,     "Next radio station" },
+	{ VCSInputContext::InAircraft, NKCODE_R,                  CTRL_LEFT,      "Previous radio station" },
+	{ VCSInputContext::InAircraft, NKCODE_V,                  CTRL_SELECT,    "Change camera" },
+	{ VCSInputContext::InAircraft, NKCODE_P,                  CTRL_START,     "Pause (Start)" },
+	// Claimed and inert, all for the inverse-Escape-trap reason rather than for anything they do
+	// here. Shift would otherwise reach PPSSPP's rapid-fire and stutter the climb button exactly
+	// as it stuttered the throttle in a car. Space is handbrake in a car, which in an aircraft
+	// would land on R trigger and yaw the nose right whenever someone reached for a brake that
+	// doesn't exist. A and D are claimed because PPSSPP's defaults map them to Square and
+	// Triangle - descend and BAIL OUT - so leaving them unclaimed is worse than dead keys; they
+	// roll via ApplyAnalog rather than through this table.
+	{ VCSInputContext::InAircraft, NKCODE_SHIFT_LEFT,         0,              "Suppressed (blocks PPSSPP rapid-fire)" },
+	{ VCSInputContext::InAircraft, NKCODE_SPACE,              0,              "Suppressed (no handbrake in the air)" },
+	{ VCSInputContext::InAircraft, NKCODE_A,                  0,              "Roll left (via the stick)" },
+	{ VCSInputContext::InAircraft, NKCODE_D,                  0,              "Roll right (via the stick)" },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_UP,            0,              "Pitch nose down (via the stick)" },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_DOWN,          0,              "Pitch nose up (via the stick)" },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_LEFT,          0,              "Roll left (via the stick)" },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_RIGHT,         0,              "Roll right (via the stick)" },
 
 	// --- Aiming (on foot, aim key held) ---
 	// Separate from OnFoot because the same inputs mean different things here: the mouse becomes
@@ -227,8 +296,47 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// mid-fight, which would suddenly run the game at several times speed while aiming.
 	{ VCSInputContext::Aiming,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
 	{ VCSInputContext::Aiming,    NKCODE_P,                  CTRL_START,     "Pause (Start)" },
-	// Same rapid-fire suppression as in a vehicle - it would stutter the fire button while aiming.
-	{ VCSInputContext::Aiming,    NKCODE_SHIFT_LEFT,        0,              "Suppressed (blocks PPSSPP rapid-fire)" },
+	// --- Hand-to-hand combat, i.e. the four face buttons while targeting ---
+	//
+	// These need no melee-specific detection, and that is the whole reason they fit here as three
+	// rows rather than as a context. VCS decides what each button means from the state it can see -
+	// targeting, holding someone from the front or the rear, standing over a prone or a dead body -
+	// so one key per PSP button covers all five states:
+	//
+	//   |          | targeting     | held, front  | held, rear | prone      | dead  |
+	//   | Circle   | light, 4 hits | jab, 2 hits  | jab        | floor hits | stomp |
+	//   | Cross    | heavy, 2 hits | heavy / K.O. | knee       | stomp      | -     |
+	//   | Triangle | grab          | throw        | neckbreak  | pull up    | -     |
+	//   | Square   | block         | -            | -          | -          | -     |
+	//
+	// Circle is already bound above (left mouse, "Fire"), and Q/E already cycle targets, so only
+	// Cross, Square and Triangle were missing.
+	//
+	// Every one of the three keeps the PSP button it already has on foot - Shift is Cross (sprint),
+	// Space is Square (jump), F is Triangle (enter vehicle). One key means one button everywhere and
+	// the game reinterprets it, which is exactly the split the context column exists for, and it is
+	// the reason none of these needed a key that isn't already spoken for.
+	//
+	// Sprint, jump and enter-vehicle are all unreachable while targeting, so nothing is lost by the
+	// sharing.
+	//
+	// Shift was a psp = 0 claim before, purely to keep PPSSPP's rapid-fire (VIRTKEY_RAPID_FIRE on
+	// left shift) off the fire button. That suppression is unaffected: claiming is what withholds a
+	// key from PPSSPP's mapper, not the button the row produces.
+	{ VCSInputContext::Aiming,    NKCODE_SHIFT_LEFT,        CTRL_CROSS,     "Heavy hit / stomp / knee (melee)" },
+	// Space was NOT claimed in this context until now, and the cost of that was not the harmless
+	// fall-through it looked like: PPSSPP's default keyboard map binds Space to CTRL_START
+	// (Core/KeyMapDefaults.cpp, `Start = 1-62` in memstick/PSP/SYSTEM/controls.ini), so pressing it
+	// with aim held opened the PAUSE MENU. The inverse Escape trap, in the middle of a fight.
+	//
+	// The sniper-zoom comment further down describes this as "it only opens a menu when pressed
+	// unscoped, where Square is still Jump" - that reading was wrong. The menu was Start, from
+	// PPSSPP, in every case; the key never reached Square here at all, because no row sent it there.
+	{ VCSInputContext::Aiming,    NKCODE_SPACE,             CTRL_SQUARE,    "Block (melee) / sniper zoom in" },
+	// F is free in PPSSPP's defaults, so this row is a pure gain - and "F grabs" is about as
+	// idiomatic as PC bindings get. Near a vehicle while not targeting anyone, Triangle is still
+	// enter-vehicle; that ambiguity is the game's own and the PSP has it too.
+	{ VCSInputContext::Aiming,    NKCODE_F,                 CTRL_TRIANGLE,  "Grab / throw / neckbreak / pull up" },
 	// WASD claimed here with psp = 0, which looks pointless because they steer the stick rather
 	// than pressing buttons - but the claim is the point. PPSSPP's default keyboard mapping binds
 	// them to real PSP buttons (W to R trigger, A to Square, S to Triangle - see
@@ -258,13 +366,9 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Claimed, sends nothing. Held, it suppresses the automatic free-aim pulse and leaves the
 	// PSP's lock-on - so it inverts the handheld's priorities, which is the right way round on a
 	// PC. Listed here so it shows up in the debugger's mapping table rather than being invisible.
-	{ VCSInputContext::OnFoot,    NKCODE_G,                 0,              "Toggle lock-on mode (for melee) instead of free aim" },
-	{ VCSInputContext::Aiming,    NKCODE_G,                 0,              "Toggle lock-on mode (for melee) instead of free aim" },
+	{ VCSInputContext::OnFoot,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)" },
+	{ VCSInputContext::Aiming,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)" },
 	// Sniper zoom.
-	//
-	// Space is claimed silently here because it maps to Square on foot, and pressing it while
-	// aiming a sniper opens a menu - which is what you get when you reach for the obvious zoom key.
-	// A psp = 0 row stops that without giving up Jump anywhere else.
 	//
 	// Square zooms IN and Cross zooms OUT - measured, not guessed. Each PSP button was injected
 	// over the debugger while scoped and the camera block diffed: Square took the FOV at
@@ -276,8 +380,12 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// one pair that could not possibly work is the pair that got chosen. Injecting buttons and
 	// watching what moves took two minutes and needed no priors at all.
 	//
-	// Space is NOT suppressed: it maps to Square, which is zoom in. Reaching for it while scoped
-	// was right; it only opens a menu when pressed unscoped, where Square is still Jump.
+	// Space reaches Square here too, via the melee block above - so reaching for the obvious zoom key
+	// while scoped now does zoom in, which it never did before that row existed.
+	//
+	// Z/Y and the wheel therefore double as block and heavy hit during a fistfight. Harmless, since
+	// nobody scrolls mid-fight, and the alternative - gating these rows on ScopedWeaponActive - is
+	// not something a static table can express.
 	{ VCSInputContext::Aiming,    NKCODE_Z,                 CTRL_SQUARE,    "Sniper zoom in (verified)" },
 	{ VCSInputContext::Aiming,    NKCODE_Y,                 CTRL_CROSS,     "Sniper zoom out (verified)" },
 	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_UP,   CTRL_SQUARE,  "Sniper zoom in (verified)" },
@@ -317,6 +425,13 @@ VCSInputContext ResolveContext(const VCSState &state) {
 	// and gets gameplay bindings.
 
 	if (state.inVehicle.value_or(false)) {
+		// A helicopter or plane gets its own bindings. Anything else - including a vehicle whose
+		// model we failed to read - falls back to the car set, which is what this layer assumed
+		// for every vehicle before the model id was found. An unreadable model must never leave
+		// the player with no bindings at all.
+		if (VehicleClassIsAircraft(state.vehicleClass)) {
+			return VCSInputContext::InAircraft;
+		}
 		return VCSInputContext::InVehicle;
 	}
 
@@ -552,6 +667,23 @@ u32 ComputeButtonMask(VCSInputContext context) {
 	return mask;
 }
 
+// Fists or a melee weapon. FreeAimActive has always asked this question; the point of hoisting it
+// is that the automatic ENTRY into free aim never asked it, and with melee equipped both halves of
+// that entry are wrong in a way you can see on screen:
+//
+//  - the sprint latch holds CTRL_CROSS for ~8 ticks, and Cross while targeting is the HEAVY HIT. So
+//    starting a fight while walking forward threw an unrequested heavy punch, every time.
+//  - the pulse presses d-pad Down, the game's Free Aim button, which melee has no use for.
+//
+// Neither could be noticed before melee had bindings, because Cross did nothing there.
+//
+// An unset slot means the read failed, and then the previous behaviour stands rather than a guess -
+// same rule as in FreeAimActive: claiming "melee" wrongly would kill free aim for every gun.
+static bool MeleeEquipped() {
+	const std::optional<u32> weaponSlot = GetState().weaponIndex;
+	return weaponSlot && WeaponSlotIsMelee(*weaponSlot);
+}
+
 u32 ApplyMapping(VCSInputContext context) {
 	g_currentContext.store(context, std::memory_order_relaxed);
 
@@ -568,7 +700,8 @@ u32 ApplyMapping(VCSInputContext context) {
 	// Arm the auto-free-aim pulse on the edge into Aiming - not while in it, or it would retrigger
 	// every frame and hold d-pad down forever.
 	if (context == VCSInputContext::Aiming && g_prevAppliedContext != VCSInputContext::Aiming) {
-		if (CameraSettings().autoFreeAim && !g_lockOnMode.load(std::memory_order_relaxed)) {
+		if (CameraSettings().autoFreeAim && !g_lockOnMode.load(std::memory_order_relaxed) &&
+			!MeleeEquipped()) {
 			// If the player is already asking to move, spend a few ticks establishing a running
 			// state before pressing Free Aim, so the game has something worth latching. The pulse
 			// is armed when that finishes rather than now.
@@ -741,6 +874,19 @@ void ApplyAnalog(VCSInputContext context) {
 			if (IsHostKeyDownLocked(NKCODE_D)) x += 1.0f;
 			if (IsHostKeyDownLocked(NKCODE_A)) x -= 1.0f;
 			break;
+		case VCSInputContext::InAircraft:
+			// Pitch and roll - the whole reason this context exists. In a car the stick is
+			// steering and Y is unused; in the air X banks and Y pitches, and pitch is what
+			// converts the rotor's lift into forward flight. W/S stay on the buttons.
+			//
+			// Positive Y is away from the camera, i.e. the nub pushed forward, which pitches the
+			// NOSE DOWN and flies forward - so the up arrow is +1, matching "press up to go
+			// forward" rather than an aeroplane yoke.
+			if (IsHostKeyDownLocked(NKCODE_DPAD_RIGHT) || IsHostKeyDownLocked(NKCODE_D)) x += 1.0f;
+			if (IsHostKeyDownLocked(NKCODE_DPAD_LEFT) || IsHostKeyDownLocked(NKCODE_A)) x -= 1.0f;
+			if (IsHostKeyDownLocked(NKCODE_DPAD_UP)) y += 1.0f;
+			if (IsHostKeyDownLocked(NKCODE_DPAD_DOWN)) y -= 1.0f;
+			break;
 		default:
 			break;
 		}
@@ -874,11 +1020,17 @@ bool FreeAimActive(VCSInputContext context) {
 	// while the mouse still took the stick, and in lock-on the stick is MOVEMENT, so the mouse
 	// walked the player around and WASD did nothing.
 	//
-	// That half-state is exactly what melee is stuck in permanently: its lock-on does not register
+	// That half-state is exactly what melee was stuck in permanently: its lock-on does not register
 	// in IsAiming (confirmed in play - the flag reads 0 while visibly locked on), so the test below
-	// concludes free aim and hands over the stick. Holding this key is the manual way out until the
-	// weapon itself can be identified; see the WeaponIndex note in docs/VCS_ADDRESSES.md.
+	// concluded free aim and handed over the stick. This key stays as the manual override; the
+	// weapon test right below it is the automatic one.
 	if (g_lockOnMode.load(std::memory_order_relaxed)) {
+		return false;
+	}
+	// Melee has no free aim to give, so never hand it the mouse. In lock-on the stick is MOVEMENT,
+	// which is precisely what made the mouse walk the player around while WASD did nothing.
+	// WeaponIndex was worth finding for this. See MeleeEquipped for the unset-slot rule.
+	if (MeleeEquipped()) {
 		return false;
 	}
 	// Aim held, and the game is not steering it for you. See the routing note in ReticleActive

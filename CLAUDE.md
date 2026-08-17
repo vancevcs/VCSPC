@@ -152,9 +152,15 @@ debugger is the one that needs `g_frameMutex`, not this.
   `ResolveContext` → `ComputeButtonMask` → `sceCtrl`, verified end to end (Space on foot shows
   context `OnFoot` and mask `0x00008000`, `CTRL_SQUARE`, Jump).
 - **Context-aware bindings**, confirmed in play. On foot and in vehicles behave differently.
+- **Vehicle class detection**, confirmed in play. `VehicleModel` reads back correctly through the
+  live `PlayerVehicle` pointer (209 `patriot` in a Patriot), and every non-car class has now been
+  flown or driven: the aircraft and boat bindings behave as intended, across all 15 special models
+  the spawner offers (8 helicopters, 4 fixed-wing, hovercraft, jetski, predator). What made that
+  testable was a car spawner - see "Spawning special vehicles" below.
 - **WASD movement**, confirmed in play, on foot and driving. Analog on foot; in a vehicle A/D
   steer the stick while W/S stay buttons.
-- **Mouse look.** Yaw on foot and in vehicles; pitch on foot only (see the pitch section below).
+- **Mouse look.** Yaw on foot and in vehicles; pitch on both as of 2026-08-17 - vertical look while
+  driving is now on by default, with one known residual (see the pitch section below).
   Not during free aim — there the mouse is the reticle instead.
 - **Lock-on aiming**, which is how every ordinary weapon in VCS aims. Holding the aim key gives
   the aim bindings (Q/E cycle targets), WASD strafes, and the mouse keeps driving the camera.
@@ -182,6 +188,7 @@ documented in "VCS has a second analog stick" below rather than repeated here):
 | `PlayerVehicle` | `0x08bb4064` | 3-snapshot intersect; position matched the player, not traffic |
 | `PlayerBase` | `0x08bc8170` | entity matrix whose position tracks the player |
 | `PlayerHealth` | `PlayerBase + 0x4e4` | wrote `25.0`, HUD bar dropped to exactly a quarter width |
+| `VehicleModel` | `PlayerVehicle + 0x56` | read 209 (`patriot`) in a Patriot; the same offset across the whole vehicle pool (~30 objects, `0x820` stride) gives coherent models and distinct positions |
 | `CameraYaw` | `0x08bc7f1c` | correlated across 7 snapshots, then write-tested (62% of screen changed) |
 | `CameraPitch` | `0x08bc7f18` | same correlation; sits 4 bytes *before* yaw |
 | `IsAiming` | `0x08bb32a0` | 1 only while **locked on** |
@@ -916,9 +923,16 @@ nub-driven camera, with its rate limits and smoothing. Ours writes `CameraYaw`/`
 directly and feels like a mouse. The two are complementary: their plugin for the aiming mechanic,
 our camera for everything else.
 
-**Unknowns.** The semantics of opcode `03E9` (called as `03E9 1.4 0.0`) and of the `CPad + 29`
-write aren't established — that needs the PRX disassembled. And `cleo.prx` is a third-party binary
-of unknown licence: fine to run locally, **don't commit it**.
+**Opcode `03E9` is now known, and it is not a mystery worth chasing further: it sets the aim axis
+scale.** Its handler (`0x089e0b14`, resolved through the script command table at `0x08b846e0` — see
+docs/VCS_ADDRESSES.md) calls `CPad::GetPad(0)` twice and stores its two float parameters to
+`CPad+0xd0` and `CPad+0xd4`, i.e. this table's `AimAxisScale` and the `AimAxisScaleY` beside it. So
+their `03E9 1.4 0.0` is "scale X by 1.4, kill Y" — the plugin zeroes Y because it drives Y itself.
+The retail script calls it exactly once, `03E9 2.5 0.5`, setting up a passenger drive-by. That also
+means the aim response model already reads one of the two values this opcode writes.
+
+**Still unknown:** the `CPad + 29` write, which needs the PRX disassembled. And `cleo.prx` is a
+third-party binary of unknown licence: fine to run locally, **don't commit it**.
 
 **WASD goes dead in free aim, and that part is correct.** The PSP has exactly one analog axis, so
 while free-aiming it cannot both walk the player and place the crosshair — the game gives it to the
@@ -937,22 +951,168 @@ are separate questions — see the inverse Escape trap.
 - No latency. A flag flips once the game decides; the key is known the frame it goes down.
 
 **R trigger as aim is now confirmed twice over** — by the button tester, and by this round of
-testing, where holding it visibly produced lock-on. It is not L.
+testing, where holding it visibly produced lock-on. It is not the L *trigger* (not to be confused
+with the keyboard `L`, which since 2026-08-17 toggles the fork's own lock-on mode for melee).
 
 ### Camera pitch: limits must be anchor-relative, and vehicles are excluded
 
 Two things here were learned expensively.
 
-**The game's pitch baseline differs per camera**: about `-0.05` on foot but about `-1.55` in a
-vehicle. Any *absolute* clamp is therefore wrong in one mode or the other. An early fixed
-`+/-0.9` yanked the vehicle anchor from `-1.55` up to `-0.9` on the first write and then pinned
-it, so the view snapped to the roof and could not be brought back down. `VCSCamera` now clamps
-to `anchor +/- kPitchRange`. Don't reintroduce absolute limits.
+**Pitch limits must be anchor-relative, not absolute** - the baseline is not guaranteed to be the
+same per camera, and an early fixed `+/-0.9` pinned the view where it could not be brought back down.
+`VCSCamera` clamps to `anchor +/- kPitchRange`. Don't reintroduce absolute limits.
 
-**Pitch is not driven in vehicles at all** (`pitchInVehicle`, off by default). Yaw is fine there,
-but asserting pitch against the vehicle follow-camera leaves it settled steeply downward after
-we release - observed at `-0.99` rad, looking down at the bike from above. Root cause not yet
-identified; the toggle exists so it can be re-tested without a rebuild.
+**Corrected 2026-08-17: this section used to claim the vehicle baseline was about `-1.55`. It is
+not.** Measured live with `pitchInVehicle` off, so the fork was not writing the field, the game's own
+in-vehicle `CameraPitch` is **`-0.11861` rad (`-6.80` deg)** and completely steady - the same
+ballpark as the `-0.05` on foot. The vehicle camera is `CCam` mode **18**.
+
+`-1.55` was near-certainly read *while the pitch bug was active* and then written down as the
+baseline, so every conclusion drawn from "the vehicle anchor sits at -1.55" was unsound. `-1.5532`
+rad is `-89.0` deg, a hair under `-PI/2`: that is the **game's own** pitch limit, not this fork's
+clamp. With the anchor at `-0.1186` the fork's window is `-0.8187 .. +0.5813`, so the fork
+*cannot* produce `-1.55` at all.
+
+**That rules the clamp out as the cause of the vehicle pitch bug.** The fork writes at most `-0.82`
+and the game still ends up pinned at `-89` deg, so the wind-up happens downstream in the game's own
+camera; changing `kPitchRange` cannot fix it. Mode 18 writes pitch itself every frame - four
+pitch/yaw write pairs sit in `0x089a1xxx` on `$s0` - so the field has two authors and the game is
+integrating something the fork's write perturbs. Recovery by exiting/re-entering the vehicle, or by
+glancing with L/R, is consistent with that: both make the game rebuild its camera state.
+
+**Pitch IS driven in vehicles now** (`pitchInVehicle`, on by default since 2026-08-17). It was off for
+a long time for the reason described below, which is now understood and fixed. Historical account of
+the failure, kept because the measurements in it are still the evidence: yaw was always fine, but
+asserting pitch against the vehicle follow-camera winds the game's pitch all the way into its own
+`-89` deg limit, showing the roof, and from there it is close to impossible to bring back down. It
+sometimes recovers to the `-6.8` deg baseline on its own, and reliably recovers on exiting and
+re-entering the vehicle or on glancing with L/R (Q/E). Reported again 2026-08-17 with the value
+`-1.5532` rad, which is what identified the limit as the game's rather than ours.
+
+**ROOT CAUSE, settled by a boundary trace: writing pitch EVERY FRAME is itself the bug.** Not the
+clamp, not the anchor, not the entry value - the act of asserting the field 60 times a second while
+the game's camera code also updates it. The trace, in a vehicle, mouse barely moving:
+
+```
+live=-0.1232 des=-0.1232 anc=-0.1232 haveAnc=1 hold=44 dy=+0.00 dx=+0.00
+live=-0.3223 des=-0.1232 anc=-0.1232 haveAnc=1 hold=43 dy=+0.00 dx=-1.00
+live=-0.1232 ... then -0.3387 -0.4415 -0.5546 -0.6639 -0.8006 -0.9742 -1.1034 (saturates)
+```
+
+`des` and `anc` never move - **every clamp in this file was working and none of them mattered.** Only
+`live` diverges, alternating between our write and a value growing more negative each frame, and it
+keeps growing on frames where `dy` AND `dx` are zero. That rules out input, and it rules out a spring:
+a spring converges toward its target, this accelerates away from ours. It is positive feedback, our
+write winding up the game's own camera integrator, with the alternating rows being the two writers
+taking turns (we run at vblank, the game at its 30fps logic rate).
+
+Every-frame re-assertion is *correct* on foot - the game undoes a one-shot write within 0.4s - and
+destructive in a vehicle, where the game keeps a written value by itself. That asymmetry is the whole
+story, and it had been measured earlier (a hand-written pitch survives untouched while stationary)
+without the connection being made.
+
+**FIX, and the shipped behaviour: in a vehicle, assert pitch once per GAME LOGIC FRAME**, tracked with
+`FrameCounter`, instead of once per vblank. That removes the double-write the integrator was winding up
+on, and unlike the intermediate attempt below it leaves no gaps. Confirmed in play; `pitchInVehicle` is
+on by default as of this change.
+
+**Known residual, accepted.** Forcing pitch hard down *through* the vehicle entry and then continuing to
+force it down once seated can still provoke the runaway. Normal play does not do that - reported as
+working "99% of the time" - so the feature ships on with this documented rather than held back.
+
+An intermediate attempt, kept because it explains a symptom someone may reintroduce: asserting only on
+frames where the mouse moved also stops the runaway, but trades it for CHOP, because the game reclaims
+pitch in the skipped frames and the view stutters between the two values. Rate-matching is the answer,
+not skipping.
+
+**The proper fix would be to drive the game's own control input rather than the position**, exactly as
+`aimResponseModel` does for aiming. `CCam+0x11c` was the standing candidate and is **ruled out**: it is
+game-owned, writes to it decay within a frame or two (`+0.80` became `+0.14`, `-0.30` became `+1.10`),
+and pitch does not track it - it just lurches. The real input is somewhere in mode 18's pitch writers
+at `0x089a1xxx` on `$s0`, and finding it is a proper RE job, not a probe.
+
+Earlier framing of this section, kept because the numbers are still useful but the conclusion was
+wrong - it described the behaviour as a spring being pumped:
+
+```
+live=+0.53335  desired=+0.53335  delta=+0.00000    <- our write lands
+live=-0.89684  desired=+0.53335  delta=-1.43020    <- the game corrects 1.43 rad in ONE frame
+... alternates every frame while g_holdFrames > 0 ...
+hold=0                                             <- we stop asserting
+live=-1.55328                                      <- the spring OVERSHOOTS to -89 deg
+live=-1.26423 / -0.85280 / -0.53299 / -0.37273 / -0.21595   <- then decays back to baseline
+```
+
+So `-1.5532` is not a limit, a wrap, or a clamp - it is the **overshoot peak of the game's own
+spring** after we stop fighting it. It self-recovers, which is the "sometimes it goes back to -7 deg
+on its own" report; moving the mouse again re-kicks it, which is why it feels permanently pinned.
+
+Two mechanisms make it violent. The correction scales with how far we drag pitch from the target
+(1.43 rad of correction at 0.7 rad of displacement, so roughly 2x). And we write at vblank (60Hz)
+while the game corrects at its 30fps logic rate, so the two alternate and pump the spring rather
+than settling.
+
+**Fixed separately: an anchor ratchet.** The clamp anchor was re-captured at every stroke start, so
+it followed its own output - each stroke ended at `anchor - 0.7`, the next anchored there, and the
+window walked down until it hit the game's limit. The anchor is now captured once per CONTEXT
+(`g_haveAnchorPitch`), which bounds pitch to entry +/- `kPitchRange` for as long as you stay in that
+camera. Confirmed in the trace: the anchor held at `-0.12265` throughout.
+
+**FIXED, and the cure is an ASYMMETRIC window: the entry angle is the ceiling.** In a vehicle pitch
+may now travel numerically *below* the anchor by `pitchVehicleDown` (1.45 rad, about -89 deg of
+look-up, effectively the game's full range) and **not one radian above it**. Confirmed good in play at
+the full 1.45.
+
+Sign convention, since it is the opposite of what the old notes implied: **more negative is looking
+UP.** `-6.8` deg is level-ish, `-89` deg is the roof. So the useful direction in a vehicle is
+numerically downward, and it is the numerically *upward* excursion that breaks things.
+
+Two corrections fell out of getting this working, both worth keeping because both were wrong in the
+same direction - assuming a measured number meant what it looked like:
+
+- **Depth was a red herring.** Mean per-frame fight looked like it grew with depth (0.024 rad in the
+  first 0.15 below the anchor, 0.26 at 0.5-0.75), which predicted shudder at 1.45 - it does not
+  shudder. Those deep samples came from a trace where above-entry excursions were happening in the
+  same session, so the "fight at depth" was mostly the spring recovering from being pumped by those.
+  Depth is fine; direction is what matters.
+- **The band is not the mechanism, the ceiling is.** An earlier version shipped a deliberately tiny
+  0.15 band on that mistaken reasoning, which worked only by staying away from the fight and gave
+  about -15 deg of look-up - far less than usable.
+
+**The ceiling is only as good as the anchor, and the anchor arrives contaminated from on foot.**
+Reported in play: entering a vehicle with `CameraPitch` at **+5 deg or more** brings the runaway back.
+
+The chain: on foot the window is symmetric, so pitch can legitimately be left as high as `+0.65` rad
+(`+37` deg). The game does **not** reclaim pitch when you get in - measured, a written value survives
+untouched while the vehicle is stationary - so that on-foot value carries straight into the vehicle
+context. The anchor is captured from it, the anchor *is* the vehicle ceiling, and the ceiling therefore
+sits tens of degrees above the `-6.8` deg baseline: parked in the region that pumps the spring.
+
+That is also why it looked like a regression between sessions with no code change. It depends entirely
+on what pitch happened to be when you got in.
+
+**Fix: in a vehicle the anchor is capped at level (0.0).** Capping at level rather than at the measured
+`-0.1186` baseline avoids a hardcoded per-camera constant and costs nothing, because the wanted
+direction in a vehicle is upward (more negative) - nothing useful lies above level.
+
+`kMaxPlausiblePitch` (1.6 rad) also gates the capture, and pitch is not driven at all until a
+believable anchor exists. That guard is a validity test on the anchor's *source*, not an absolute look
+limit - absolute look limits were the original bug. **It did not fix this one**, and the reason is
+worth keeping: `+5` deg is `0.087` rad, far inside `1.6`, so a plausibility check could never catch it.
+The problem was never implausible values, it was plausible ones from the wrong camera.
+
+Also checked and ruled out while chasing this: the fork hardcodes `CameraPitch`/`CameraYaw` to
+`CCam[0]`, so a camera-slot switch on entering a vehicle would have made it write the wrong camera
+entirely. Measured - `CCamera+0x50` (active cam index) reads **0** both on foot and in a vehicle, and
+`cam[1]`/`cam[2]` sit at zero. `CCam[0]` is correct. (Incidentally the on-foot mode reads **4**, not
+the 15 this document claims elsewhere.)
+
+Because the ceiling is sufficient, **the spring's target field no longer needs finding.** If someone
+ever wants pitch numerically ABOVE the entry angle in a vehicle, that is when it becomes necessary
+again; the standing candidate is `CCam+0x11c`, which read `+0.12087` while resting pitch was
+`-0.11861` - same magnitude, opposite sign. Note also that the spring does **not** act while the
+vehicle is stationary (a hand-written `+0.55` survived untouched across two tool runs), so any future
+probe of it needs the vehicle actually moving, which cannot be arranged by injecting buttons.
 
 A methodology note, because it cost several rounds: the first diagnosis of the clamp bug was
 *correct*, then wrongly retracted after checking snapshots that showed pitch only ever between
@@ -1026,20 +1186,28 @@ there? A `psp = 0` row is the tool for the second case.
 Verified by holding each one in game with the Input tab's button tester. Guessing these was the
 single biggest source of wrong bindings, so add to this table rather than assuming.
 
-| PSP button | On foot | In a vehicle |
-|---|---|---|
-| Cross | sprint | accelerate |
-| Square | jump | brake / reverse |
-| Circle | attack / fire | drive-by fire |
-| Triangle | enter vehicle | exit vehicle |
-| R trigger | **aim** (lock-on) | handbrake |
-| L trigger | **switch to a nearby weapon drop** | glance modifier (L + stick direction) |
-| D-pad Up | ? | ? |
-| D-pad Down | ? | **horn** |
-| D-pad Left | previous weapon | **previous radio station** |
-| D-pad Right | next weapon | **next radio station** |
-| Select | change camera | change camera |
-| Start | pause | pause |
+| PSP button | On foot | In a vehicle | In an aircraft |
+|---|---|---|---|
+| Cross | sprint | accelerate | **climb / throttle up** |
+| Square | jump | brake / reverse | **descend** |
+| Circle | attack / fire | drive-by fire | fire (Hunter) |
+| Triangle | enter vehicle | exit vehicle | exit |
+| R trigger | **aim** (lock-on) | handbrake | **yaw right** |
+| L trigger | **switch to a nearby weapon drop** | glance modifier (L + stick direction) | **yaw left** |
+| Nub | movement | steering (X only) | **pitch (Y) and roll (X)** |
+| D-pad Up | ? | ? | special mission |
+| D-pad Down | ? | **horn** | centre view |
+| D-pad Left | previous weapon | **previous radio station** | previous radio station |
+| D-pad Right | next weapon | **next radio station** | next radio station |
+| D-pad L/R *in a forklift* | — | **lower / raise the forks** | — |
+| Select | change camera | change camera | change camera |
+| Start | pause | pause | pause |
+
+The aircraft column started as the game's own manual and WikiGTA's PSP controls pages, cross-checked
+against the in-game Controls screen. **It has since been flown.** Every aircraft class the spawner
+offers was taken up and the bindings behave as intended, so treat this column as verified at the
+scheme level. Individual rows were not probed button-by-button, so if one specific control ever
+feels wrong, `Tools/vcsvehicle.py probe --base cross` is still the way to pin it down.
 
 **There is no crouch in VCS on PSP.** It does not exist as a mechanic, so no button maps to it -
 don't go looking. An earlier binding claimed C was crouch and simply did nothing.
@@ -1058,6 +1226,242 @@ The general lesson: a button that "does nothing" in the tester may need a second
 specific situation, before it does anything. Test modifiers in combination and near things.
 
 Use the button tester (Input tab) to fill in the `?` entries rather than guessing.
+
+### Hand-to-hand combat is four buttons and five states
+
+Melee looks like it needs a mode of its own and does not. **The game detects the state** — targeting,
+holding someone from the front, holding them from the rear, standing over a prone body, standing
+over a dead one — and reinterprets the same four face buttons in each. So the whole fighting system
+is four bindings, and this fork needs no melee detection to express it:
+
+| PSP button | targeting | held, front | held, rear | prone | dead |
+|---|---|---|---|---|---|
+| Circle | light hit, 4-move combo | jab/punch, 2-move | jab | floor punches | stomp |
+| Cross | heavy hit, 2-move combo | heavy, tap = brief K.O. | knee in the back | stomp / ground kick | — |
+| Triangle | grab (front or rear) | throw | neckbreak | pull up | — |
+| Square | block | — | — | — | — |
+
+**The keys follow one rule: a key keeps its PSP button in every context.** Shift is Cross (sprint on
+foot, heavy hit while targeting), Space is Square (jump, block), F is Triangle (enter vehicle, grab),
+left mouse is Circle everywhere. Nothing new had to be found a home for, because sprint, jump and
+enter-vehicle are all unreachable while targeting — the same sharing the PSP itself does.
+
+| key | PSP | while targeting |
+|---|---|---|
+| Left mouse | Circle | light hit — already bound as "Fire" |
+| Left Shift | Cross | heavy hit |
+| Space | Square | block |
+| F | Triangle | grab |
+| Q / E | d-pad L/R | previous / next target — already bound |
+
+**A melee `VCSInputContext` was considered and rejected.** It would mean duplicating every `psp = 0`
+claim row, and teaching `ApplyAnalog`, `ContextWantsMouse` and `FreeAimActive` about a fourth
+on-foot context — for bindings that are identical to the aiming ones anyway. Add one only if melee
+ever needs a key that means something *different* from what it means while aiming.
+
+**The automatic free-aim entry had to learn about melee, and this is the part that mattered.**
+`FreeAimActive` has always checked `WeaponSlotIsMelee`, but the *entry sequence* in `ApplyMapping`
+only checked the manual `L` toggle — so with fists:
+
+- the sprint latch held **`CTRL_CROSS` for ~8 ticks**, and Cross while targeting is the heavy hit. So
+  entering a fight while walking forward threw **an unrequested heavy punch, every single time**.
+- the pulse pressed **d-pad Down**, the game's Free Aim button, which melee has no use for.
+
+`MeleeEquipped()` now gates both, and `FreeAimActive` shares it. Neither could have been noticed
+before this change, because Cross had no melee meaning to misfire — **the bindings didn't cause the
+bug, they made an existing one visible.** Worth remembering when a new binding "breaks" something:
+the input may have been going out all along.
+
+**`L` is therefore a manual override now, not the ritual it was.** Fists need no flipping before a
+fight; reach for it only when the weapon read is wrong, or a gun should be aimed under lock-on on
+purpose.
+
+**Space was falling through to PPSSPP's `CTRL_START` — the inverse Escape trap, third instance.**
+The `Aiming` context never claimed it, and PPSSPP's default keyboard map binds Space to Start
+(`Start = 1-62` in `memstick/PSP/SYSTEM/controls.ini`), so pressing it with aim held opened the pause
+menu. The old sniper-zoom comment read this as "Square is still Jump when unscoped" and was wrong on
+both counts — the key never reached Square in that context at all. Binding it fixes block *and*
+makes the obvious zoom key work while scoped.
+
+**Not yet confirmed in play**, and these are the three to look at first: Square and Cross while
+aiming an *unscoped* gun (both expected inert — Space and Shift now send them there), and whether
+holding Square blocks rather than tapping it. `Z`/`Y` and the mouse wheel also still map to
+Square/Cross for sniper zoom, so they double as block and heavy hit during a fistfight; harmless,
+and a static table cannot gate them on `ScopedWeaponActive`.
+
+### One in-vehicle context was never enough — aircraft cannot fly with the car bindings
+
+`InVehicle` assumed a car for as long as it existed, and for a car it is right. For a helicopter
+it is not merely tuned wrong, it is **structurally unable to fly**, and the reason is worth
+stating precisely because it is invisible from the binding table:
+
+- In a vehicle, W/S are *buttons* (Cross/Square) and A/D are the stick's *X axis*. **Nothing
+  anywhere drives the stick's Y axis.**
+- In an aircraft the stick's Y axis is **pitch**, and pitch is the only thing that converts the
+  rotor's lift into forward flight. Cross alone just goes straight up.
+
+So the old bindings gave a helicopter that would take off, hover, and refuse to go anywhere —
+which is exactly the complaint the GameFAQs question "I can't make it move forward" describes,
+except here it was our mapping rather than the player.
+
+Two smaller collisions came with it: Q/E in a vehicle are *glances* (L trigger + a stick
+direction), and in an aircraft L is **yaw left** — so glancing yawed the aircraft and rolled it
+at the same time. And Space is handbrake, i.e. R trigger, which in an aircraft is **yaw right**,
+so reaching for a brake that doesn't exist spun the nose.
+
+`VCSInputContext::InAircraft` fixes all three. It is selected from `VehicleModel`
+(`PlayerVehicle + 0x56`) through `VehicleClassForModel`, and the layout is GTA San Andreas's:
+W/S climb and descend, Q/E yaw, arrow keys pitch and roll (A/D also roll). A vehicle whose model
+can't be read falls back to the car set, which is the pre-existing behaviour and never worse.
+
+**Boats and the forklift deliberately stay on the car bindings.** A boat accelerates, reverses
+and steers exactly like a car, so the existing set covers it - the only dead key is Space, since
+boats have no handbrake.
+
+### Spawning vehicles
+
+Testing the aircraft and boat bindings needs an aircraft or a boat, and hunting one down in the
+world is slow. VCS ships its own spawner and never runs it: `DBGCARS`, a debug script with the full
+`request_model` / `has_model_loaded` / `create_car` sequence, reachable only from a debug menu that
+retail never opens. Two ISOs in the project root turn it on with same-size byte patches - no
+recompile, and the retail ISO is never touched:
+
+**`VCS-full-spawner.iso` (25 bytes, current) - every vehicle, 170..280.** This is the one to use.
+
+1. `MAIN`'s `launch_mission @WARPSPO` repointed to `@DBGCARS`. WARPSPO is a dev warp-spot script
+   retail launches unconditionally, so it is the free donor slot.
+2. The model filter **neutralised rather than inverted**: `DBGCARS` consults `Noname_3_30` (15 ids)
+   and `Noname_3_13` (1 id) as *exclude* lists, skipping any model they match. Setting all 16 ids to
+   `0` leaves the branch polarity stock and makes the lists match nothing, because the model under
+   test only ever holds 170..280. Nothing is skipped, so the cycle offers the whole range.
+3. The wrap bounds raised `279` -> `280` (the up-cycle compare and the down-cycle assign) so the
+   last model is reachable - even the stock debug script could not reach it.
+
+**`VCS-spawner.iso` (25 bytes, superseded) - 15 hand-picked non-car classes.** Same launch repoint,
+but it *inverts* the two land-branch `goto` pairs so the cycle offers only what the list matches,
+and rewrites the 15 ids from watercraft to the special classes. Kept because it is what proved out
+every non-car control scheme; the full spawner covers it.
+
+**Controls (as of 2026-08-17): `F9` spawns, arrow Left / Right scroll.** All three are OnFoot rows,
+none is a chord, so no modifier is held. `V` (Select) still toggles traffic and pedestrians.
+
+The one wart, and it is the script's fault rather than the binding's: **`DBGCARS` sets its spawn
+state (`8@ = 1`) at the end of *both* cycle paths, so advancing the selection *is* the spawn.** There
+is no "spawn whatever is currently selected" entry point to bind, so `F9` is necessarily "next model,
+and spawn it" - the same thing arrow Right does. Making `F9` re-spawn the current model without
+advancing would need a real script edit: a third path that jumps to the `create_car` block with `7@`
+left alone. Worth doing only if the duplication actually gets in the way.
+
+Earlier versions used a chord (hold Tab for the L trigger, tap Q / E). That is gone - the request was
+for the trigger to be a single key with the arrows free-standing.
+
+Five facts worth keeping if you ever patch the script again:
+
+- **Never blind-scan for an immediate and patch every hit.** Raising the wrap bound `279` -> `280`
+  by scanning the `DBGCARS` region for the 16-bit value found *four* matches; only two were the
+  bounds. The other two were the byte pair `17 01` occurring inside unrelated operands, and writing
+  them corrupted two values that had nothing to do with the cycle. Caught only by counting: the
+  decompiled listing showed the value on two lines, not four. **Patch a hit only after confirming it
+  decompiles to the instruction you meant**, and if the counts disagree, revert the extras.
+- **Verify by decompiling the patched script, not by trusting the write.** Every claim about
+  `VCS-full-spawner.iso` above (launch target, all 16 filter ids, both wrap bounds, branch polarity)
+  was read back out of a fresh Sanny decompile of the patched file. This is what caught the above.
+- **Sanny's CLI is single-instance and fails silently.** If a `sanny.exe` is already running, a
+  second `sanny --no-splash -m vcs_psp -d <file>` invocation **exits 0 and writes no `.txt` at all**.
+  Kill any stale instance first, and poll for the output file rather than trusting the exit code.
+- **Script pointers are `file_offset - 8`** (an 8-byte header precedes script space). Getting this
+  wrong is silent and fatal: an earlier patch off by 8 sent the interpreter into a misaligned
+  opcode, the dispatcher fetched a garbage handler, and the game died with
+  `Invalid exec address`. Verify any pointer you write by checking that `target + 8` lands on a
+  plausible opcode.
+- **Sanny can decompile but not faithfully recompile.** A round-trip of the untouched script
+  compiles fine and produces a *different* 1.8 MB file - one segment shrinks 236 bytes, everything
+  after shifts, and Sanny appends a `__SBFTR` footer. Patch bytes in place instead.
+- **`MAIN.SCM` sits contiguously at ISO offset `0x32aa0000`**, so a script byte at file offset N is
+  at `0x32aa0000 + N` in the ISO. No extraction or rebuild needed to patch it.
+
+### The debug menu also works - but is deliberately not shipped
+
+**It lives only in `VCS-debugmenu.iso`, and no other ISO enables it.** It was turned on to find out
+whether it could be, which it could; in play it was unwanted, because the open combo is reachable by
+accident from ordinary keys. Nothing needed reverting - the gate is a single byte and the spawner ISOs
+are built from a pristine copy, so they carry the stock value. If you ever wonder which is which:
+`0x32aa7a5a` reads `0xc4` for stock and `0x56` for menu-on.
+
+`VCS-debugmenu.iso` (project root, **one** byte different from retail) opens the shipped debug menu.
+The gate in `MAIN`'s init is `83FD not unknown_check_command_92ea` / `0022 goto_if_false`; the patch
+retargets that branch to the instruction right after it, at file `0x7a5e`, so `$2 = 1` runs whatever
+the check returns. The byte is at file `0x7a5a` (ISO `0x32aa7a5a`), `0xc4` -> `0x56`.
+
+**Open it with d-pad Down + Circle + R trigger, then release** - `METALDE_4119` tests those three
+(script indices 9, 17, 6) with `$4164 == 0`, and `METALDE_4150` waits for release before opening.
+Confirmed by injecting the three buttons and watching `$4165` go to 1, with `$4152 == -1`,
+`$4136 == $4137 == 1`, `$4160 == -1` and `$4167 == 1` proving METALDE and DEBMENU both started.
+All of those read 0 on a normal boot.
+
+On the keyboard that combo is **only reachable from a vehicle**, where the fork binds all three:
+H (`CTRL_DOWN`), Space (`CTRL_RTRIGGER`), Mouse1 (`CTRL_CIRCLE`). On foot, `CTRL_DOWN` and
+`CTRL_RTRIGGER` are unbound, so either sit in a car first or add two OnFoot rows.
+
+The menu contents: level skip, weather and time changer, MoCap menu, USJ editor, player
+coordinates, marketing camera, player cheats, character viewer, empire status, audio debug, launch
+jetski mission, complete all story missions, unlock end-game viewer.
+
+Worth noticing what draws it: `DEBMENU_321` builds the panel with `set_empire_hud_visibility`,
+`set_empire_hud_colour 0 rgba 50 50 50 128`, `set_empire_hud_size 0 width 170 height 150` and
+`set_empire_hud_position 0 to 5 5` - the empire-HUD commands from `scm/VCSSCM.INI`. Those opcodes
+are how R* Leeds drew their own debug UI.
+
+### Script button numbering
+
+The script's button numbering is its own, not PSP bit order. `007F is_button_pressed` dispatches
+through a 20-entry jump table at `0x08b79928`; indices 8-11 read `CameraInputMode` and then
+`CPad + 0x12/0x14/0x16/0x18`, i.e. this table's four `PadDPad*` entries. Confirmed live by holding
+each key and watching which `CPad` halfword goes to 255:
+
+| script index | 4 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| button | L | up | down | left | right | Start | Select | Square | Triangle | Cross | Circle |
+| `CPad +` | 0x0a | 0x12 | 0x14 | 0x16 | 0x18 | 0x22 | 0x24 | 0x26 | 0x28 | 0x2a | 0x2c |
+
+**The forklift needs no new bindings either, and that is a finding rather than an assumption.**
+Confirmed in play: `R` and `T` raise and lower the forks. Those are already bound - `CTRL_RIGHT`
+and `CTRL_LEFT` - so the game **reuses the radio buttons for the forks** when you are in one, and
+the keys that were mapped for changing station happen to land on exactly the right control.
+
+(As of 2026-08-17 the two keys are swapped by request - `T` is now `CTRL_RIGHT` and `R` is
+`CTRL_LEFT`, in both the InVehicle and InAircraft contexts. That inverts which key raises and which
+lowers the forks along with the radio, since it is the same pair of PSP buttons.)
+
+Two things follow. There is no radio switching in a forklift, so the `"Next / Previous radio
+station (verified)"` descriptions on those two rows are wrong *for this one vehicle* - the table
+has no way to say so, since a per-vehicle description would need a per-vehicle context, and one
+cosmetic string does not justify one. And it is worth remembering that **a vehicle can repurpose
+a button rather than merely ignore it**: the assumption that the car scheme is a superset which
+special vehicles subtract from is wrong, and the forks are the proof.
+
+### Measuring what a button does, without being able to see the screen
+
+`Tools/vcsvehicle.py` is the automated form of the Input tab's button tester. It holds one PSP
+button over the WebSocket debugger, watches the *vehicle's own transform* — matrix at `+0x00`,
+world position at `+0x30`, same layout as the player ped — and reports the displacement and the
+rotation of each basis row. "Cross climbed 4.2 units" is a better answer than "it felt like it
+went up", and it needs no screenshot: `gpu.buffer.screenshot` fails with "Could not download
+output" on this setup, so memory is the only channel.
+
+Two things it learned the hard way, both encoded in the tool now:
+
+- **Momentum bleeds between measurements.** The first run reported that Square moved the car
+  *forwards* 12 units. It was the coast from the previous Cross. Every probe now waits for the
+  vehicle to stop drifting first, and prints the drift it gave up at.
+- **A stationary vehicle answers nothing.** Steering does nothing at rest, and an aircraft
+  ignores pitch and roll until the rotor is spinning. `--base cross` holds throttle through the
+  whole probe, which is the only way those rows mean anything.
+
+The tool can also drive the player: injected analog + a Triangle press every couple of seconds
+found and entered a car with no human involved, which is how the model-id offset was found. What
+it cannot do is *navigate* — reaching a helipad or the docks blind is not realistic, so the
+special vehicles still need someone to fly there.
 
 ### The Escape trap — read before adding a binding
 
@@ -1084,13 +1488,20 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
 
 **Deliberately not implemented yet:**
 
-- **`WeaponIndex` and `GameState` are still unset**, and are the only two worth hunting.
+- **`GameState` is the last one worth hunting.** `WeaponIndex` is **done** (`PlayerBase + 0x789`, a
+  u8 *slot* 0..9 rather than a weapon id - the type lives at `PlayerBase + 0x574 + slot*28 + 4`).
   `PlayerOnFoot` is derived rather than read, and `AimYaw`/`AimPitch` are unset *permanently* —
   see "There is no stored aim direction". See [docs/VCS_ADDRESSES.md](docs/VCS_ADDRESSES.md).
-- **Direct weapon selection.** Needs `WeaponIndex`, and probably a memory write rather than a
-  button press, since the PSP only exposes cycle-next/cycle-previous.
-- **Vertical look while driving.** Off behind `pitchInVehicle`; see the pitch section above.
-  Unresolved, not abandoned.
+- **Direct weapon selection.** `WeaponIndex` now exists, so this is unblocked; it still probably
+  wants a memory write rather than a button press, since the PSP only exposes
+  cycle-next/cycle-previous.
+- **Vertical look while driving.** ON by default now (`pitchInVehicle`), asserted once per game logic
+  frame. One residual: forcing pitch down through the entry and onward can still run away. See the
+  pitch section above.
+  Unresolved, not abandoned. `InAircraft` is gated by the same setting, for the same reason.
+- **Boat-specific bindings.** Boats run the car set on purpose - see the aircraft section - but
+  nobody has held each button in one, so "Space does nothing" is inference rather than a
+  measurement.
 
 - **`Menu` context never triggers.** Needs `GameState`, which was hunted for and NOT found: a 192KB
   sweep of the globals gave 1249 candidates from two rounds, and a proper correlation run over the

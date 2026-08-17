@@ -147,12 +147,26 @@ void ImVCSWindow::DrawDecodedState() {
 	row("inVehicle");     TextOptionalBool(state.inVehicle);
 	row("isAiming");      TextOptionalBool(state.isAiming);
 	row("isFreeAiming");  TextOptionalBool(state.isFreeAiming);
+	// The slot decides whether free aim engages at all (melee never does), so show what the aim
+	// layer concluded next to it rather than making anyone remember where the cutoff is.
 	row("weaponIndex");   TextOptionalU32(state.weaponIndex);
+	if (state.weaponIndex) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("(%s)", VCS::WeaponSlotIsMelee(*state.weaponIndex) ? "melee" : "gun");
+	}
+	row("weaponType");    TextOptionalU32(state.weaponType);
 	row("cameraYaw");     TextOptionalFloat(state.cameraYaw);
 	row("cameraPitch");   TextOptionalFloat(state.cameraPitch);
 	row("health");        TextOptionalFloat(state.health);
 	row("playerBase");    TextOptionalU32(state.playerBase);
 	row("playerVehicle"); TextOptionalU32(state.playerVehicle);
+	// Set for about 1.65s before playerVehicle appears; pitch is held at the vehicle ceiling for
+	// exactly that window, which is what stops the on-foot pitch seeding the spring runaway.
+	row("entering veh");  TextOptionalU32(state.enteringVehicle);
+	row("vehicleModel");  TextOptionalU32(state.vehicleModel);
+	// The class is what actually picks the bindings, so show it rather than making anyone map
+	// the model id back by hand while sitting in the thing.
+	row("vehicleClass");  ImGui::TextUnformatted(VCS::VehicleClassName(state.vehicleClass));
 
 	ImGui::EndTable();
 }
@@ -508,6 +522,18 @@ void ImVCSWindow::DrawCamera() {
 	ImGui::SameLine();
 	ImGui::Checkbox("Invert Y", &s.invertY);
 	ImGui::Checkbox("Vertical look in vehicles", &s.pitchInVehicle);
+	if (s.pitchInVehicle) {
+		ImGui::SliderFloat("  look-up band (rad)", &s.pitchVehicleDown, 0.02f, 1.55f, "%.3f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("How far UP vehicle pitch may look, from the angle you entered at.\n"
+			                  "1.37 rad reaches about -85 deg; 0.15 is only about -15 deg.\n"
+			                  "Vehicle pitch is spring-controlled and the fight grows with\n"
+			                  "displacement: ~0.02 rad/frame at 0.15, ~0.26 at 0.5-0.75. Raise it\n"
+			                  "until the camera shudders or slams to the roof, then back off.");
+		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("(%.1f deg)", s.pitchVehicleDown * 57.2958f);
+	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
 			"Off by default. Driving pitch against the vehicle follow-camera leaves it "

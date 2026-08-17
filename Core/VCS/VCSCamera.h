@@ -49,14 +49,44 @@ struct VCSCameraSettings {
 	bool invertX = false;
 	bool invertY = false;
 
-	// Vertical look while driving, off by default.
+	// Vertical look while driving. ON by default as of 2026-08-17, confirmed usable in play.
 	//
-	// Yaw works fine in a vehicle, but asserting PITCH against the vehicle follow-camera leaves
-	// it in a bad state: after we release, the camera settles steeply downward (observed at
-	// -0.99 rad looking down at the bike from above) instead of returning to normal. The cause
-	// is not understood yet, so this is off until it is - driving is usable without vertical
-	// look, and unusable with it.
-	bool pitchInVehicle = false;
+	// It was off for a long time because asserting pitch against the vehicle camera ran the view away
+	// to the -89 degree limit and left it there. That is now understood and fixed: the cause was
+	// writing the field every vblank against a game that updates it at its 30fps logic rate, so two
+	// of our writes landed per game frame and wound up the game's own camera integrator. Pitch is now
+	// asserted once per game logic frame in a vehicle - see the FrameCounter check in CameraTick.
+	//
+	// **Known residual, accepted deliberately.** Forcing pitch hard down *through* the vehicle entry
+	// and then continuing to force it down once seated can still provoke the runaway. Normal play does
+	// not do this; reported as working "99% of the time", and enabled on that basis. The complete fix
+	// is to drive the game's own control input rather than the position, as aimResponseModel does for
+	// aiming, which needs mode 18's pitch writers at 0x089a1xxx reverse-engineered. See CLAUDE.md.
+	bool pitchInVehicle = true;
+
+	// How far below the entry angle, NUMERICALLY, vehicle pitch may travel - in radians. Note the
+	// sign convention: more negative is looking UP, so this is the upward-look allowance, and the
+	// entry angle is the limit in the other direction. (-6.8 deg is level-ish, -89 deg is the roof.)
+	//
+	// Both halves of that come from measurement, not taste. Vehicle pitch is spring-controlled, and
+	// the spring's correction scales with how far we drag pitch off its target - so the fix is to not
+	// drag it far. From a 7379-frame trace, mean correction per frame by region:
+	//
+	//     above the entry angle      0.4069 rad   (max 1.5044)  <- 3.2x worse, so forbidden entirely
+	//     0.02 .. 0.15 below         0.0244 rad   (max 0.1280)  <- this band
+	//     0.15 .. 0.30 below         0.0527 rad
+	//     0.50 .. 0.75 below         0.2623 rad
+	//
+	// 1.45 rad is about -89 deg of look-up from the -6.8 deg baseline, i.e. effectively the full
+	// range, and confirmed good in play.
+	//
+	// It was expected to shudder at this depth and it does not, which corrected the diagnosis. The
+	// per-frame fight numbers above that appear to grow with depth were measured in a trace where
+	// ABOVE-entry excursions were happening in the same session, so what looked like a
+	// depth-dependent fight was largely the spring recovering from being pumped by those. Depth is
+	// not the problem; going numerically above the entry angle is. **The ceiling is the fix**, and
+	// this band can be as wide as the game's own range allows.
+	float pitchVehicleDown = 1.45f;
 
 	// --- Aiming ---
 	//

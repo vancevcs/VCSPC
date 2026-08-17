@@ -221,16 +221,113 @@ fourth snapshot in a *different* vehicle and append `car2:ptr`.
 **Payoff.** This is the single highest-value address in the table: it alone unlocks the on-foot
 vs in-vehicle context switch, which is the whole point of the fork.
 
+### `VehicleModel` — u16 — **FOUND: `PlayerVehicle + 0x56`**
+
+The occupied vehicle's model id — 209 patriot, 213 maverick, 251 forklift, and so on. Needed
+because VCS controls a helicopter completely differently from a car, so one in-vehicle binding
+set cannot be right for both; `VehicleClassForModel` in `Core/VCS/VCSState.cpp` turns it into
+car / bike / boat / heli / plane.
+
+**How it was found**, in about two minutes and with no snapshot diffing at all: get into any
+vehicle over the WebSocket debugger, read `PlayerVehicle`, then scan the first 0x200 bytes of
+the object it points at for a u16 in the vehicle id range (170–280). Exactly one offset pair
+came back — `+0x56` and `+0x58`, both reading 209, and the vehicle was a Patriot.
+
+**Confirmed** by turning it around: scan all of RAM for entity-shaped matrices (four 16-byte
+aligned vec3s, `+0x3c == 1.0`, unit-length rows) that also carry a valid id at `+0x56`. That
+produces the **vehicle pool** — ~30 live objects on a `0x820` stride starting around
+`0x098ef520`, each with a sensible model name and its own world position. A coincidence would
+not have been coherent across the whole pool.
+
+`Tools/vcsvehicle.py info` prints the candidates for whatever you are sitting in, so this is
+cheap to re-check if a future build moves it.
+
+**Model ids come from the game itself**, not just from a wiki: there is a model-name table at
+`ModelInfo[id] = 0x093857b4 + id * 0x1c` (heap, so the base moves between runs) whose entries
+are `char name[20]; void *resource; u32 flags`. Entry 213 is `maverick`, 251 is `forklift`, 280
+is `airtrain` — matching gtamods' list exactly. The game's own **type** names live in the static
+region at `0x08bafc6c`: `car boat jetski train heli plane bike ferry bmx quad`. That table is
+what confirms the classification is the game's own idea and not an invented one; where the per-
+model type is *stored* is still unknown, which is why the class table is keyed on the id instead.
+
 ### `WeaponIndex` — u32
 
 Currently selected weapon slot or id.
 
-**Strategy.** Scan for a small integer, cycle weapons, rescan. Cycling forward through the whole
-list and watching the candidate increment predictably confirms it fast.
+**The weapon array itself is found: `PlayerBase + 0x58c`.** Nine records of 28 bytes:
 
-**Gotcha.** There may be two related values — a *slot* (0–9, the weapon wheel category) and a
-*weapon id* (the specific gun). Direct weapon selection needs the one the game actually acts on;
-check which changes when you pick up a different gun in the same category.
+| offset in record | meaning |
+|---|---|
+| `+0x00` | `0x000d8700`, identical in every record — the type marker the array is recognised by |
+| `+0x08` | weapon type |
+| `+0x0c` | state |
+| `+0x10` | ammo in clip |
+| `+0x14` | ammo total |
+
+Read out of `load_undo.ppst` (the only savestate of the three that is in gameplay — the other two
+have `PlayerBase` at 0), eight slots were live: types 10, 13, 19, 23, 26, 28, 32, 31 with ammo
+`0/0`, `1/10`, `17/17`, `1/75`, `30/206`, `30/299`, `1/5`, `7/21`. Ascending type per slot except
+the last two, which is what a category-ordered slot array looks like.
+
+That collapses the slot-vs-id gotcha below: **only the slot needs finding**, because the type then
+comes from `array[slot] + 8`, and the type is what tells melee from a gun — the thing the melee
+lock-on bug actually needs.
+
+One dead end worth recording: *there is no active-weapon pointer.* No word anywhere in the 27.9 MB
+image points at any weapon record, so the game keeps no `CWeapon*` — the current weapon is an index,
+which is what sent the hunt to the code. (Also note when scanning code that it runs well past
+`0x089f0000`: `0x08adca6c` and `0x08b65de8` are both real functions, so the usable span is
+`0x08804000`–`0x08b70000`, 897,024 words.)
+
+**FOUND: `PlayerBase + 0x789`, a signed byte, and it is a SLOT not a weapon id.** Get the id with
+`PlayerBase + 0x574 + slot * 28 + 4`. Verified live: the byte read 8, slot 8 held type 31 with 7/21
+ammo, and the formula reproduces the whole slot table above, including the slot 0 the data-side
+scan had filtered out.
+
+It came from the game's own code via the script command table (next section) — the handler for
+`02C0 get_current_char_weapon` at `0x08b2bb88`:
+
+```
+08b2bbc4  lb    $a0, 0x789($v0)     ; the slot
+08b2bbc8  sll   $a1, $a0, 5         ; \
+08b2bbcc  sll   $a0, $a0, 2         ;  }  slot * 28
+08b2bbd0  subu  $a0, $a1, $a0       ; /
+08b2bbd4  addu  $a0, $v0, $a0
+08b2bbd8  addiu $a0, $a0, 0x574     ; array base - note 0x574, not the 0x58c the data suggests
+08b2bbdc  lw    $a0, 4($a0)         ; -> weapon type
+```
+
+Reading the handler beats hunting the arithmetic: the `i*28` sequence occurs at 462 sites, and
+because the base materialises as `0x574` rather than `0x58c`, correlating on `0x58c` finds nothing.
+
+### The script command table — resolving any opcode's handler
+
+The general key, worth reaching for before any value-correlation hunt: **anything the mission script
+can ask for, the game has a function for, and that function's address is in a table.**
+
+`0x08b846e0`, 8 bytes per opcode, indexed by the masked command id. Each entry is a
+pointer-to-member: word 0 is the discriminator (0 in the direct case), **word 1 is the handler**.
+Unimplemented opcodes read as two zero words.
+
+```python
+handler = u32(0x08b846e0 + opcode * 8 + 4)
+```
+
+The dispatcher is at `0x08862600`; its signature is `andi $a1, $a1, 0x7fff` (strip the NOT flag)
+then `sll $a2, $a1, 3` against base `0x08b846e0`.
+
+Handlers resolved so far: `02C0 get_current_char_weapon` `0x08b2bb88`, `010B
+set_current_char_weapon` `0x08b284b0`, `02E7 get_char_weapon_in_slot` `0x08b2c2ac`, `03E5
+is_developer_flag_active` `0x08a57c8c`, `03E6 set_developer_flag` `0x08a57d20`, `03E9` (the
+undocumented pad command the CLEO plugin calls) `0x089e0b14`, `03FD unknown_check_command_92ea`
+`0x08a9f1ac`.
+
+**Two false leads.** A jump-table scan will never find this table — every second word is a
+discriminator, not a code pointer, so runs of consecutive code addresses break immediately. And
+there is a *second*, unrelated byte-stream VM at `0x088c0e90` that also reads a u16, tests bit 15
+and masks `0x7fff`, dispatching via `0x08adca6c` into a `std::map<u16,handler*>` (u16 key at
+node+`0x10`, value at node+`0x14`). It looks exactly like the thing you want and is a dead end: its
+registry `*(gp + 0x16f0)` reads 0 during gameplay, so it is not the live interpreter.
 
 ### `IsAiming` — u32 (boolean) — **FOUND: `0x08bb32a0`**
 
@@ -443,8 +540,8 @@ mapping is genuinely safe to use.
 3. ~~`PlayerHealth`~~ — **done**, `PlayerBase + 0x4e4`.
 4. ~~`CameraYaw`~~ — **done**, `0x08bc7f1c`. Task 2 unblocked.
 5. ~~`CameraPitch`~~ — **done**, `0x08bc7f18`. Full 2-axis mouse look works.
-6. ~~`IsAiming`~~ — **done**, `0x08bb32a0`. `WeaponIndex` remains: snapshot before and after
-   switching weapon, then `search a:changed:b`.
+6. ~~`IsAiming`~~ — **done**, `0x08bb32a0`. ~~`WeaponIndex`~~ — also **done**, `PlayerBase + 0x789`,
+   found from the script command table rather than by scanning.
 7. ~~`TimeStep`~~ — **done**, `0x08bb3b5c` (`gp + 0x1dfc`). Found by disassembly, not by scanning:
    it is the value every camera mode multiplies its angular rate by. The aim response model needs
    it.

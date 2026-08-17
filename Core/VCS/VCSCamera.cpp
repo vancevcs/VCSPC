@@ -68,9 +68,18 @@ static float g_lastWritten = 0.0f;
 // The yaw we are asserting, and how many more frames to keep asserting it for. Emu thread only.
 static float g_desiredYaw = 0.0f;
 static float g_desiredPitch = 0.0f;
-// Where the game had the pitch when this look started. The clamp window is centred on this,
-// because the game's pitch baseline is wildly different per camera mode.
+// Where the game had the pitch when we ENTERED THIS CONTEXT. The clamp window is centred on this,
+// so no baseline has to be known in advance.
+//
+// Captured once per context, NOT once per stroke, and that distinction is the whole vehicle pitch
+// bug. Re-anchoring per stroke makes the anchor follow its own output: measured in a vehicle, the
+// game keeps whatever pitch we write (delta ~0.00000 per frame, unlike on foot where it eases back
+// to baseline within 0.4s), so a stroke ends at anchor-0.7, the next stroke anchors THERE, and the
+// window ratchets down 0.7 rad at a time until it hits the game's own -89 deg limit. That is the
+// "view pinned to the roof and impossible to bring back" report. Anchoring per context bounds pitch
+// to entry +/- kPitchRange forever, which is what the clamp was always meant to do.
 static float g_anchorPitch = 0.0f;
+static bool g_haveAnchorPitch = false;
 // Last context we ran in, so a change (e.g. getting into a car) forces a fresh anchor.
 static VCSInputContext g_lastContext = VCSInputContext::Unknown;
 static int g_holdFrames = 0;
@@ -80,10 +89,37 @@ static int g_holdFrames = 0;
 static const int kHoldFrames = 45;
 
 // How far pitch may travel from wherever the game had it when the look started - about 40
-// degrees each way. Deliberately RELATIVE: the game's pitch baseline differs hugely per
-// camera (about -0.05 on foot, about -1.55 in a vehicle), so any absolute limit is wrong in
-// one mode or the other. See the clamp in CameraTick for what that cost.
+// degrees each way. Deliberately RELATIVE, so no baseline has to be known or assumed; an
+// absolute limit once pinned the view where it could not be brought back down.
+//
+// This comment used to claim the vehicle baseline was about -1.55. Measured 2026-08-17: it is
+// -0.11861 rad (-6.80 deg), close to the on-foot value. See the clamp in CameraTick.
 static const float kPitchRange = 0.7f;
+
+// An anchor is only believed if it looks like a pitch at all. A pitch is physically within +/-PI/2 -
+// straight down to straight up - so anything past this is not one.
+//
+// This is a VALIDITY test on the anchor's source, not an absolute limit on where the player may
+// look, and the difference matters: absolute look limits were the original vehicle bug. Reported
+// 2026-08-17: stepping into a vehicle can leave this field holding a positive value of 5 rad or more
+// (286 deg, impossible as a pitch - the entry transition evidently reuses it). Capturing that as the
+// anchor puts the vehicle ceiling absurdly high, which lets pitch climb past the real baseline and
+// brings the spring runaway straight back. Until the field looks like a pitch again, pitch is simply
+// not driven.
+static const float kMaxPlausiblePitch = 1.6f;
+
+// The highest pitch a vehicle camera may be driven to, in radians. Above this the spring runaway
+// starts, so it is the vehicle ceiling regardless of where the anchor was captured.
+//
+// This IS a hardcoded per-camera constant, which this file otherwise avoids - the original vehicle
+// bug was a fixed +/-0.9 look limit. It is justified here because the number is measured rather than
+// guessed, twice: the game's own resting vehicle pitch reads -0.1186 rad (-6.80 deg) and is steady,
+// and the failure threshold was independently identified in play as "above -6.9 deg". Capping at
+// level (0.0) was tried first and was not enough - it left the whole -6.9..0 deg band open, which is
+// exactly the band that pumps the spring.
+//
+// Nothing is lost: the useful direction in a vehicle is upward, i.e. more negative than this.
+static const float kVehiclePitchCeiling = -0.12f;
 
 VCSCameraSettings &CameraSettings() {
 	return g_settings;
@@ -678,6 +714,7 @@ static bool ContextWantsMouse(VCSInputContext context) {
 	switch (context) {
 	case VCSInputContext::OnFoot:
 	case VCSInputContext::InVehicle:
+	case VCSInputContext::InAircraft:
 	case VCSInputContext::Aiming:
 		return true;
 	default:
@@ -1017,6 +1054,8 @@ void CameraTick(VCSInputContext context) {
 	if (context != g_lastContext) {
 		g_holdFrames = 0;
 		g_lastContext = context;
+		// A new camera means a new baseline, and it is the only thing that may move the anchor.
+		g_haveAnchorPitch = false;
 	}
 
 	// The game runs its own camera smoothing: it eases yaw back toward wherever its follow logic
@@ -1028,9 +1067,33 @@ void CameraTick(VCSInputContext context) {
 	// last movement. That outpaces the smoothing while the player is actively looking around,
 	// and then releases so the normal follow-camera behaviour comes back when they stop.
 	// Pitch is only driven where it behaves. In a vehicle, asserting pitch against the follow
-	// camera leaves it settled steeply downward once we release, so it is opt-in there.
-	const bool havePitch = IsAddrSet(VCSAddr::CameraPitch) &&
-		(context != VCSInputContext::InVehicle || g_settings.pitchInVehicle);
+	// camera leaves it settled steeply downward once we release, so it is opt-in there. An
+	// aircraft is the same follow camera on the same kind of object, so it gets the same gate -
+	// and it matters more there, since the view already tilts as the aircraft pitches.
+	const bool inVehicleOfAnyKind = context == VCSInputContext::InVehicle ||
+		context == VCSInputContext::InAircraft;
+	// Normalise pitch across the vehicle ENTRY, which is where the runaway is actually seeded.
+	//
+	// PedEnteringVehicle latches the target vehicle about 1.65s before PlayerVehicle is set, so this
+	// is the window between "the door is open and the entry cannot be cancelled" and "the vehicle
+	// camera is live". The game does not reset CameraPitch across that boundary, so an on-foot pitch
+	// of up to +0.65 rad (+37 deg) carries straight in, becomes the vehicle anchor and therefore the
+	// ceiling, and leaves the ceiling tens of degrees inside the band that pumps the spring.
+	//
+	// So during entry: stop driving pitch, hold the field at the vehicle ceiling, and drop the anchor
+	// so the vehicle context captures a clean one. Placing it at the ceiling rather than at some
+	// invented constant means the very first vehicle anchor is already exactly where it belongs.
+	const bool enteringVehicle = !inVehicleOfAnyKind &&
+		ReadAddrU32(VCSAddr::PedEnteringVehicle).value_or(0) != 0;
+	if (enteringVehicle && IsAddrSet(VCSAddr::CameraPitch)) {
+		WriteAddrFloat(VCSAddr::CameraPitch, kVehiclePitchCeiling);
+		g_haveAnchorPitch = false;
+	}
+
+
+	const bool havePitch = IsAddrSet(VCSAddr::CameraPitch) && !enteringVehicle &&
+		(!inVehicleOfAnyKind || g_settings.pitchInVehicle);
+
 
 	if (dx != 0.0f || (dy != 0.0f && havePitch)) {
 		if (g_holdFrames == 0) {
@@ -1042,12 +1105,40 @@ void CameraTick(VCSInputContext context) {
 			}
 			g_desiredYaw = *current;
 
+			// Desired always re-syncs to live, so a stroke never snaps from a stale value. The
+			// ANCHOR does not: it is the fixed origin of the clamp window for as long as we stay in
+			// this camera. Moving it here is what ratcheted the vehicle pitch into the floor.
+			//
+			// Both are gated on the value actually looking like a pitch - see kMaxPlausiblePitch.
+			// Syncing desired to a 5 rad transient would be just as wrong as anchoring to it.
 			const std::optional<float> pitch = ReadAddrFloat(VCSAddr::CameraPitch);
-			g_desiredPitch = pitch.value_or(0.0f);
-			g_anchorPitch = g_desiredPitch;
+			if (pitch && std::fabs(*pitch) <= kMaxPlausiblePitch) {
+				g_desiredPitch = *pitch;
+				if (!g_haveAnchorPitch) {
+					g_anchorPitch = g_desiredPitch;
+					// In a vehicle the anchor IS the ceiling, so it must not sit above level.
+					//
+					// On foot the window is symmetric, so pitch can legitimately be left as high as
+					// +0.65 rad (+37 deg). The game does not reclaim pitch when you get into a
+					// vehicle - measured: a written value survives untouched while stationary - so
+					// that on-foot value carries straight in and becomes the vehicle ceiling, tens of
+					// degrees above the -6.8 deg baseline. Reported in play: entering with pitch at
+					// +5 deg or more is exactly what brings the spring runaway back.
+					//
+					// Capping at level rather than at the measured -0.1186 baseline keeps this free of
+					// a hardcoded per-camera constant, and costs nothing: the wanted direction in a
+					// vehicle is upward (more negative), so nothing useful lies above level anyway.
+					if (inVehicleOfAnyKind && g_anchorPitch > kVehiclePitchCeiling) {
+						g_anchorPitch = kVehiclePitchCeiling;
+					}
+					g_haveAnchorPitch = true;
+}
+			}
 		}
 
-		if (havePitch) {
+		// No believable anchor means no clamp window, and without the window the vehicle ceiling
+		// does not exist - so pitch stays undriven rather than driven unbounded.
+		if (havePitch && g_haveAnchorPitch) {
 			// Stored negated relative to the camera matrix: raising this value tilts the view UP.
 			// Default is INVERTED pitch by preference - mouse up looks down, flight-sim style.
 			// invertY switches to the conventional mouse-up-looks-up mapping.
@@ -1055,18 +1146,29 @@ void CameraTick(VCSInputContext context) {
 
 			// Pitch does not wrap - it is a look angle, so clamp rather than wrap.
 			//
-			// The limits are RELATIVE TO THE ANCHOR, never absolute. The game uses completely
-			// different pitch baselines per camera: on foot it rests around -0.05, in a vehicle
-			// around -1.55. A fixed +/-0.9 was the cause of the vehicle bug - it yanked the
-			// anchor from -1.55 up to -0.9 on the first write (a 37 degree jump to the roof) and
-			// then pinned it there, because the clamp overrode every attempt to pitch back down.
-			// Widening the limits to merely admit the anchor was not enough either: it then let
-			// pitch climb to +0.89 while the game sat at -0.92, which is well past vertical.
+			// The limits are RELATIVE TO THE ANCHOR, never absolute. A fixed +/-0.9 pinned the view
+			// where the clamp overrode every attempt to pitch back down; anchoring the window to
+			// wherever the game had the camera is correct in every mode without needing to know any
+			// baseline, which is the point.
 			//
-			// Anchoring the window to wherever the game had the camera makes this correct in
-			// both modes without knowing either baseline.
-			const float lo = g_anchorPitch - kPitchRange;
-			const float hi = g_anchorPitch + kPitchRange;
+			// The old comment here claimed the vehicle baseline was around -1.55. Measured
+			// 2026-08-17 with pitchInVehicle off: it is -0.11861 rad (-6.80 deg), steady, close to
+			// the on-foot value. -1.5532 rad is -89 deg, the GAME's own limit, and with the anchor
+			// at -0.1186 this window is -0.8187..+0.5813 - so the clamp cannot produce it and is not
+			// the cause of the vehicle pitch bug. See CLAUDE.md.
+			// In a vehicle the window is ASYMMETRIC and small: the entry angle is the ceiling, and
+			// only a shallow band below it is allowed. Vehicle pitch is spring-controlled and the
+			// spring's correction grows with displacement, so staying near its target is the only
+			// thing that keeps it quiet. Measured means per frame: 0.4069 rad of correction above the
+			// entry angle versus 0.0244 in the first 0.15 below it. See pitchVehicleDown.
+			float lo, hi;
+			if (inVehicleOfAnyKind) {
+				hi = g_anchorPitch;
+				lo = g_anchorPitch - g_settings.pitchVehicleDown;
+			} else {
+				lo = g_anchorPitch - kPitchRange;
+				hi = g_anchorPitch + kPitchRange;
+			}
 			if (g_desiredPitch > hi) g_desiredPitch = hi;
 			if (g_desiredPitch < lo) g_desiredPitch = lo;
 		}
@@ -1091,8 +1193,37 @@ void CameraTick(VCSInputContext context) {
 
 	// Pitch has to be re-asserted every frame too - more so than yaw, in fact: a one-shot pitch
 	// write is undone within a few frames (measured: 0.55 written, back to -0.05 within 0.4s).
-	if (havePitch) {
+	// In a vehicle, assert pitch ONLY on frames where the mouse actually moved. Re-asserting every
+	// frame - correct and necessary on foot, where the game undoes a one-shot write within 0.4s - is
+	// what causes the vehicle runaway, and this is measured rather than reasoned:
+	//
+	//   live=-0.1232 des=-0.1232 anc=-0.1232 hold=44 dy=+0.00 dx=+0.00
+	//   live=-0.3223 des=-0.1232 anc=-0.1232 hold=43 dy=+0.00 dx=-1.00
+	//   live=-0.1232 ... then -0.3387, -0.4415, -0.5546, -0.6639, -0.8006, -0.9742, -1.1034
+	//
+	// `des` and `anc` never budge, so every clamp in this file was doing its job. `live` alternates
+	// between our write and a value diverging further each frame - and it keeps diverging on frames
+	// with dy=0 AND dx=0, so it is not being driven by input. A spring would converge; this grows,
+	// which is positive feedback: our write every frame fights the game's own camera integrator and
+	// winds it up. The vehicle camera keeps a written pitch by itself when left alone (measured: a
+	// value written by hand survives untouched), so there is nothing to re-assert against.
+	// So in a vehicle, assert at the GAME's rate rather than ours: once per logic frame, tracked with
+	// FrameCounter. The alternating trace rows are two writes landing per game frame - we run from
+	// the vblank hook at ~60Hz, the game's logic runs at 30 - and that double-write is what the
+	// integrator winds up on. One write per game frame removes the pumping without leaving gaps,
+	// which is what made the movement-only version chop: it skipped frames entirely and the game
+	// reclaimed pitch in between.
+	static u32 g_lastPitchFrame = 0xFFFFFFFF;
+	const std::optional<u32> gameFrame = ReadAddrU32(VCSAddr::FrameCounter);
+	const bool newGameFrame = !gameFrame || *gameFrame != g_lastPitchFrame;
+
+	const bool assertPitch = havePitch && g_haveAnchorPitch &&
+		(!inVehicleOfAnyKind || newGameFrame);
+	if (assertPitch) {
 		WriteAddrFloat(VCSAddr::CameraPitch, g_desiredPitch);
+		if (gameFrame) {
+			g_lastPitchFrame = *gameFrame;
+		}
 	}
 
 	g_driving = WriteAddrFloat(VCSAddr::CameraYaw, g_desiredYaw);
@@ -1189,6 +1320,7 @@ void CameraReset() {
 	g_desiredYaw = 0.0f;
 	g_desiredPitch = 0.0f;
 	g_anchorPitch = 0.0f;
+	g_haveAnchorPitch = false;
 	g_lastContext = VCSInputContext::Unknown;
 }
 

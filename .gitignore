@@ -155,3 +155,4 @@ cmake-build-*/
 
 # VCS address-hunt snapshots (24 MB each, never commit these)
 Tools/.vcsscan/
+Tools/.vcsvehicle/
