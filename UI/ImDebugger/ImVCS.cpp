@@ -28,6 +28,7 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
@@ -500,6 +501,35 @@ void ImVCSWindow::DrawInputTester() {
 
 void ImVCSWindow::DrawCamera() {
 	VCS::VCSCameraSettings &s = VCS::CameraSettings();
+
+	// Free aim at the fire site - the one aiming path that does not fight the game's own aim
+	// integrator, because it rewrites the shot's target vector just before the raycast.
+	if (ImGui::CollapsingHeader("Free aim (fire-site hook)", ImGuiTreeNodeFlags_DefaultOpen)) {
+		VCS::VCSFireHookSettings &f = VCS::FireHookSettings();
+		ImGui::Text("hook: %s", VCS::FireHookInstalled() ? "installed" : "NOT installed");
+
+		u64 seen = 0, redirected = 0;
+		VCS::FireHookStats(&seen, &redirected);
+		ImGui::Text("raycasts seen: %llu   redirected: %llu",
+			(unsigned long long)seen, (unsigned long long)redirected);
+		// The failure worth spotting at a glance: the hook runs but the guard rejects every
+		// shot, which from the outside looks identical to the hook not working at all.
+		if (seen > 0 && redirected == 0) {
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+				"guard rejecting every shot - aim key held? player radius too small?");
+		}
+
+		ImGui::Checkbox("Enable fire-site free aim", &f.enabled);
+		ImGui::SliderFloat("Debug deflect (deg)", &f.debugDeflectDegrees, -45.0f, 45.0f, "%.1f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Non-zero ignores the camera and just rotates the game's own shot, reproducing the vcsfiretest.py experiment in-engine. Use it FIRST: if bullets do not visibly swing, the hook is not firing. Set to 0 for real camera-derived aiming.");
+		}
+		ImGui::SliderFloat("Player radius", &f.playerRadius, 0.5f, 10.0f, "%.1f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("How close to the player a ray must start to count as the player's shot. The wrapper carries no shooter argument, so this stands in for re3's shooter == FindPlayerPed check. NPCs fire through the same code.");
+		}
+		ImGui::Separator();
+	}
 
 	ImGui::TextWrapped(
 		"Mouse look writes CameraYaw directly instead of going through sceCtrl - the PSP has no "
