@@ -197,7 +197,15 @@ def main():
     try:
         asyncio.run(run(args.port, args.shots, args.yaw, args.timeout))
     except asyncio.TimeoutError:
-        sys.exit("timed out waiting for a shot - is the breakpoint being reached?")
+        sys.exit("timed out waiting for a shot - is the breakpoint being reached?\n"
+                 "If the game is running and you did fire, suspect the JIT: set CPUCore = 0\n"
+                 "in memstick/PSP/SYSTEM/ppsspp.ini and relaunch.")
+    except (websockets.exceptions.ConnectionClosed, ConnectionResetError, OSError) as e:
+        # Almost always PPSSPP going away underneath us. A traceback here buries the one fact
+        # that matters, which is that the emulator is no longer there.
+        sys.exit(f"lost the debugger connection ({type(e).__name__}) - PPSSPP has probably "
+                 "exited.\nAny rows printed above are still valid; anything after the last one "
+                 "never happened.")
     except KeyboardInterrupt:
         pass
 
