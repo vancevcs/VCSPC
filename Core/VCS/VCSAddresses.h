@@ -40,6 +40,15 @@ namespace VCS {
 // so this is unambiguous - see Memory::IsValidAddress.
 inline constexpr u32 kUnsetAddress = 0;
 
+// A CODE address, not a data one, which is why it sits outside the table below - that table
+// describes values to read, and this is a place to hook.
+//
+// The `jal CWorld::ProcessLineOfSight` inside the weapon's raycast wrapper (0x08a41d28). Every
+// weapon raycast funnels through it, and a0/a1 hold point1/point2 there, untouched by the
+// wrapper. Overwriting point2 immediately before this call redirects the shot - measured in
+// play, not inferred. See "The path a shot actually takes" in docs/VCS_ADDRESSES.md.
+inline constexpr u32 kVCSWeaponRaycastCall = 0x08A41D74;
+
 // How to interpret the bytes at an address. Used both by the typed read helpers and by the
 // debugger window to decide how to display a value.
 enum class VCSAddrType {

@@ -20,6 +20,7 @@
 #include "Core/ELF/ParamSFO.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSState.h"
@@ -70,6 +71,10 @@ void Init() {
 
 	INFO_LOG(Log::System, "VCS input overhaul active for %s (%d/%d addresses known)",
 		g_discID.c_str(), known, (int)VCSAddr::Count);
+
+	// Free aim at the fire site. Inert until enabled in settings, and installs nothing unless
+	// g_active - so this cannot touch another game even if the address were somehow valid there.
+	InstallFireHook();
 }
 
 void Shutdown() {
@@ -77,6 +82,8 @@ void Shutdown() {
 	ResetHostKeys();
 	ClearSharedState();
 	CameraReset();
+	// Put the game's own instruction back before anything else tears down.
+	RemoveFireHook();
 
 	g_active = false;
 	g_discID.clear();

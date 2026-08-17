@@ -33,6 +33,7 @@
 #include "Core/MIPS/MIPSCodeUtils.h"
 #include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/HLE/ReplaceTables.h"
+#include "Core/VCS/VCSFireHook.h"
 #include "Core/HLE/FunctionWrappers.h"
 #include "Core/HLE/sceDisplay.h"
 
@@ -1658,6 +1659,9 @@ static const ReplacementTableEntry entries[] = {
 	{ "starocean_write_stencil", &Hook_starocean_write_stencil, 0, REPFLAG_HOOKENTER, 0x260 },
 	{ "topx_create_saveicon", &Hook_topx_create_saveicon, 0, REPFLAG_HOOKENTER, 0x34 },
 	{ "ff1_battle_effect", &Hook_ff1_battle_effect, 0, REPFLAG_HOOKENTER },
+	// GTA: Vice City Stories free aim. Installed by ADDRESS from VCS::Init rather than
+	// matched by hash - see Core/VCS/VCSFireHook.cpp. Inert for every other game.
+	{ "vcs_weapon_raycast", &VCS::Hook_vcs_weapon_raycast, 0, REPFLAG_HOOKENTER },
 	// This is actually used in other games, not just Dissidia.
 	{ "dissidia_recordframe_avi", &Hook_dissidia_recordframe_avi, 0, REPFLAG_HOOKENTER },
 	{ "brandish_download_frame", &Hook_brandish_download_frame, 0, REPFLAG_HOOKENTER },
@@ -1805,6 +1809,20 @@ static bool WriteReplaceInstruction(u32 address, int index) {
 	replacedInstructions[address] = prevInstr;
 	Memory::WriteUnchecked_U32(MIPS_EMUHACK_CALL_REPLACEMENT | index, address);
 	return true;
+}
+
+int GetReplacementFuncIndexByName(const char *name) {
+	for (size_t i = 0; i < ARRAY_SIZE(entries); i++) {
+		if (entries[i].name && !strcmp(entries[i].name, name))
+			return (int)i;
+	}
+	return -1;
+}
+
+bool WriteReplaceInstructionAt(u32 address, int index) {
+	if (index < 0 || (size_t)index >= ARRAY_SIZE(entries))
+		return false;
+	return WriteReplaceInstruction(address, index);
 }
 
 void WriteReplaceInstructions(u32 address, u64 hash, int size) {

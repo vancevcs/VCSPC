@@ -70,6 +70,15 @@ void Replacement_Shutdown();
 
 int GetNumReplacementFuncs();
 std::vector<int> GetReplacementFuncIndexes(u64 hash, int funcSize);
+
+// Look a replacement up by name instead of by function hash, and install it at a known address.
+//
+// The normal path needs MIPSAnalyst to have found and hashed the function first. That is right
+// for replacements meant to match a routine wherever it appears, and useless for hooking one
+// specific address in one specific known build - which is what a per-game hook wants, and what
+// the VCS fork does (no ASLR, single disc ID, address established by measurement).
+int GetReplacementFuncIndexByName(const char *name);
+bool WriteReplaceInstructionAt(u32 address, int index);
 const ReplacementTableEntry *GetReplacementFunc(size_t index);
 
 void WriteReplaceInstructions(u32 address, u64 hash, int size);
