@@ -329,6 +329,55 @@ and masks `0x7fff`, dispatching via `0x08adca6c` into a `std::map<u16,handler*>`
 node+`0x10`, value at node+`0x14`). It looks exactly like the thing you want and is a dead end: its
 registry `*(gp + 0x16f0)` reads 0 during gameplay, so it is not the live interpreter.
 
+### The weapon fire path — where the shot is actually resolved
+
+The target for the free-aim work: re3 and reVC do free aim entirely at the fire site, by
+raycasting through the crosshair pixel instead of along the ped's aim (`CWeapon::FireInstantHit`
+-> `CCamera::Find3rdPersonCamTargetVector`). To do the same here, the raycast has to be found.
+
+| | |
+|---|---|
+| `CWorld::ProcessLineOfSight` | `0x0889786c` |
+| `CWorld::GetIsLineOfSightClear` (the yes/no form) | `0x088967ac` |
+| `CWorld` current scan code | `gp-0x6394` |
+| the weapon fire function | `0x08ac811c` |
+| its raycast call site | `0x08acc844` |
+| `source` / `target` at that site | `sp+0x440` / `sp+0x450` |
+| the `bInclude*` global it brackets the call with | `gp+0x1f88` (`0x08bb3ce8`) |
+| vec sub / add / magnitude / scale | `0x8a931d0` / `0x8a931b8` / `0x8ac75c0` / `0x8ac7620` |
+
+**Found structurally, with `Tools/vcsxref.py`, from a savestate.** Every CWorld sector scan opens
+by advancing a `u16` scan code and resetting it at `0xffff` — re3's `AdvanceCurrentScanCode`
+exactly — so the functions touching `gp-0x6394` *are* the collision family: 61 of them, and
+sorting by caller count puts the two general raycasts on top. The argument shapes tell them
+apart: `0x088967ac` masks `a2,a3,t0-t3` to bytes so only `a0,a1` are pointers, while
+`0x0889786c` leaves `a0-a3` alone and starts the bools at `t0` — i.e. four pointers first
+(`point1, point2, colPoint&, entity&`), which is `ProcessLineOfSight`.
+
+Then `--bracketed` picked the fire site out of its 74 callers in one step: re3 sets
+`bIncludeCarTyres` / `bIncludeDeadPeds` / `bIncludeBikers` immediately before the weapon's
+raycast and clears them after, and **exactly one** call site here is wrapped in that
+set-then-zero pattern. Camera clipping and AI visibility checks are not.
+
+The arithmetic just above the call confirms it, matching reVC's lock-on branch line for line
+(`Weapon.cpp:886-889`) — `target -= *fireSource`, magnitude, `target *= range/dist`,
+`target += *fireSource`, then the raycast with `a2`/`a3` pointing at stack colPoint and victim
+slots and `t0-t3` all 1. `0x08ac811c` is a real function start (preceded by a `jr $ra` delay
+slot, frame `0x540`, `a0` dereferenced at `+0x1d0` as `this`) with 2 callers, consistent with
+`CWeapon::Fire` reaching it from two paths.
+
+**What is verified and what is not.** The addresses and the call shape are read out of the code
+and are solid. That `0x08ac811c` is specifically `FireInstantHit` rather than some sibling fire
+path is a strong inference from the arithmetic, not a measurement. And **nothing yet shows that
+overwriting `source`/`target` at `0x08acc844` redirects the shot** — that is the next experiment,
+and it is the one that decides whether the re3 model ports at all.
+
+**A false lead, so nobody re-walks it.** `0335 fire_hunter_gun` in `scm/VCSSCM.INI` looks like the
+ideal way in via the script command table, and is not: its handler (`0x08abb0b4`) collects about
+five parameters where the INI declares one. Sanny's VCS opcode names are partly inherited from
+Vice City and cannot be trusted for an opcode nobody has confirmed. The command table itself is
+fine — the formula was re-verified against the known `02C0` handler while establishing this.
+
 ### `IsAiming` — u32 (boolean) — **FOUND: `0x08bb32a0`**
 
 **1 while locked on to a target**, not merely while the aim button is held. Confirmed by two
