@@ -366,11 +366,62 @@ slots and `t0-t3` all 1. `0x08ac811c` is a real function start (preceded by a `j
 slot, frame `0x540`, `a0` dereferenced at `+0x1d0` as `this`) with 2 callers, consistent with
 `CWeapon::Fire` reaching it from two paths.
 
-**What is verified and what is not.** The addresses and the call shape are read out of the code
-and are solid. That `0x08ac811c` is specifically `FireInstantHit` rather than some sibling fire
-path is a strong inference from the arithmetic, not a measurement. And **nothing yet shows that
-overwriting `source`/`target` at `0x08acc844` redirects the shot** — that is the next experiment,
-and it is the one that decides whether the re3 model ports at all.
+**`0x08ac811c` is NOT the path an ordinary shot takes, and the structural search was misleading
+here.** `CWeapon::Fire` does not call it at all. It is a real weapon raycast bracketed exactly
+as re3 brackets its own, but a free-fired pistol never goes near it. The bracket found *a* fire
+path, not *the* fire path — and two rounds of live testing were spent on it before that was
+clear. A fingerprint that matches re3 proves the code is the same *shape*, not that it is on the
+path you care about.
+
+### The path a shot actually takes — measured, not inferred
+
+| | |
+|---|---|
+| `CWeapon::Fire` | `0x08a45338` |
+| the weapon's raycast wrapper | `0x08a41d28` |
+| its `ProcessLineOfSight` call | `0x08a41d74` (returns to `0x08a41d7c`) |
+| weapon record | `PlayerBase + 0x574 + slot*28`, **type `+0x04`, clip `+0x0c`, total `+0x10`** |
+
+**`CWeapon::Fire` was caught with a write breakpoint on clip ammo** — one trip per shot, no
+guessing — and identified beyond doubt by the code around the write, which is reVC's
+`m_nAmmoTotal < 25000` check compiled literally: `lw / blez / addiu -1 / sw`, then
+`slti a0, a0, 0x61A8`. Note the record layout that came out of it is **four bytes off** what
+the sections above derive from a savestate; the live read wins.
+
+The raycast is not on the stack when that breakpoint trips, because `Fire` spends the round
+*after* its FireXxx helper has returned. It was found by breaking on `Fire`, arming the whole
+collision family behind a **condition on `ra`** so camera clipping could not drown the signal,
+and reading back which one the shot reached. `0x08a41d74`, on consecutive shots. The enclosing
+`0x08a41d28` is reached from two different weapon functions, which is the shape of reVC's
+file-local `ProcessLineOfSight` wrapper — so every weapon raycast funnels through one place,
+a better hook point than re3 itself offers.
+
+**The shot direction is writable there. Confirmed in play:**
+
+```
+ # site       mode      hit point                    moved  hit
+ 1 08a41d74   control   (-1746.35  -227.46   15.27)   0.00   y
+ 2 08a41d74   deflected (-1751.45  -225.42   15.27)   5.50   y
+ 3 08a41d74   control   (-1746.35  -227.46   15.27)   0.00   y
+ 4 08a41d74   deflected (-1751.45  -225.40   15.26)   5.50   y
+```
+
+Rotating the target vector 25° about Z immediately before the call moves the resolved hit point
+by 5.50 units, reproducibly, with the controls bit-identical. That is the necessary condition
+for porting re3's model — the raycast obeys a written target — and `Tools/vcsfiretest.py`
+reproduces it.
+
+#### Breakpoints on the JIT cannot be trusted here, and it cost several rounds
+
+`CPUCore = 1` gave breakpoints that fired *once* and then stopped firing at the same address,
+which reads exactly like "this code is not on the path" and is not. Everything above was
+established on `CPUCore = 0`. Two intermediate negative results — that the shot does not pass
+`0x08a4e69c` / `0x08a4e908` — were collected under the JIT and had to be retracted; they were
+later confirmed on the interpreter, but they were not evidence when they were first reported.
+
+**A breakpoint on the `jal` at a call site never fired even on the interpreter**, while one on
+the called function's entry, conditioned on `ra`, fires every time. Break on entry with a
+condition; do not break on call sites.
 
 **A false lead, so nobody re-walks it.** `0335 fire_hunter_gun` in `scm/VCSSCM.INI` looks like the
 ideal way in via the script command table, and is not: its handler (`0x08abb0b4`) collects about
