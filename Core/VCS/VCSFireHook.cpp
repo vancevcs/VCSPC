@@ -97,12 +97,21 @@ static bool CameraForward(Vec3 *out) {
 	if (!camYaw || !camPitch)
 		return false;
 
-	// CameraYaw is the camera matrix yaw + PI/2, and pitch is stored negated - more negative is
-	// looking UP. Both conventions come from docs/VCS_ADDRESSES.md and both were established by
-	// writing values and watching the view, so they are the trustworthy ones.
+	// Both conventions below are MEASURED, by aiming at things and seeing where the round went.
+	// Neither matched what was derived from the notes, and the first build was 90 degrees off
+	// horizontally and inverted vertically as a result.
+	//
+	// Yaw: `- kPi`, not the `- kPi/2` that CameraYaw's documented "matrix yaw + PI/2" relation
+	// implies. The extra quarter turn is this file building its direction as (cos, sin) where
+	// GTA's own forward vector is (-sin, cos).
+	//
+	// Pitch: used AS-IS, not negated - even though the address notes say CameraPitch is stored
+	// negated and more negative is looking up. Negating it aimed exactly as far wrong in the
+	// opposite direction, which is what a mirrored axis looks like. Why the note does not hold
+	// for the shot direction is not established; the measurement is.
 	const VCSFireHookSettings &s = FireHookSettings();
-	const float yaw = *camYaw - kPi / 2.0f + s.aimYawOffsetDeg * kPi / 180.0f;
-	const float pitch = s.aimInvertPitch ? *camPitch : -*camPitch;
+	const float yaw = *camYaw - kPi + s.aimYawOffsetDeg * kPi / 180.0f;
+	const float pitch = (s.aimInvertPitch ? -1.0f : 1.0f) * *camPitch;
 
 	const float cp = cosf(pitch);
 	out->x = cp * cosf(yaw);
