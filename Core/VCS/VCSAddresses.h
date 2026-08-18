@@ -54,6 +54,10 @@ inline constexpr u32 kVCSWeaponRaycastCall = 0x08A41D74;
 // yet, or this is not the build the address was measured on, we must write nothing at all.
 inline constexpr u32 kVCSWeaponRaycastOp = 0x0E225E1B;
 
+// CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70. The camera's own world position lives inside
+// it; see camSourceOffset in VCSFireHook.h for which field and how it was identified.
+inline constexpr u32 kVCSCam0 = 0x08BC7EA0;
+
 // How to interpret the bytes at an address. Used both by the typed read helpers and by the
 // debugger window to decide how to display a value.
 enum class VCSAddrType {

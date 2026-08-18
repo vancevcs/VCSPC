@@ -184,7 +184,28 @@ int Hook_vcs_weapon_raycast() {
 		Vec3 forward;
 		if (!CameraForward(&forward))
 			return 0;
-		aimed = AimedTarget(source, target, forward);
+
+		const float range = Dist(source, target);
+		Vec3 origin = source;
+		Vec3 camPos;
+		if (s.useCameraOrigin && ReadVec3(kVCSCam0 + s.camSourceOffset, &camPos)) {
+			// re3's Find3rdPersonCamTargetVector, exactly: start at the camera and slide the
+			// origin along the ray to the point nearest the muzzle. The ray stays collinear with
+			// the pixel the crosshair covers, which is the whole point - but it no longer starts
+			// behind the player, so it cannot hit geometry between the camera and the gun.
+			const float t = (source.x - camPos.x) * forward.x
+			              + (source.y - camPos.y) * forward.y
+			              + (source.z - camPos.z) * forward.z;
+			origin = Vec3{camPos.x + forward.x * t,
+			              camPos.y + forward.y * t,
+			              camPos.z + forward.z * t};
+			// The origin moved, so the game's own source has to move with it or the bullet would
+			// travel a different line from the one we solved.
+			WriteVec3(srcPtr, origin);
+		}
+		aimed = Vec3{origin.x + forward.x * range,
+		             origin.y + forward.y * range,
+		             origin.z + forward.z * range};
 	}
 
 	if (WriteVec3(dstPtr, aimed))

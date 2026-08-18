@@ -86,7 +86,25 @@ struct VCSFireHookSettings {
 	// 3.2 at 0.529. That agreement is why this is computed rather than stored as a fixed angle:
 	// the offset scales with FOV, so it stays correct through sniper zoom, which a constant would
 	// not.
-	float crosshairX = 0.529f;
+	float crosshairX = 0.53f;
+
+	// Build the ray from the CAMERA's position and slide its origin to the muzzle, as re3 does,
+	// instead of starting it at the muzzle and only borrowing the camera's direction.
+	//
+	// This is what removes PARALLAX. Starting at the gun leaves the ray a fixed lateral offset from
+	// the line the crosshair actually covers - and because the camera orbits the player, the size
+	// of that offset wanders with the angle between them. Measured in play: the crosshairX needed
+	// to compensate swung between 0.5125 and 0.5300 across a 180 degree sweep, non-monotonically.
+	// Fitting that curve was the wrong move, because the error also scales with 1/distance, so any
+	// fit would be correct at one range only.
+	bool useCameraOrigin = true;
+
+	// Which field of CCam[0] holds that position. Six position-shaped vec3s sit behind the camera's
+	// forward vector at follow-camera distance; +0x210 is the most exactly anti-parallel (177.6 deg
+	// against 172.5 for +0x020), which is why it is the default. Tunable because "most
+	// anti-parallel" is evidence, not proof - if parallax persists, +0x020, +0x050 and +0x090 are
+	// the other candidates.
+	u32 camSourceOffset = 0x210;
 
 	// Flips the vertical axis. Also zeroed out by calibration: pitch is now used as-is, which is
 	// what aimed correctly, rather than negated as the address notes imply.

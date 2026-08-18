@@ -532,6 +532,14 @@ void ImVCSWindow::DrawCamera() {
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Where the crosshair sits across the screen. The shot is offset from the camera centre because the crosshair is - re3 uses 0.53 for the same reason. Computed against live FOV, so it stays right through zoom.");
 		}
+		ImGui::Checkbox("Camera-origin ray (removes parallax)", &f.useCameraOrigin);
+		if (f.useCameraOrigin) {
+			int off = (int)f.camSourceOffset;
+			if (ImGui::InputInt("CCam source offset (hex)", &off, 0x10, 0x40, ImGuiInputTextFlags_CharsHexadecimal)) {
+				f.camSourceOffset = (u32)(off & 0xFFF);
+			}
+			ImGui::TextDisabled("candidates: 0x210 (default), 0x020, 0x050, 0x090");
+		}
 		ImGui::Checkbox("Invert aim pitch", &f.aimInvertPitch);
 		ImGui::SliderFloat("Player radius", &f.playerRadius, 0.5f, 10.0f, "%.1f");
 		if (ImGui::IsItemHovered()) {
