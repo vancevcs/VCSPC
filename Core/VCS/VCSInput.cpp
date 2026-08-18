@@ -23,6 +23,7 @@
 #include "Common/Common.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
@@ -1006,7 +1007,26 @@ static bool CameraAimActive(VCSInputContext context) {
 		return false;
 	}
 	if (CameraSettings().mouseLookInFreeAim) {
-		return true;   // disproven for general use, kept switchable
+		return true;   // the manual override; see the flag's own comment
+	}
+	// THE FIRE-SITE HOOK UN-DISPROVES mouseLookInFreeAim, and this is where that lands.
+	//
+	// Driving the camera in free aim was rejected because the crosshair moved and the shot did
+	// not - "it looks correct and misses". That verdict was correct and CONDITIONAL: it depended
+	// on the shot being resolved from the ped's aim state rather than from the camera. The hook
+	// resolves it from the camera, so the condition is gone.
+	//
+	// This is the payoff of the whole fire-site effort, and without it the hook changes nothing a
+	// player can feel: the bullet followed the camera, but the mouse was still spent on the stick,
+	// so aiming still went through the game's squared integrator and its smoother. Writing the
+	// angle directly is what makes free aim feel like mouse look - a position control with nothing
+	// in between - which is the complaint that outlived every other one.
+	//
+	// Gated on the hook being INSTALLED as well as enabled. If the patch did not land, the shot is
+	// still resolved the old way and driving the camera would reintroduce the exact desync that
+	// got this disproved in the first place.
+	if (FireHookInstalled() && FireHookSettings().enabled) {
+		return true;
 	}
 	return CameraSettings().aimScopedCamera && ScopedWeaponActive();
 }
