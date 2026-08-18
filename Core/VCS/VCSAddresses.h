@@ -49,6 +49,11 @@ inline constexpr u32 kUnsetAddress = 0;
 // play, not inferred. See "The path a shot actually takes" in docs/VCS_ADDRESSES.md.
 inline constexpr u32 kVCSWeaponRaycastCall = 0x08A41D74;
 
+// The instruction we expect to find there: `jal 0x0889786c`. Checked before patching, because
+// installing now happens after module load rather than during it - so if the code is not there
+// yet, or this is not the build the address was measured on, we must write nothing at all.
+inline constexpr u32 kVCSWeaponRaycastOp = 0x0E225E1B;
+
 // How to interpret the bytes at an address. Used both by the typed read helpers and by the
 // debugger window to decide how to display a value.
 enum class VCSAddrType {

@@ -18,6 +18,7 @@
 
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/ReplaceTables.h"
+#include "Core/MIPS/MIPS.h"
 #include "Core/MemMap.h"
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSGame.h"
@@ -187,10 +188,27 @@ void InstallFireHook() {
 		return;
 	}
 
+	// Verify the game's own instruction is there before touching it.
+	//
+	// This is what makes installing after module load safe. PPSSPP's normal replacement path runs
+	// from MIPSAnalyst while the module is being scanned; ours cannot, because VCS::Init runs at
+	// __KernelInit - BEFORE the EBOOT is loaded - so anything written then is overwritten by the
+	// module loader. That is exactly what happened on the first attempt: the install reported
+	// success and the hook never fired once. Installing from Tick fixes the timing, and this check
+	// makes sure we only ever patch the instruction we measured.
+	auto op = ReadU32(kVCSWeaponRaycastCall);
+	if (!op || *op != kVCSWeaponRaycastOp) {
+		return;  // Not loaded yet, or not this build. Try again next tick.
+	}
+
 	// Installed by ADDRESS rather than by the usual function-hash match. The PSP has no ASLR and
 	// this is a single known build (ULUS10160), so the address is stable; and the hash path would
 	// need the analyser to have found and named this function first, which it has not.
 	if (WriteReplaceInstructionAt(kVCSWeaponRaycastCall, index)) {
+		// Writing code after the JIT may already have compiled the block containing it means the
+		// cached block has to go, or the game keeps running the original instruction. The normal
+		// replacement path never needs this because it runs before anything is compiled.
+		currentMIPS->InvalidateICache(kVCSWeaponRaycastCall, 4);
 		g_installed = true;
 		INFO_LOG(Log::HLE, "VCS: fire hook installed at %08x", kVCSWeaponRaycastCall);
 	}
@@ -200,6 +218,7 @@ void RemoveFireHook() {
 	if (!g_installed)
 		return;
 	RestoreReplacedInstruction(kVCSWeaponRaycastCall);
+	currentMIPS->InvalidateICache(kVCSWeaponRaycastCall, 4);
 	g_installed = false;
 	g_seen = 0;
 	g_redirected = 0;

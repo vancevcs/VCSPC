@@ -71,10 +71,6 @@ void Init() {
 
 	INFO_LOG(Log::System, "VCS input overhaul active for %s (%d/%d addresses known)",
 		g_discID.c_str(), known, (int)VCSAddr::Count);
-
-	// Free aim at the fire site. Inert until enabled in settings, and installs nothing unless
-	// g_active - so this cannot touch another game even if the address were somehow valid there.
-	InstallFireHook();
 }
 
 void Shutdown() {
@@ -96,6 +92,12 @@ void Tick() {
 	}
 
 	g_tickCount++;
+
+	// Free aim at the fire site. Installed HERE rather than in Init, because Init runs at
+	// __KernelInit - before the EBOOT is loaded - so anything written there is overwritten by the
+	// module loader. It self-guards on already-installed and on finding the expected instruction,
+	// so retrying every tick until the code exists costs a single compare.
+	InstallFireHook();
 
 	// Decode first, then map - the context depends on what we just read.
 	UpdateSharedState();
