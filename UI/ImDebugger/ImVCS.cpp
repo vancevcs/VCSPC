@@ -524,6 +524,11 @@ void ImVCSWindow::DrawCamera() {
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Non-zero ignores the camera and just rotates the game's own shot, reproducing the vcsfiretest.py experiment in-engine. Use it FIRST: if bullets do not visibly swing, the hook is not firing. Set to 0 for real camera-derived aiming.");
 		}
+		ImGui::SliderFloat("Yaw offset (deg)", &f.aimYawOffsetDeg, -180.0f, 180.0f, "%.1f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Rotates camera-derived aim. Only matters with Debug deflect at 0. If shots land a consistent angle off the camera, this is the knob - 90 degree errors are a coordinate convention, small ones are something else.");
+		}
+		ImGui::Checkbox("Invert aim pitch", &f.aimInvertPitch);
 		ImGui::SliderFloat("Player radius", &f.playerRadius, 0.5f, 10.0f, "%.1f");
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("How close to the player a ray must start to count as the player's shot. The wrapper carries no shooter argument, so this stands in for re3's shooter == FindPlayerPed check. NPCs fire through the same code.");

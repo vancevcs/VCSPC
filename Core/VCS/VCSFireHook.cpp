@@ -100,8 +100,9 @@ static bool CameraForward(Vec3 *out) {
 	// CameraYaw is the camera matrix yaw + PI/2, and pitch is stored negated - more negative is
 	// looking UP. Both conventions come from docs/VCS_ADDRESSES.md and both were established by
 	// writing values and watching the view, so they are the trustworthy ones.
-	const float yaw = *camYaw - kPi / 2.0f;
-	const float pitch = -*camPitch;
+	const VCSFireHookSettings &s = FireHookSettings();
+	const float yaw = *camYaw - kPi / 2.0f + s.aimYawOffsetDeg * kPi / 180.0f;
+	const float pitch = s.aimInvertPitch ? *camPitch : -*camPitch;
 
 	const float cp = cosf(pitch);
 	out->x = cp * cosf(yaw);

@@ -68,6 +68,19 @@ struct VCSFireHookSettings {
 	// gun. An NPC firing from inside this radius would be misread, which is why the aim key must
 	// also be held.
 	float playerRadius = 3.0f;
+
+	// Yaw correction, degrees, applied on top of CameraYaw - PI/2.
+	//
+	// Defaults to +90 because the first build aimed 90 degrees LEFT of the camera. Almost certainly
+	// a convention mismatch: this file builds the direction as (cos, sin), while GTA's own forward
+	// vector is (-sin, cos) - exactly a quarter turn apart. Left tunable rather than folded into the
+	// formula because the conventions here came out of notes rather than measurement, and a slider
+	// costs a moment where a wrong constant costs a rebuild.
+	float aimYawOffsetDeg = 90.0f;
+
+	// CameraPitch is stored negated (more negative is looking UP), so the hook negates it. If
+	// vertical aim comes out inverted, that assumption is wrong and this flips it back.
+	bool aimInvertPitch = false;
 };
 
 VCSFireHookSettings &FireHookSettings();
