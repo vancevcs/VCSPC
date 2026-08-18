@@ -86,7 +86,7 @@ struct VCSFireHookSettings {
 	// 3.2 at 0.529. That agreement is why this is computed rather than stored as a fixed angle:
 	// the offset scales with FOV, so it stays correct through sniper zoom, which a constant would
 	// not.
-	float crosshairX = 0.53f;
+	float crosshairX = 0.51f;  // Calibrated in play across the whole arsenal.
 
 	// Build the ray from the CAMERA's position and slide its origin to the muzzle, as re3 does,
 	// instead of starting it at the muzzle and only borrowing the camera's direction.
@@ -97,7 +97,7 @@ struct VCSFireHookSettings {
 	// to compensate swung between 0.5125 and 0.5300 across a 180 degree sweep, non-monotonically.
 	// Fitting that curve was the wrong move, because the error also scales with 1/distance, so any
 	// fit would be correct at one range only.
-	bool useCameraOrigin = true;
+	bool useCameraOrigin = false;
 
 	// Which field of CCam[0] holds that position. Six position-shaped vec3s sit behind the camera's
 	// forward vector at follow-camera distance; +0x210 is the most exactly anti-parallel (177.6 deg
@@ -105,6 +105,29 @@ struct VCSFireHookSettings {
 	// anti-parallel" is evidence, not proof - if parallax persists, +0x020, +0x050 and +0x090 are
 	// the other candidates.
 	u32 camSourceOffset = 0x210;
+
+	// STATUS: useCameraOrigin ships OFF, and the parallax it would remove is accepted.
+	//
+	// 0x210 was picked as "most anti-parallel to the camera's forward vector", and with it the
+	// shots landed nowhere visible - a wrong origin, not a wrong direction. The selection method
+	// is the suspect: the forward vector used to rank the candidates was the one calibrated for
+	// AIMING (camYaw - PI), which is not necessarily the camera's true forward (the notes say
+	// camYaw - PI/2). Ranked against a vector 90 degrees out, the ordering means little.
+	//
+	// What ships instead is the gun-origin ray with crosshairX 0.51, settled in play and reported
+	// versatile across every weapon. It carries the parallax wander - the crosshairX that is
+	// exactly right drifts by about 2 degrees across a 180 degree sweep - and that is a smaller
+	// cost than an origin that can throw the shot out of the world.
+	//
+	// To finish this properly: identify the camera position by MEASUREMENT, not by ranking. Stand
+	// still, rotate the view a known amount, read the candidates twice. The camera's position
+	// traces an arc around the player; nothing else in CCam does. Then set this, tick
+	// useCameraOrigin, and crosshairX should go back to a single value correct at every angle AND
+	// every range - the range half being what no amount of crosshairX tuning can fix.
+	//
+	// Do not "fix" a misaligned offset here into an aligned one without re-testing. 0x35 was found
+	// to aim well, and it aims well because ReadFloat rejects the unaligned address, the read
+	// fails, and the camera-origin path never runs - it is this flag being off, spelled differently.
 
 	// Flips the vertical axis. Also zeroed out by calibration: pitch is now used as-is, which is
 	// what aimed correctly, rather than negated as the address notes imply.
