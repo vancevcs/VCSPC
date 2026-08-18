@@ -18,11 +18,11 @@
 
 // Free aim, done the way re3 and reVC do it: at the fire site.
 //
-// Those games aim by RAYCASTING FROM THE CAMERA rather than along the ped's aim -
-// CWeapon::FireInstantHit calls CCamera::Find3rdPersonCamTargetVector, which unprojects the
-// crosshair pixel into a world ray, and the arm IK and crosshair are presentation on top. VCS
-// has no such branch, but it turns out not to need one: the shot direction is writable at the
-// raycast, so the same model can be imposed from outside.
+// Those games aim by RAYCASTING THROUGH THE CROSSHAIR PIXEL rather than along the ped's aim -
+// CWeapon::FireInstantHit calls CCamera::Find3rdPersonCamTargetVector, which unprojects that pixel
+// into a world ray. The arm IK and the reticle sprite are presentation on top of it. VCS has no
+// such branch, but it turns out not to need one: the shot direction is writable at the raycast, so
+// the same model can be imposed from outside.
 //
 // That was established in play, not assumed - see "The path a shot actually takes" in
 // docs/VCS_ADDRESSES.md. Rotating the target vector 25 degrees immediately before
@@ -33,6 +33,25 @@
 // game's own aim integrator, which squares the axis and smooths it, and `aimResponseModel` in
 // VCSCamera.cpp exists solely to invert that. There is no integrator here. The direction we
 // write IS the direction the bullet takes.
+//
+// ---------------------------------------------------------------------------------------------
+// THE RAY IS BUILT FROM THE CAMERA'S STORED BASIS, NOT FROM CameraYaw/CameraPitch.
+//
+// The first build reconstructed a direction as (cos, sin) of `CameraYaw - PI`, with `CameraPitch`
+// used as-is, and then carried a hand-tuned `crosshairX` trim on top. Every part of that was a
+// symptom of one mistake. Beta and Alpha are the camera's ORBIT angles about its look-at target;
+// the camera's actual forward is a separate stored vector, and the two differ by however far the
+// player sits from the middle of the screen. Measured in a gameplay savestate: 4.42 degrees, about
+// 3.3 of it horizontal and 2.8 vertical.
+//
+// That difference is not a constant. It is an angular offset, so it grows as the camera closes on
+// the player and swings as the camera orbits - which is exactly the "crosshairX that is right at
+// one angle is wrong at another" wander recorded below, and why no single trim ever held.
+//
+// So: read Front, Up and Source out of CCam (see kVCSCamFrontOffset and friends), offset the ray
+// by the crosshair's screen position through re3's own formula, and fire it from the camera. The
+// remaining knobs describe the CROSSHAIR, which is a real thing with a real position, rather than
+// describing an error.
 
 namespace VCS {
 
@@ -51,9 +70,44 @@ bool FireHookInstalled();
 // which is the failure worth being able to see at a glance.
 void FireHookStats(u64 *seen, u64 *redirected);
 
+// What the last redirect actually solved, so the debugger can show it without recomputing
+// anything - and so that a wrong answer can be read off the numbers instead of inferred from
+// where the bullets went. Filled in on the emu thread by the hook and read on the same thread by
+// ImVCS; see the threading note in CLAUDE.md.
+struct VCSFireHookTrace {
+	bool valid = false;        // false until a shot has been redirected at least once
+	bool haveBasis = false;    // whether Front/Up/Source read back
+	float front[3] = {};
+	float up[3] = {};
+	float camSource[3] = {};
+	float fov = 0.0f;
+	float origin[3] = {};      // where the ray was finally started from
+	float dir[3] = {};         // unit direction it was fired along
+	float gunSource[3] = {};   // the game's own source, i.e. the muzzle
+	float range = 0.0f;        // the length we used
+	float gameRange = 0.0f;    // the length the game's own target implied, for comparison
+	int weaponType = -1;       // -1 when the weapon record could not be read
+};
+const VCSFireHookTrace &FireHookLastTrace();
+
+// The world ray the crosshair currently covers: origin at the camera, `dir` a unit vector, built by
+// the same re3 formula the fire hook aims along. Exposed so that the GUN can be pointed down the
+// identical line the bullet will take - if these two ever came from separate solves they would
+// drift apart, and a gun that points somewhere other than the shot is the exact failure this whole
+// effort started from.
+//
+// Returns false if the camera basis is unreadable, in which case callers must do nothing rather
+// than aim at a default. Emu thread only.
+bool SolveAimRay(float origin[3], float dir[3]);
+
 struct VCSFireHookSettings {
-	// Off by default. This changes where bullets go; it should be opted into.
-	bool enabled = false;
+	// ON. It was opt-in while the shot direction was still wrong often enough to matter; it is the
+	// whole feature now, and having to tick it every session was pure friction.
+	//
+	// Note this also switches free aim over to driving the camera - CameraAimActive is gated on the
+	// hook being installed AND enabled, because with the shot still resolved the old way, steering
+	// the camera would reintroduce the desync that got mouse look in free aim disproved.
+	bool enabled = true;
 
 	// Debug: instead of aiming from the camera, rotate the game's own shot by this many degrees.
 	// Non-zero reproduces exactly what the vcsfiretest.py harness did, in-engine, which is the
@@ -69,69 +123,61 @@ struct VCSFireHookSettings {
 	// also be held.
 	float playerRadius = 3.0f;
 
-	// Residual yaw trim, degrees, on top of the measured convention. Zero is correct as of the
-	// in-play calibration - the 90 degrees this used to carry is now folded into the formula, since
-	// a permanent slider for a fact that has been measured is just somewhere for it to hide.
-	float aimYawOffsetDeg = 0.0f;
-
-	// Horizontal crosshair position, as a fraction of screen width.
+	// Where the crosshair sits ON SCREEN, as a fraction of width and height, 0.5/0.5 being dead
+	// centre. These are re3's m_f3rdPersonCHairMultX / ...Y and they mean the same thing here:
+	// Find3rdPersonCamTargetVector unprojects that pixel rather than the middle of the frame.
 	//
-	// The shot is offset from the camera's centre line because the CROSSHAIR is, and re3 does
-	// exactly this: m_f3rdPersonCHairMultX is 0.53, right of centre because the ped stands in the
-	// left of frame, and Find3rdPersonCamTargetVector unprojects that pixel rather than the middle
-	// of the screen.
-	//
-	// Calibrated in play here: a 3.2 degree trim was needed, and re3's formula run at VCS's numbers
-	// - (x - 0.5) * 0.9 * FOV * aspect, with FOV 70 and 480/272 - gives 3.36 degrees at 0.53 and
-	// 3.2 at 0.529. That agreement is why this is computed rather than stored as a fixed angle:
-	// the offset scales with FOV, so it stays correct through sniper zoom, which a constant would
-	// not.
-	float crosshairX = 0.51f;  // Calibrated in play across the whole arsenal.
+	// Both default to centre, and that is a PREDICTION worth stating so it can be falsified. The
+	// old build needed a 3.2 degree horizontal trim, and the camera's stored Front turns out to sit
+	// 3.3 degrees off the angle that trim was correcting - so with Front used directly the trim
+	// should be zero, i.e. the crosshair is central. If the shot is consistently off to one side in
+	// play, this is the honest knob for it: nudge X, and note that re3 itself uses 0.53 because
+	// GTA III's ped stands left of frame.
+	float crosshairX = 0.5f;
+	float crosshairY = 0.5f;
 
-	// Build the ray from the CAMERA's position and slide its origin to the muzzle, as re3 does,
-	// instead of starting it at the muzzle and only borrowing the camera's direction.
+	// Build the ray from the CAMERA's position and slide its origin forward to the muzzle, as re3
+	// does, instead of starting it at the muzzle and only borrowing the camera's direction.
 	//
 	// This is what removes PARALLAX. Starting at the gun leaves the ray a fixed lateral offset from
-	// the line the crosshair actually covers - and because the camera orbits the player, the size
-	// of that offset wanders with the angle between them. Measured in play: the crosshairX needed
-	// to compensate swung between 0.5125 and 0.5300 across a 180 degree sweep, non-monotonically.
-	// Fitting that curve was the wrong move, because the error also scales with 1/distance, so any
-	// fit would be correct at one range only.
-	bool useCameraOrigin = false;
+	// the line the crosshair actually covers, and because the camera orbits the player, the size of
+	// that offset wanders with the angle between them. Measured in play on the old build: the
+	// crosshairX needed to compensate swung between 0.5125 and 0.5300 across a 180 degree sweep,
+	// non-monotonically. Fitting that curve was the wrong move, because the error also scales with
+	// 1/distance, so any fit would be correct at one range only.
+	//
+	// This shipped OFF before, and for a good reason at the time: the camera position was picked by
+	// ranking six candidate vec3s for being "most anti-parallel to the camera's forward vector",
+	// the forward vector used to rank them was the one that has since turned out to be 4.4 degrees
+	// wrong, +0x210 won, and with it the shots landed nowhere visible. The suspicion recorded
+	// alongside - that ranking against a bad vector means little - was correct.
+	//
+	// It is on now because the camera position was MEASURED instead: +0x020 is 4.63 m from the
+	// player on the far side, and it is the only candidate whose bearing to the look-at point
+	// reproduces the stored pitch (+0x210 sits at the same height as its target, implying a level
+	// camera while Alpha reads -11.9 degrees). See kVCSCamSourceOffset.
+	bool useCameraOrigin = true;
 
-	// Which field of CCam[0] holds that position. Six position-shaped vec3s sit behind the camera's
-	// forward vector at follow-camera distance; +0x210 is the most exactly anti-parallel (177.6 deg
-	// against 172.5 for +0x020), which is why it is the default. Tunable because "most
-	// anti-parallel" is evidence, not proof - if parallax persists, +0x020, +0x050 and +0x090 are
-	// the other candidates.
-	u32 camSourceOffset = 0x210;
+	// The old route, kept switchable rather than deleted, because it is what shipped and A/B-ing it
+	// in play costs nothing. Rebuilds the direction from CameraYaw/CameraPitch the old way,
+	// including the FOV-scaled crosshair trim, instead of reading the stored basis.
+	bool legacyAngleRay = false;
 
-	// STATUS: useCameraOrigin ships OFF, and the parallax it would remove is accepted.
-	//
-	// 0x210 was picked as "most anti-parallel to the camera's forward vector", and with it the
-	// shots landed nowhere visible - a wrong origin, not a wrong direction. The selection method
-	// is the suspect: the forward vector used to rank the candidates was the one calibrated for
-	// AIMING (camYaw - PI), which is not necessarily the camera's true forward (the notes say
-	// camYaw - PI/2). Ranked against a vector 90 degrees out, the ordering means little.
-	//
-	// What ships instead is the gun-origin ray with crosshairX 0.51, settled in play and reported
-	// versatile across every weapon. It carries the parallax wander - the crosshairX that is
-	// exactly right drifts by about 2 degrees across a 180 degree sweep - and that is a smaller
-	// cost than an origin that can throw the shot out of the world.
-	//
-	// To finish this properly: identify the camera position by MEASUREMENT, not by ranking. Stand
-	// still, rotate the view a known amount, read the candidates twice. The camera's position
-	// traces an arc around the player; nothing else in CCam does. Then set this, tick
-	// useCameraOrigin, and crosshairX should go back to a single value correct at every angle AND
-	// every range - the range half being what no amount of crosshairX tuning can fix.
-	//
-	// Do not "fix" a misaligned offset here into an aligned one without re-testing. 0x35 was found
-	// to aim well, and it aims well because ReadFloat rejects the unaligned address, the read
-	// fails, and the camera-origin path never runs - it is this flag being off, spelled differently.
+	// Residual yaw trim, degrees, applied on top of whichever route is selected. Expected to be
+	// zero now that the basis is read rather than reconstructed; kept because "expected" is not
+	// "measured in play", and a knob that turns out to want zero is itself a result.
+	float aimYawOffsetDeg = 0.0f;
 
-	// Flips the vertical axis. Also zeroed out by calibration: pitch is now used as-is, which is
-	// what aimed correctly, rather than negated as the address notes imply.
-	bool aimInvertPitch = false;
+	// Read the weapon's own range out of CWeaponInfo instead of reusing the length of whatever
+	// target the game had already computed. See kVCSWeaponInfoTablePtr for why that length cannot
+	// be trusted: it is the weapon range on one path, the distance to a locked-on entity on
+	// another, and the distance to the free-aim dummy on a third.
+	bool useWeaponRange = true;
+
+	// Used when useWeaponRange is off, or when the weapon record cannot be read. Also the floor:
+	// a redirected ray is never shorter than this, because a ray that stops short of what the
+	// crosshair is on looks exactly like a ray pointed somewhere else.
+	float fallbackRange = 60.0f;
 };
 
 VCSFireHookSettings &FireHookSettings();

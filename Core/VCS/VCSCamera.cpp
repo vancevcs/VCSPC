@@ -21,6 +21,7 @@
 #include "Core/MIPS/MIPS.h"
 #include "Core/MemMap.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
 
@@ -107,6 +108,45 @@ static const float kPitchRange = 0.7f;
 // brings the spring runaway straight back. Until the field looks like a pitch again, pitch is simply
 // not driven.
 static const float kMaxPlausiblePitch = 1.6f;
+
+// The aim pitch the player has ASKED for, in Front's space rather than CameraPitch's, plus how
+// close to it counts as arrived. See the solve in CameraTick.
+static float g_intentPitch = 0.0f;
+static bool g_haveIntentPitch = false;
+// The lead to hold over the aim's real angle, for a given error.
+//
+// A hard +/-D bias is bang-bang control, and it chatters. Front chases a lever that leads it by D,
+// so it eventually passes the intent; the error crosses zero, the sign flips, and the lever moves by
+// TWO deadbands in one frame. Measured in play: yaw desired went +0.5798 -> +0.2398, a jump of
+// 0.340 rad, against 2 * 0.164 = 0.328 predicted. That is the snap, and it is a limit cycle rather
+// than a bug in any one value.
+//
+// Blending the bias to zero across a narrow band around zero error removes it by construction: the
+// lever is continuous through the crossing, so the worst jump becomes 2 * blend instead of 2 * D.
+// Outside the band the full lead still applies, so nothing is lost where it matters - which is the
+// whole reason not to simply shrink D.
+static float LeadBias(float error, float deadband, float blend) {
+	if (blend <= 0.0f) {
+		return error > 0.0f ? deadband : (error < 0.0f ? -deadband : 0.0f);
+	}
+	float t = error / blend;
+	if (t > 1.0f) t = 1.0f;
+	if (t < -1.0f) t = -1.0f;
+	return deadband * t;
+}
+
+static float g_lastFrontYaw = 0.0f;
+static float g_lastFrontPitch = 0.0f;
+static bool g_haveLastFront = false;
+// How much the aim must move between frames to count as moving rather than stalled. Well under a
+// frame of ordinary aiming, well over float noise.
+static const float kFrontMovedEps = 0.0008f;
+static bool g_aimLeadApplied = false;
+static float g_intentYaw = 0.0f;
+static bool g_haveIntentYaw = false;
+static const float kIntentEpsilon = 0.002f;
+
+
 
 // The highest pitch a vehicle camera may be driven to, in radians. Above this the spring runaway
 // starts, so it is the vehicle ceiling regardless of where the anchor was captured.
@@ -1095,6 +1135,21 @@ void CameraTick(VCSInputContext context) {
 		(!inVehicleOfAnyKind || g_settings.pitchInVehicle);
 
 
+	// A NOTE ON THE SNAP AFTER A STROKE, so the obvious fix is not tried again.
+	//
+	// The solve leads the game by the deadband, and that lead is only retracted on frames where the
+	// error is recomputed - i.e. frames with movement. Stop the mouse and the last solved value is
+	// re-asserted for the rest of the hold window, about 9.4 degrees past where the player stopped,
+	// so the aim drifts on and then jumps back when the window releases.
+	//
+	// Running the same solve on still frames with a zero step LOOKS like the fix and is a runaway.
+	// The lever is written directly, so `desired = live + error + bias` means live advances by at
+	// least `bias` every single frame for as long as the error survives - 9.4 degrees a frame, sixty
+	// times a second. On movement frames that is bounded because Front chases the value we just
+	// jumped it to and the error falls under the epsilon within a frame or two; with nothing else
+	// moving, it just accumulates. Tried, and it made aiming unusable.
+	//
+	// Whatever fixes the snap has to retract the lead ONCE, not re-apply it in a loop.
 	if (dx != 0.0f || (dy != 0.0f && havePitch)) {
 		if (g_holdFrames == 0) {
 			// Starting a fresh look - anchor to wherever the game currently has the camera, so
@@ -1104,6 +1159,11 @@ void CameraTick(VCSInputContext context) {
 				return;
 			}
 			g_desiredYaw = *current;
+			// A new stroke re-reads where the aim actually is, so the intent never starts from a
+			// stale value the game has since moved.
+			g_haveIntentPitch = false;
+			g_haveIntentYaw = false;
+			g_haveLastFront = false;
 
 			// Desired always re-syncs to live, so a stroke never snaps from a stale value. The
 			// ANCHOR does not: it is the fixed origin of the clamp window for as long as we stay in
@@ -1136,13 +1196,62 @@ void CameraTick(VCSInputContext context) {
 			}
 		}
 
+		// DISPROVEN, and recorded rather than deleted because the reasoning was sound and the
+		// conclusion was not. Mode 45 really does clamp Alpha every logic frame (0x089a39b8..
+		// 0x089a3a08), and integrating past a limit the game will not honour really does buy dead
+		// travel. So this adopted the game's value whenever it differed from ours by more than 0.6
+		// degrees.
+		//
+		// In play it made the Y axis need a hard flick to move at all, while X stayed immediate. The
+		// premise was wrong in one word: the clamp is not the ONLY thing that moves Alpha behind our
+		// back. The aim camera adjusts it every frame, so the adopt fired constantly rather than only
+		// at the limits, and each frame it threw away the movement just added. Pitch could only move
+		// when one frame of mouse beat one frame of the game's correction - which is a flick.
+		//
+		// That failure is worth more than the fix was: it PROVES the game touches Alpha every frame in
+		// the aim camera and does not touch Beta the same way. That asymmetry is a much better
+		// candidate for circles coming out square than the clamp ever was, because it makes vertical
+		// inherently laggier than horizontal. The next thing to try is asserting aim pitch once per
+		// GAME LOGIC FRAME instead of once per vblank - the same fix, for the same reason, that settled
+		// the vehicle pitch runaway - rather than reading the game's value back.
+
 		// No believable anchor means no clamp window, and without the window the vehicle ceiling
 		// does not exist - so pitch stays undriven rather than driven unbounded.
 		if (havePitch && g_haveAnchorPitch) {
 			// Stored negated relative to the camera matrix: raising this value tilts the view UP.
 			// Default is INVERTED pitch by preference - mouse up looks down, flight-sim style.
 			// invertY switches to the conventional mouse-up-looks-up mapping.
-			g_desiredPitch += dy * g_settings.sensitivity * (g_settings.invertY ? -1.0f : 1.0f);
+			const float pitchGain = (context == VCSInputContext::Aiming) ? g_settings.aimPitchGain : 1.0f;
+			const float pitchStep = dy * g_settings.sensitivity * pitchGain * (g_settings.invertY ? -1.0f : 1.0f);
+
+			// SOLVE FOR THE LEAD instead of scaling the input, which is the whole difference between
+			// this and the hypersensitive version it replaces.
+			//
+			// What the player sees is Front. Front does not move until CameraPitch leads it by about
+			// 0.164 rad, and then it follows. Scaling the mouse up crosses that gap sooner but makes
+			// everything past it twice as fast - the deadband is a constant, so paying for it with
+			// gain overcharges every movement that was never near it.
+			//
+			// So integrate the INTENT in Front's own space, at 1:1 with the mouse exactly like yaw,
+			// then work out what CameraPitch has to be for the game to deliver it: the intent, plus
+			// the deadband, in the direction we are asking for. The lead appears in full on the first
+			// frame of a stroke, so pitch starts immediately, and it collapses back to nothing the
+			// moment Front catches up - so it never adds speed, only removes the delay.
+			//
+			// Anchored to the LIVE Front every frame, so nothing accumulates and a wrong deadband
+			// costs one frame of lead rather than compounding. Same reasoning as the aim response
+			// model reading CamAimInc instead of predicting it.
+			std::optional<float> frontPitch;
+			if (context == VCSInputContext::Aiming && g_settings.aimPitchDeadband > 0.0f) {
+				const std::optional<float> fz = ReadFloat(kVCSCam0 + kVCSCamFrontOffset + 8);
+				if (fz && *fz >= -1.0f && *fz <= 1.0f) {
+					frontPitch = std::asin(*fz);
+				}
+			}
+			if (!frontPitch) {
+				g_haveIntentPitch = false;
+				g_desiredPitch += pitchStep;
+			}
 
 			// Pitch does not wrap - it is a look angle, so clamp rather than wrap.
 			//
@@ -1169,14 +1278,173 @@ void CameraTick(VCSInputContext context) {
 				lo = g_anchorPitch - kPitchRange;
 				hi = g_anchorPitch + kPitchRange;
 			}
-			if (g_desiredPitch > hi) g_desiredPitch = hi;
-			if (g_desiredPitch < lo) g_desiredPitch = lo;
+			if (frontPitch) {
+				// The window belongs to the INTENT here - it is the thing that represents where the
+				// player is asking to look. Clamping the lever instead would cap the lead and bring
+				// back exactly the dead travel this exists to remove.
+				if (!g_haveIntentPitch) {
+					g_intentPitch = *frontPitch;
+					g_haveIntentPitch = true;
+				}
+				g_intentPitch += pitchStep;
+				if (g_intentPitch > hi) g_intentPitch = hi;
+				if (g_intentPitch < lo) g_intentPitch = lo;
+
+				const float error = g_intentPitch - *frontPitch;
+				// The epsilon stops a settled aim from sitting on a permanent lead and jittering
+				// around it; below it, ask for exactly what the game already has.
+				// THE LEAD IS STICTION, NOT AN OFFSET - and that correction came from the numbers.
+				//
+				// Measured across a snap: Front moved +0.165 while CameraPitch/Yaw moved -0.340, i.e.
+				// exactly one deadband against two. So Front does not settle a deadband SHORT of the
+				// lever, it converges onto it - which means a lever parked at `intent + D` lands the
+				// aim at `intent + D`, overshooting by a full deadband, and the correction then
+				// swings back by 2D. That is the snap, and holding the lead is what causes it.
+				//
+				// D is what it takes to get the aim MOVING. Once it is moving, the honest command is
+				// the intent itself. So the kick is applied only while the aim is stalled, and drops
+				// the moment it is under way.
+				const bool moving = g_haveLastFront &&
+					std::fabs(*frontPitch - g_lastFrontPitch) > kFrontMovedEps;
+				const float kick = LeadBias(error, g_settings.aimPitchDeadband, g_settings.aimLeadBlend);
+				const float bias = (g_settings.aimLeadOnStallOnly && moving) ? 0.0f : kick;
+				g_desiredPitch = g_intentPitch + bias;
+				if (bias != 0.0f) g_aimLeadApplied = true;
+				g_lastFrontPitch = *frontPitch;
+			} else {
+				if (g_desiredPitch > hi) g_desiredPitch = hi;
+				if (g_desiredPitch < lo) g_desiredPitch = lo;
+			}
+
+			// LEASH the desired pitch to what the aim camera actually delivered.
+			//
+			// Measured in play, and it is the whole "Y needs a hard flick" problem:
+			//
+			//     before pitching   Front pitch -0.0442   CameraPitch -0.0442   off  0.00 deg
+			//     still no movement Front pitch -0.0442   CameraPitch +0.1198   off -9.40 deg
+			//     first movement    Front pitch -0.0390   CameraPitch +0.1278   off -9.56 deg
+			//
+			// The two start IDENTICAL, so they are normally one number. Then Alpha ran 9.4 degrees
+			// while Front did not move at all. Mode 45 clamps Alpha every logic frame (0x089a39b8..
+			// 0x089a3a08) against bounds it keeps on its own stack, and builds Front from the
+			// CLAMPED value - then we overwrite the field again at vblank, so the number we read
+			// back is ours and the direction the player sees is the game's. Every count spent past
+			// the limit had to be paid back before anything moved again, which is the dead travel.
+			//
+			// Front is the readable truth here: `Front.z` is the aim's real pitch, and in this
+			// camera it equals Alpha exactly until the clamp separates them. So rather than guess
+			// the game's bounds - they are stack locals, not memory we can read - keep our value
+			// from getting more than `aimPitchLeash` ahead of what actually happened.
+			//
+			// This is a CLAMP, not an adopt, and that distinction is the entire lesson from the
+			// version of this that had to be reverted. Adopting the game's value every frame threw
+			// away the movement just added and left pitch needing a flick to move at all. A clamp
+			// never fires while the two agree - which is the normal case, measured at 0.00 degrees
+			// apart - and only trims the runaway that the player cannot see anyway.
+			if (context == VCSInputContext::Aiming && g_settings.aimPitchLeash > 0.0f) {
+				const std::optional<float> fz = ReadFloat(kVCSCam0 + kVCSCamFrontOffset + 8);
+				if (fz && *fz >= -1.0f && *fz <= 1.0f) {
+					const float frontPitch = std::asin(*fz);
+					const float leashLo = frontPitch - g_settings.aimPitchLeash;
+					const float leashHi = frontPitch + g_settings.aimPitchLeash;
+					if (g_desiredPitch > leashHi) g_desiredPitch = leashHi;
+					if (g_desiredPitch < leashLo) g_desiredPitch = leashLo;
+				}
+			}
 		}
 		// The game's yaw grows counter-clockwise (measured: mouse right raised the value, which
 		// turned the view LEFT), so the natural mapping needs a negative sign. invertX flips
 		// away from that correct default, it isn't the default itself.
-		g_desiredYaw += dx * g_settings.sensitivity * (g_settings.invertX ? 1.0f : -1.0f);
+		const float yawStep = dx * g_settings.sensitivity * (g_settings.invertX ? 1.0f : -1.0f);
+
+		// Yaw carries the SAME deadband as pitch - reported at the same 9.4 degrees - so it gets the
+		// same treatment: integrate the intent in Front's space at 1:1, then solve for the Beta that
+		// makes the game deliver it.
+		//
+		// One structural difference, and it is what makes this simpler rather than harder. Front's
+		// pitch happens to EQUAL CameraPitch, so pitch could solve in absolute terms. Front's yaw and
+		// CameraYaw differ by some offset this fork has measured inconsistently (4.4 degrees in a
+		// savestate, 59 in a stale trace) and never pinned down. So work in DIFFERENCES: the error is
+		// measured in Front's space, where it is unambiguous, and applied as an increment to the live
+		// CameraYaw. Whatever the constant between the two spaces is, it cancels - which is a better
+		// answer than measuring it, because it cannot go stale.
+		//
+		// Anchoring the LEVER to the live value each frame would normally be the read-modify-write
+		// this file warns about, but it is not one here: the accumulator is the INTENT, which holds
+		// the player's cumulative request across frames. The lever is re-solved from it, so anything
+		// the game does to Beta shows up as error and gets corrected rather than lost.
+		std::optional<float> frontYaw;
+		if (context == VCSInputContext::Aiming && g_settings.aimYawDeadband > 0.0f) {
+			const std::optional<float> fx = ReadFloat(kVCSCam0 + kVCSCamFrontOffset);
+			const std::optional<float> fy = ReadFloat(kVCSCam0 + kVCSCamFrontOffset + 4);
+			if (fx && fy && (*fx != 0.0f || *fy != 0.0f)) {
+				frontYaw = std::atan2(*fy, *fx);
+			}
+		}
+		if (frontYaw) {
+			const std::optional<float> liveYaw = ReadAddrFloat(VCSAddr::CameraYaw);
+			if (liveYaw) {
+				if (!g_haveIntentYaw) {
+					g_intentYaw = *frontYaw;
+					g_haveIntentYaw = true;
+				}
+				g_intentYaw += yawStep;
+				// Yaw is circular, so the error has to be the SHORT way round or a stroke across the
+				// wrap point would ask for most of a turn in the wrong direction.
+				float error = g_intentYaw - *frontYaw;
+				error = std::fmod(error + kTwoPi * 0.5f, kTwoPi);
+				if (error < 0.0f) error += kTwoPi;
+				error -= kTwoPi * 0.5f;
+				// Same stiction model as pitch - see the note there.
+				const bool moving = g_haveLastFront &&
+					std::fabs(*frontYaw - g_lastFrontYaw) > kFrontMovedEps;
+				const float kick = LeadBias(error, g_settings.aimYawDeadband, g_settings.aimLeadBlend);
+				const float bias = (g_settings.aimLeadOnStallOnly && moving) ? 0.0f : kick;
+				g_desiredYaw = *liveYaw + error + bias;
+				g_aimLeadApplied = bias != 0.0f;
+				g_lastFrontYaw = *frontYaw;
+				g_haveLastFront = true;
+			} else {
+				g_desiredYaw += yawStep;
+			}
+		} else {
+			g_haveIntentYaw = false;
+			g_desiredYaw += yawStep;
+		}
 		g_holdFrames = kHoldFrames;
+	}
+
+	// RETRACT THE LEAD ONCE, on the first still frame after a stroke.
+	//
+	// The lead is not an overshoot - the game moves Front only while the lever leads it by more than
+	// the deadband, so a lever at `intent + D` lands Front on `intent` and stops. That part works.
+	// What does not is what we leave in the field afterwards: when the hold window expires we stop
+	// asserting, and CameraYaw is still parked a deadband past the aim. The game picks that stale
+	// Beta up as its own and the view jumps.
+	//
+	// So drop the bias exactly once, the frame the mouse goes still, and let the ordinary re-assert
+	// hold the honest value for the rest of the window. ONCE is the whole point: re-solving this
+	// every frame is a runaway, because the lever is written directly and each pass adds another
+	// deadband to it - see the note above the movement block. A one-shot has no loop to diverge.
+	if (g_aimLeadApplied && dx == 0.0f && dy == 0.0f && g_holdFrames > 0 &&
+		context == VCSInputContext::Aiming && g_settings.aimLeadRetract) {
+		if (g_haveIntentPitch) {
+			// Front's pitch IS CameraPitch, so the honest lever value is just the intent.
+			g_desiredPitch = g_intentPitch;
+		}
+		if (g_haveIntentYaw) {
+			const std::optional<float> fx = ReadFloat(kVCSCam0 + kVCSCamFrontOffset);
+			const std::optional<float> fy = ReadFloat(kVCSCam0 + kVCSCamFrontOffset + 4);
+			const std::optional<float> liveYaw = ReadAddrFloat(VCSAddr::CameraYaw);
+			if (fx && fy && liveYaw && (*fx != 0.0f || *fy != 0.0f)) {
+				float error = g_intentYaw - std::atan2(*fy, *fx);
+				error = std::fmod(error + kTwoPi * 0.5f, kTwoPi);
+				if (error < 0.0f) error += kTwoPi;
+				error -= kTwoPi * 0.5f;
+				g_desiredYaw = *liveYaw + error;
+			}
+		}
+		g_aimLeadApplied = false;
 	}
 
 	if (g_holdFrames <= 0) {
@@ -1237,6 +1505,163 @@ void CameraTick(VCSInputContext context) {
 }
 
 
+
+// --- Turning the character with the aim ---
+
+static bool g_pedAimDriving = false;
+static float g_pedAimDesired = 0.0f;
+static u64 g_pedAimWrites = 0;
+static u32 g_pedGunTarget = 0;
+static int g_pedGunTargetType = -1;
+static u64 g_pedGunWrites = 0;
+
+void PedAimStats(bool *driving, float *desiredHeading, u64 *writes) {
+	if (driving) *driving = g_pedAimDriving;
+	if (desiredHeading) *desiredHeading = g_pedAimDesired;
+	if (writes) *writes = g_pedAimWrites;
+}
+
+void AimAxisStats(float *desiredYaw, float *liveYaw, float *desiredPitch, float *livePitch) {
+	if (desiredYaw) *desiredYaw = g_desiredYaw;
+	if (desiredPitch) *desiredPitch = g_desiredPitch;
+	if (liveYaw) *liveYaw = ReadAddrFloat(VCSAddr::CameraYaw).value_or(0.0f);
+	if (livePitch) *livePitch = ReadAddrFloat(VCSAddr::CameraPitch).value_or(0.0f);
+}
+
+void PedGunStats(u32 *target, int *entityType, u64 *writes) {
+	if (target) *target = g_pedGunTarget;
+	if (entityType) *entityType = g_pedGunTargetType;
+	if (writes) *writes = g_pedGunWrites;
+}
+
+// Point the GUN where the camera points, by moving the thing the ped is aiming at.
+//
+// The arm IK aims at a world POSITION, not at an angle - which is what "the gun stays put while the
+// body turns" actually is. Nothing moves that position once the stick stops being fed, so the hand
+// holds its world bearing and the body rotates underneath it.
+//
+// Moving that entity drives the NATIVE shot as well, not just the animation: for any non-ped target
+// FireInstantHit reads `entity + 0x30` straight into its raycast target (0x08a48a6c). So this and
+// the fire-site hook agree by construction rather than by coincidence.
+//
+// Measured in play, and it corrected the first guess: the entity is type 4, an OBJECT, not the
+// type 5 dummy that FireInstantHit's special-case branch implied. The guard is therefore a
+// blocklist rather than an allowlist - what actually matters is never writing the position of
+// something the world owns.
+static bool CanMoveAimTarget(int type) {
+	// A ped is an NPC and a vehicle is a car; writing either one's position teleports it. A
+	// building is static world geometry. Everything else is a placeholder as far as this is
+	// concerned, and doing nothing to it helps nobody.
+	return type != kVCSEntityTypePed && type != kVCSEntityTypeVehicle &&
+	       type != kVCSEntityTypeBuilding && type != 0;
+}
+
+static void PedAimGunTick() {
+	g_pedGunTarget = 0;
+	g_pedGunTargetType = -1;
+
+	if (!g_settings.pedAimGun || !IsAddrSet(VCSAddr::PedPointGunAt))
+		return;
+
+	const std::optional<u32> target = ReadAddrU32(VCSAddr::PedPointGunAt);
+	if (!target || !*target)
+		return;
+	g_pedGunTarget = *target;
+
+	const std::optional<u32> flags = ReadU32(*target + kVCSEntityFlagsOffset);
+	if (!flags)
+		return;
+	g_pedGunTargetType = (int)((*flags & kVCSEntityTypeMask) >> kVCSEntityTypeShift);
+	if (!CanMoveAimTarget(g_pedGunTargetType))
+		return;
+
+	// The same ray the bullet takes, deliberately - see SolveAimRay. Two separate solves would
+	// drift, and a gun pointing somewhere other than the shot is the failure this started from.
+	float origin[3], dir[3];
+	if (!SolveAimRay(origin, dir))
+		return;
+
+	const float d = g_settings.pedAimGunDistance;
+	const bool wrote =
+		WriteFloat(*target + kVCSEntityPositionOffset + 0, origin[0] + dir[0] * d) &&
+		WriteFloat(*target + kVCSEntityPositionOffset + 4, origin[1] + dir[1] * d) &&
+		WriteFloat(*target + kVCSEntityPositionOffset + 8, origin[2] + dir[2] * d);
+	if (wrote) {
+		g_pedGunWrites++;
+	}
+}
+
+void PedAimTick(VCSInputContext context) {
+	g_pedAimDriving = false;
+
+	if (!g_settings.enabled)
+		return;
+	// Only where the mouse is genuinely the aim.
+	//
+	// FreeAimActive is the load-bearing half of this and was missing at first, which cost a wrong
+	// conclusion rather than just a bug. Without it this also ran during MELEE LOCK-ON - where the
+	// game steers the player toward the target it has locked - so the heading write fought the
+	// game's own facing logic, and with the sign briefly inverted that came out as reversed
+	// movement. FreeAimActive already excludes both melee and lock-on, which is exactly the set of
+	// states where the player's facing is not ours to drive.
+	if (!ContextDrivesCamera(context) || context != VCSInputContext::Aiming)
+		return;
+	if (!FreeAimActive(context))
+		return;
+
+	PedAimGunTick();
+
+	if (!g_settings.pedFollowAim)
+		return;
+	if (!IsAddrSet(VCSAddr::PedHeading) || !IsAddrSet(VCSAddr::CameraYaw))
+		return;
+
+	// Deliberately the LIVE camera yaw rather than g_desiredYaw. Those agree while we are actively
+	// asserting, and the live value is the right one in between - the character should stay pointed
+	// where the view is even after the hold window has released and the mouse has stopped.
+	const std::optional<float> camYaw = ReadAddrFloat(VCSAddr::CameraYaw);
+	if (!camYaw)
+		return;
+
+	// CameraYaw is the camera's orbit angle; the direction it looks is `camYaw - PI` read as
+	// (cos, sin). The ped stores a GTA heading, whose forward is (-sin, cos) - a quarter turn the
+	// other way - so the conversion is a straight `+ PI/2`:
+	//
+	//     atan2(-cos(camYaw - PI), sin(camYaw - PI))  ==  camYaw - PI/2 - PI  ==  camYaw + PI/2
+	//
+	// Checked against the savestate: camYaw 4.88071 gives 0.168, and the ped was actually facing
+	// 0.064 - a 6 degree difference, which is just the follow camera trailing the player rather
+	// than a convention error. The two are forced into agreement the moment this starts writing.
+	float heading = (g_settings.pedHeadingInvert ? -*camYaw : *camYaw) + kTwoPi * 0.25f
+		+ g_settings.pedHeadingOffsetDeg * kTwoPi / 360.0f;
+
+	// Wrap to [-PI, PI], not [0, 2PI). The game keeps this pair in a signed range - the clamp at
+	// 0x089499a0 reads both fields, works out how far the heading sits from a target angle, and
+	// subtracts the same correction from each, which only behaves for a signed delta. Writing 5.5
+	// where it expects -0.78 is the same facing but not the same number, and everything that
+	// compares the two fields sees a full turn of difference.
+	heading = std::fmod(heading + kTwoPi * 0.5f, kTwoPi);
+	if (heading < 0.0f) {
+		heading += kTwoPi;
+	}
+	heading -= kTwoPi * 0.5f;
+	g_pedAimDesired = heading;
+
+	// Dest is the game's own "please turn to face this" channel, so it keeps the turn animation
+	// and the game's own rate. Cur is the heading itself; writing it as well makes the character
+	// track the view exactly, which is what a mouse asks for. See pedSnapHeading.
+	bool wrote = false;
+	if (IsAddrSet(VCSAddr::PedHeadingTarget)) {
+		wrote = WriteAddrFloat(VCSAddr::PedHeadingTarget, heading) || wrote;
+	}
+	if (g_settings.pedSnapHeading) {
+		wrote = WriteAddrFloat(VCSAddr::PedHeading, heading) || wrote;
+	}
+	if (wrote) {
+		g_pedAimDriving = true;
+		g_pedAimWrites++;
+	}
+}
 
 void FreeAimMoveTick(VCSInputContext context) {
 	// Patch the branch that makes aiming and moving mutually exclusive.

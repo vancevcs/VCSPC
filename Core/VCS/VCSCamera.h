@@ -344,6 +344,188 @@ struct VCSCameraSettings {
 	// for lacking a better route - it IS the better route.
 	bool mouseLookInFreeAim = false;
 
+	// --- Turning the character with the aim ---
+
+	// OFF, because THE GAME ALREADY DOES THIS and we were racing it.
+	//
+	// The weapon-aim camera writes the ped's heading itself, every frame. In mode 45's Process
+	// (0x089a341c), at 0x089a3e20..0x089a3e5c:
+	//
+	//     angle = atan2(Front.y, Front.x)      ; the camera's own look vector, +0x10
+	//     if (angle < 0) angle += 2*PI
+	//     angle -= PI/2                        ; 0x3fc90fdb, loaded at 0x089a3984
+	//     ped->m_fRotationCur  = angle         ; +0x8d0
+	//     ped->m_fRotationDest = angle         ; +0x8d4
+	//
+	// That is the same formula this file worked out independently, which is a pleasant confirmation
+	// and a completely redundant one. Two writers of one field at different rates - ours at vblank,
+	// the game's at its 30fps logic rate - is the exact shape of the CameraPitch runaway documented
+	// above, and here it shows up as the crosshair being unable to move horizontally until the body
+	// has finished turning. Turning ours off leaves the game's, which is correct and free.
+	//
+	// Kept switchable rather than deleted because it is the direct test: if the character stops
+	// turning with this off, the game's write is gated on something we do not satisfy, and that is
+	// worth knowing rather than assuming.
+	//
+	// Note which vector the game uses - `Front`, not Beta/Alpha. Independent evidence that reading
+	// the stored basis was the right call for the fire hook too; the game's own ped aiming has
+	// always resolved through it.
+	bool pedFollowAim = false;
+
+	// Snap the heading rather than only asking the game to turn toward it.
+	//
+	// m_fRotationDest is the game's own request-a-turn channel and using it alone keeps the turn
+	// animation and its rate. That rate is a thumbstick's rate, though, and a mouse is a position
+	// control - lag between the crosshair and the gun is the same complaint the aim response model
+	// exists to remove, one layer further out. So both fields are written by default and the
+	// character tracks the view exactly.
+	bool pedSnapHeading = true;
+
+	// OFF. It was briefly on, and the round trip is worth keeping because of what misled it.
+	//
+	// `camYaw + PI/2` was checked four ways - the ped's own matrix in a savestate, the camera's
+	// stored `Front`, `Source - LookAt`, and the in-play note at the yaw write in this file. All
+	// agreed on slope +1. Play then said the character turned the wrong way, inverting appeared to
+	// fix it, and it was made the default on the principle that play beats static reasoning.
+	//
+	// **Play was reporting a real symptom and the diagnosis was wrong.** The body was turning
+	// correctly the whole time; what looked backwards was the GUN, which stays pinned to a
+	// world-space aim point while the body rotates under it - "like a chicken's head". With one
+	// part correctly tracking and another part world-locked, which one is "going the wrong way" is
+	// genuinely ambiguous from the outside, and inverting made the wrong half agree with the frozen
+	// half. See pedAimGun, which fixes the actual cause.
+	//
+	// What settled it was a case neither the static checks nor the free-aim testing covered: with
+	// invert on, MELEE LOCK-ON movement came out reversed. A fix that breaks a neighbouring feature
+	// is not a fix, and the neighbouring feature is often where a wrong sign shows up honestly -
+	// free aim was too ambiguous to judge it, melee was not.
+	//
+	// The lesson is narrower than "play wins" and more useful: play beats static reasoning about
+	// what is HAPPENING, not about what is CAUSING it. Four agreeing derivations were not wrong;
+	// the inference from one symptom to one cause was.
+	// DISPROVEN, kept at 0 so the result is not rediscovered by reasoning to it again.
+	//
+	// The idea: the aim camera clamps its own pitch against bounds we cannot read, so keep our
+	// desired value from running more than this far ahead of the pitch it actually delivered
+	// (readable as Front.z). Bounded dead travel instead of unbounded windup.
+	//
+	// In play, ANY non-zero value makes vertical aiming impossible. That falsifies the premise, and
+	// the falsification is the useful part: Front does not CHASE Alpha, it has to be LED. Getting
+	// Alpha well ahead is the only thing that makes Front move at all, so a leash that forbids
+	// exactly that forbids pitching. Front is a follower with a deadband, not a clamped copy - which
+	// is a different mechanism from the one this was built for, and the reason it could not work.
+	//
+	// See aimPitchGain for what the measurement actually supports.
+	float aimPitchLeash = 0.0f;
+
+	// Extra gain on the mouse's VERTICAL movement while aiming, on top of `sensitivity`.
+	//
+	// The aim camera's Front has a measured deadband of about 9.4 degrees: Alpha must lead it by that
+	// much before the view moves at all, and then Front tracks at roughly 0.65 of Alpha's rate. At
+	// the look sensitivity of 0.004 rad/count that is ~41 mouse counts of nothing before vertical
+	// starts, which is the "Y needs a hard flick" complaint stated in units.
+	//
+	// This does not remove the deadband - it is the game's, and it lives behind the composed Front in
+	// mode 45 - it just crosses it in fewer counts. Honest workaround rather than a fix, and it is a
+	// safe one in a way the last two attempts were not: it only ever scales input UP, so it cannot
+	// swallow movement the way the leash and the adopt both did.
+	//
+	// Only applied in the Aiming context, so ordinary mouse look is untouched.
+	float aimPitchGain = 1.0f;
+
+	// The lead, in radians, that CameraPitch must hold over the aim's real pitch before the game
+	// moves it at all. This is a MEASURED property of the game, not a taste setting.
+	//
+	//     before pitching   Front pitch -0.0442   CameraPitch -0.0442   off  0.00 deg
+	//     still no movement Front pitch -0.0442   CameraPitch +0.1198   off -9.40 deg
+	//     first movement    Front pitch -0.0390   CameraPitch +0.1278   off -9.56 deg
+	//
+	// 9.4 degrees is 0.164 rad, hence the default. It is applied as an instant OFFSET at the start of
+	// a stroke rather than as gain, which is the difference between "pitch starts immediately" and
+	// "pitch is twice as fast forever" - the deadband is a constant, so paying for it with gain
+	// overcharges every movement that was never near it.
+	//
+	// Too small and the delay comes back; too large and the aim overshoots slightly before settling,
+	// because the lead is larger than the gap it is cancelling. Set to 0 to go back to driving
+	// CameraPitch directly.
+	float aimPitchDeadband = 0.165f;
+
+	// ZERO, settled in play, and the most useful negative result of the lot: YAW DOES NOT NEED THE
+	// LEAD. Only pitch does.
+	//
+	// It was added on the reasonable-looking grounds that the horizontal deadband was reported at the
+	// same 9.4 degrees. It is also the change that introduced the snap - reported the same build it
+	// landed in - and every subsequent attempt to cure that snap failed, because they were all
+	// treating a mechanism that only existed because of this setting. Turning it off removes the snap
+	// and costs nothing: horizontal aiming was already smooth on the plain accumulator.
+	//
+	// Worth keeping the asymmetry in mind rather than explaining it away: the two axes reach Front by
+	// genuinely different routes in mode 45 - pitch through SetRotateX(Alpha), yaw through a Z-rotate
+	// whose offset is picked from four quadrants by ped+0x780 - so there is no reason to expect one
+	// number to describe both. The 9.4 degrees they appeared to share was measured on pitch.
+	float aimYawDeadband = 0.0f;
+
+	// Drop the deadband lead once, on the first still frame after an aim stroke.
+	//
+	// Without it, the hold window expires with CameraPitch/CameraYaw still parked a deadband past
+	// where the player stopped, the game inherits that as its own angle, and the view snaps.
+	//
+	// ON, but switchable, because the last two attempts at this both shipped broken and a rebuild is
+	// a poor way to find that out. If aiming misbehaves at the END of a movement, turn this off first
+	// - it is the only thing that touches that moment.
+	//
+	// Note what it deliberately does NOT do: re-solve every still frame. The lever is written
+	// directly, so each pass would add another deadband to it - about 9.4 degrees per frame, sixty
+	// times a second. That was tried and made aiming unusable.
+	// ZERO. Width of the band over which the deadband lead would blend to zero as the aim arrives.
+	//
+	// Built to stop the lead chattering when its sign flips at the crossing, which was a real
+	// mechanism with a matching measurement - a 0.340 rad jump against 0.328 predicted for 2*D. It did
+	// not fix the snap, because the chatter it addressed was in the YAW solve, and the answer there
+	// turned out to be not running that solve at all. Pitch never crossed zero mid-stroke in any
+	// capture, so it never chattered and never needed this.
+	//
+	// Kept because the reasoning is sound and would apply again if the yaw lead is ever revived.
+	float aimLeadBlend = 0.0f;
+
+	// OFF. Would apply the deadband lead only while the aim is stalled, dropping it once moving.
+	//
+	// The reasoning came from a measured snap - Front moved one deadband while the camera angle moved
+	// two - and read as Front converging ONTO the lever rather than settling short of it, which would
+	// make a held lead overshoot by D. Plausible, and it did not help either, for the same reason as
+	// the blend: the snap lived in the yaw solve, not in how the lead was held.
+	//
+	// Pitch works with the lead held constantly, which is what ships. That is evidence against the
+	// "converges onto the lever" reading, so treat it as unproven rather than as background fact.
+	bool aimLeadOnStallOnly = false;
+
+	// OFF - it did not fix the snap, because the snap was the bias flipping sign mid-stroke rather
+	// than anything left behind at the end of one. Superseded by aimLeadBlend, which addresses the
+	// actual mechanism. Kept switchable rather than deleted since it is harmless and the reasoning
+	// behind it still holds for what it was aimed at.
+	bool aimLeadRetract = false;
+
+	bool pedHeadingInvert = false;
+	float pedHeadingOffsetDeg = 0.0f;
+
+	// Move the ped's point-gun-at target to the crosshair, so the GUN follows the view and not just
+	// the body. This is the half of "the character aims where I aim" that the heading cannot do.
+	//
+	// The ped aims its arms at a world POSITION, which is why the gun reads as world-locked once
+	// the stick stops being fed: nothing moves that position any more, so the hand holds its
+	// bearing while the body turns under it. Writing the position every frame is the same discipline
+	// every other value in this fork follows.
+	//
+	// Guarded hard, because this writes an ENTITY's position. It only ever moves an entity of type
+	// 7 (DUMMY) - the placeholder the game parks at the free-aim point - and never a real ped, which
+	// would teleport an NPC. That is the same test the game's own FireInstantHit makes before
+	// trusting the cached position at CPed+0xC80.
+	bool pedAimGun = true;
+
+	// How far along the crosshair ray to park it. Far enough that the offset between the camera and
+	// the muzzle stops mattering for the resulting bearing; near enough to stay inside the world.
+	float pedAimGunDistance = 40.0f;
+
 	// --- The pad's synthesised second stick ---
 	//
 	// VCS wants two analog sticks and the PSP has one, so the game builds the second from the
@@ -509,6 +691,32 @@ void PadStickStats(u64 *frames, u64 *nonZero, float *peak, bool *modeFlagSet);
 // Walks the player during free aim by writing the ped's velocity. Emu thread only, once per frame,
 // and it must run every frame - the game rewrites the field. Experimental; see moveInFreeAim.
 void FreeAimMoveTick(VCSInputContext context);
+
+// Turns the CHARACTER to face where the camera is aimed, during camera-driven free aim.
+//
+// The bullet is redirected at the fire site, but the man holding the gun is not: his gun points
+// along his heading, and free aim normally turns that because the stick turns it. Once the mouse
+// writes CameraYaw directly the stick is no longer fed, and - because free aim also skips the
+// movement call, so nothing re-evaluates the heading either - he stands frozen aiming wherever he
+// happened to be pointing when aim went down. Same latch that makes movement in free aim possible;
+// here it is the failure rather than the feature.
+//
+// Emu thread only, once per frame. Reports whether it wrote, for the debugger.
+void PedAimTick(VCSInputContext context);
+
+// Whether PedAimTick is currently steering the character, and the heading it last asked for.
+void PedAimStats(bool *driving, float *desiredHeading, u64 *writes);
+
+// The entity the gun is currently aimed at, its type (3 = ped, 7 = dummy), and how many times the
+// aim point has been moved. A target that is never a dummy means free aim is not using the
+// placeholder this assumes, and pedAimGun is doing nothing.
+void PedGunStats(u32 *target, int *entityType, u64 *writes);
+
+// Both aim axes at once: what we asked for, what the game currently has, and how often the game
+// overrode our pitch. Watching live against desired WHILE CIRCLING THE MOUSE is what separates the
+// candidate causes of a circle coming out square - a pitch that sticks while yaw keeps moving shows
+// up here as the two diverging, and a view that lags both equally does not.
+void AimAxisStats(float *desiredYaw, float *liveYaw, float *desiredPitch, float *livePitch);
 
 
 

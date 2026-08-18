@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -524,26 +525,261 @@ void ImVCSWindow::DrawCamera() {
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Non-zero ignores the camera and just rotates the game's own shot, reproducing the vcsfiretest.py experiment in-engine. Use it FIRST: if bullets do not visibly swing, the hook is not firing. Set to 0 for real camera-derived aiming.");
 		}
-		ImGui::SliderFloat("Yaw offset (deg)", &f.aimYawOffsetDeg, -180.0f, 180.0f, "%.1f");
+		ImGui::SliderFloat("Crosshair X", &f.crosshairX, 0.40f, 0.60f, "%.4f");
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Rotates camera-derived aim. Only matters with Debug deflect at 0. If shots land a consistent angle off the camera, this is the knob - 90 degree errors are a coordinate convention, small ones are something else.");
+			ImGui::SetTooltip("Where the crosshair sits ACROSS the screen, 0.5 being centre. re3's m_f3rdPersonCHairMultX, and it means the same thing: the ray is unprojected through that pixel. Expected to want 0.5 now that the camera's own Front is used - the 0.51 the old build wanted was correcting a 3.3 degree error in the direction, not describing the crosshair.");
 		}
-		ImGui::SliderFloat("Crosshair X", &f.crosshairX, 0.45f, 0.60f, "%.4f");
+		ImGui::SliderFloat("Crosshair Y", &f.crosshairY, 0.40f, 0.60f, "%.4f");
 		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Where the crosshair sits across the screen. The shot is offset from the camera centre because the crosshair is - re3 uses 0.53 for the same reason. Computed against live FOV, so it stays right through zoom.");
+			ImGui::SetTooltip("Same, vertically. Lower value aims higher up the screen.");
+		}
+		ImGui::SliderFloat("Yaw trim (deg)", &f.aimYawOffsetDeg, -15.0f, 15.0f, "%.2f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Residual rotation on top of the solved ray. EXPECTED TO WANT ZERO now that the camera's own Front is read rather than reconstructed - if it needs several degrees again, that is evidence the basis is not being used, not a value to keep.");
 		}
 		ImGui::Checkbox("Camera-origin ray (removes parallax)", &f.useCameraOrigin);
-		if (f.useCameraOrigin) {
-			int off = (int)f.camSourceOffset;
-			if (ImGui::InputInt("CCam source offset (hex)", &off, 0x10, 0x40, ImGuiInputTextFlags_CharsHexadecimal)) {
-				f.camSourceOffset = (u32)(off & 0xFFF);
-			}
-			ImGui::TextDisabled("candidates: 0x210 (default), 0x020, 0x050, 0x090");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Fire from the camera and slide the origin forward to the muzzle, as re3 does, instead of firing from the gun along a borrowed direction. Off means accepting parallax that changes with the camera's angle to the player AND with range. The camera position is CCam+0x20, measured rather than ranked.");
 		}
-		ImGui::Checkbox("Invert aim pitch", &f.aimInvertPitch);
+		ImGui::Checkbox("Legacy angle ray (the route that shipped)", &f.legacyAngleRay);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("A/B against the old behaviour without a rebuild: rebuilds the direction from CameraYaw/CameraPitch with the FOV-scaled crosshair trim. Kept because it is what the previous build did, not because it is expected to be better.");
+		}
+		ImGui::Checkbox("Weapon range from CWeaponInfo", &f.useWeaponRange);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Fire the ray at the weapon's own range instead of reusing the length of whatever target the game had already computed. That length is the weapon range on the plain path, the distance to a locked-on entity on another, and the distance to the free-aim dummy on a third - so a redirected ray kept stopping short by a different amount every shot.");
+		}
+		ImGui::SliderFloat("Fallback / minimum range", &f.fallbackRange, 10.0f, 200.0f, "%.0f");
 		ImGui::SliderFloat("Player radius", &f.playerRadius, 0.5f, 10.0f, "%.1f");
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("How close to the player a ray must start to count as the player's shot. The wrapper carries no shooter argument, so this stands in for re3's shooter == FindPlayerPed check. NPCs fire through the same code.");
+		}
+
+		ImGui::Separator();
+		// The last shot, in numbers. The point is that a wrong answer can be READ here instead of
+		// inferred from where the rounds went - which is how the direction stayed 4.4 degrees out
+		// through several rounds of tuning the wrong knob.
+		// LIVE, read every UI frame. This block used to come from the last redirected shot, which
+		// made it useless for the question it exists to answer: these numbers only refreshed when
+		// you FIRED, so watching them while moving the mouse showed a frozen snapshot from whenever
+		// the last round went off. A diagnostic that updates on the wrong event is worse than none,
+		// because it invites conclusions from stale data.
+		{
+			const std::optional<float> fx = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamFrontOffset);
+			const std::optional<float> fy = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamFrontOffset + 4);
+			const std::optional<float> fz = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamFrontOffset + 8);
+			const std::optional<float> fov = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamFOVOffset);
+			const std::optional<float> sx = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamSourceOffset);
+			const std::optional<float> sy = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamSourceOffset + 4);
+			const std::optional<float> sz = VCS::ReadFloat(VCS::kVCSCam0 + VCS::kVCSCamSourceOffset + 8);
+			const std::optional<u16> camMode = VCS::ReadAddrAsU32(VCS::VCSAddr::CamMode)
+				? std::optional<u16>((u16)*VCS::ReadAddrAsU32(VCS::VCSAddr::CamMode)) : std::nullopt;
+			if (fx && fy && fz) {
+				ImGui::Text("LIVE Front  %+.4f %+.4f %+.4f   FOV %.1f   CamMode %d",
+					*fx, *fy, *fz, fov ? *fov : 0.0f, camMode ? (int)*camMode : -1);
+				if (sx && sy && sz) {
+					ImGui::Text("LIVE Source %.2f %.2f %.2f", *sx, *sy, *sz);
+				}
+				const std::optional<float> cy = VCS::ReadAddrFloat(VCS::VCSAddr::CameraYaw);
+				const std::optional<float> cp = VCS::ReadAddrFloat(VCS::VCSAddr::CameraPitch);
+				if (cy && cp) {
+					const float kPi = 3.14159265358979f;
+					const float frontYaw = atan2f(*fy, *fx);
+					const float fzc = *fz > 1.0f ? 1.0f : (*fz < -1.0f ? -1.0f : *fz);
+					const float frontPitch = asinf(fzc);
+					float dYawDeg = (frontYaw - (*cy - kPi)) * 180.0f / kPi;
+					while (dYawDeg > 180.0f) dYawDeg -= 360.0f;
+					while (dYawDeg < -180.0f) dYawDeg += 360.0f;
+					// Move the mouse on ONE axis and watch the matching row. Front is what the shot
+					// and the gun follow; CameraYaw/CameraPitch is what the mouse writes. If a row
+					// does not move when its axis does, the write is landing and not reaching the
+					// aim - which is a different problem from the write being rejected.
+					ImGui::Text("LIVE Front yaw   %+.4f   CameraYaw-PI %+.4f   off %+.2f deg",
+						frontYaw, *cy - kPi, dYawDeg);
+					ImGui::Text("LIVE Front pitch %+.4f   CameraPitch  %+.4f   off %+.2f deg",
+						frontPitch, *cp, (frontPitch - *cp) * 180.0f / kPi);
+				}
+			} else {
+				ImGui::TextDisabled("LIVE camera basis unreadable");
+			}
+		}
+
+		ImGui::Separator();
+		const VCS::VCSFireHookTrace &t = VCS::FireHookLastTrace();
+		if (!t.valid) {
+			ImGui::TextDisabled("(last shot: none redirected yet - hold aim and fire)");
+		} else if (!t.haveBasis) {
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "camera basis unreadable - fell back to the angle route");
+		} else {
+			ImGui::TextDisabled("last redirected shot:");
+			ImGui::Text("Ray    %+.4f %+.4f %+.4f  from %.2f %.2f %.2f",
+				t.dir[0], t.dir[1], t.dir[2], t.origin[0], t.origin[1], t.origin[2]);
+			ImGui::Text("Range  %.1f used, %.1f from the game's own target%s",
+				t.range, t.gameRange, t.weaponType >= 0 ? "" : "  (weapon record unreadable)");
+			if (t.weaponType >= 0) {
+				ImGui::SameLine();
+				ImGui::Text("  weapon %d", t.weaponType);
+			}
+			// The single number that says whether the old build's mistake has come back: how far
+			// the camera's own forward sits from the direction CameraYaw/CameraPitch imply. It is
+			// NOT expected to be zero - that gap is the crosshair offset and it moves with the
+			// camera. It is here because the old route silently aimed along the second one.
+		}
+
+		ImGui::Separator();
+		// Both axes, live against desired. Circle the mouse and watch: if pitch sticks at a limit
+		// while yaw keeps running, the two diverge here and the circle comes out flat-topped. If
+		// both track and the shape is still wrong, the cause is downstream of this and no amount of
+		// tuning these will touch it.
+		{
+			float dYaw = 0.0f, lYaw = 0.0f, dPitch = 0.0f, lPitch = 0.0f;
+			VCS::AimAxisStats(&dYaw, &lYaw, &dPitch, &lPitch);
+			ImGui::Text("yaw   desired %+.4f  live %+.4f  diff %+.4f", dYaw, lYaw, dYaw - lYaw);
+			ImGui::Text("pitch desired %+.4f  live %+.4f  diff %+.4f", dPitch, lPitch, dPitch - lPitch);
+			ImGui::Checkbox("Lead only while the aim is stalled", &s.aimLeadOnStallOnly);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("The deadband is stiction - what it takes to get the aim MOVING - not an offset to hold. Measured: Front moved one deadband while the camera angle moved two, so Front converges onto the lever rather than stopping short of it. Holding the lead therefore parks the aim a deadband past target and the correction swings back by twice that. Off restores always-lead.");
+			}
+			ImGui::SliderFloat("Aim lead blend (rad)", &s.aimLeadBlend, 0.0f, 0.15f, "%.3f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Band over which the deadband lead fades to zero as the aim arrives. Without it the lead flips sign the instant the aim passes its target and the camera angle moves two deadbands in one frame - the measured 19 degree snap. Larger is smoother through the crossing; 0 restores the hard flip.");
+			}
+			ImGui::Checkbox("Retract the lead when a stroke ends", &s.aimLeadRetract);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Drops the deadband lead once, on the first still frame after aiming. Without it the hold window expires with the camera angle parked a deadband past where you stopped, the game adopts that as its own, and the view snaps. If aiming misbehaves at the END of a movement, turn this off first - it is the only thing that touches that moment.");
+			}
+			ImGui::SliderFloat("Aim yaw deadband (rad)", &s.aimYawDeadband, 0.0f, 0.4f, "%.3f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("The horizontal twin of the pitch deadband, reported at the same 9.4 deg. Solved in differences against Front's yaw, so the unknown constant between Front's space and CameraYaw's cancels. 0 drives CameraYaw directly.");
+			}
+			ImGui::SliderFloat("Aim pitch deadband (rad)", &s.aimPitchDeadband, 0.0f, 0.4f, "%.3f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("The lead CameraPitch must hold over the aim's real pitch before the game moves it - measured at 0.164 rad (9.4 deg). Applied as an instant offset when a stroke starts, so pitch begins immediately and then tracks 1:1. Too small and the delay returns; too large and it overshoots slightly before settling. 0 drives CameraPitch directly.");
+			}
+			ImGui::SliderFloat("Aim pitch gain", &s.aimPitchGain, 0.25f, 4.0f, "%.2f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Plain vertical sensitivity multiplier while aiming, on top of the deadband solve. Leave at 1.00 unless vertical should genuinely be faster or slower than horizontal - it is no longer doing the deadband's job.");
+			}
+			ImGui::SliderFloat("Aim pitch leash (DISPROVEN, keep 0)", &s.aimPitchLeash, 0.0f, 0.5f, "%.3f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Any non-zero value makes vertical aiming impossible, which falsified the premise it was built on: Front does not chase CameraPitch, it has to be LED. A leash forbidding exactly that forbids pitching. Kept visible so the idea is not reinvented.");
+			}
+			// The asymmetry to look for: yaw's diff should sit near zero while pitch's does not.
+			// That is the game correcting Alpha every frame and leaving Beta alone, which makes
+			// vertical inherently laggier than horizontal.
+			if (std::fabs(dPitch - lPitch) > 0.02f && std::fabs(dYaw - lYaw) < 0.01f) {
+				ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+					"pitch is being fought and yaw is not - the axes are not symmetric here");
+			}
+		}
+
+		ImGui::Separator();
+		// Issue two of the pair: the bullet followed the crosshair and the man did not.
+		// The gun and the body are separate mechanisms, and conflating them cost a wrong diagnosis -
+		// the body was tracking correctly while the gun stayed pinned to a world point, which from
+		// the outside looked like the body turning the wrong way. Two controls, listed apart.
+		ImGui::Checkbox("Point the gun at the crosshair", &s.pedAimGun);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("The arm IK aims at a world POSITION, so once the stick stops being fed the gun holds its bearing while the body turns under it. This moves that position onto the crosshair every frame, down the same ray the bullet takes. Only ever moves a DUMMY entity - a real ped in that slot means lock-on, and writing its position would teleport an NPC.");
+		}
+		if (s.pedAimGun) {
+			ImGui::SliderFloat("Aim point distance", &s.pedAimGunDistance, 5.0f, 150.0f, "%.0f");
+			u32 target = 0;
+			int type = -1;
+			u64 gunWrites = 0;
+			VCS::PedGunStats(&target, &type, &gunWrites);
+			if (!target) {
+				ImGui::TextDisabled("point-gun-at: none (nothing to move - aim at something first)");
+			} else {
+				// Blocked types are the ones the world owns: moving a ped or a vehicle teleports
+				// it. Anything else is a placeholder and gets moved. Measured value in free aim is
+				// 4, an object.
+				static const char *kTypeNames[8] = {
+					"nothing", "building", "vehicle", "ped", "object", "dummy", "?", "?"
+				};
+				const bool blocked = type == VCS::kVCSEntityTypePed ||
+					type == VCS::kVCSEntityTypeVehicle ||
+					type == VCS::kVCSEntityTypeBuilding || type == 0;
+				ImGui::TextColored(blocked ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : kGoodColor,
+					"point-gun-at: %08x  type %d (%s)%s   moves %llu",
+					target, type, (type >= 0 && type < 8) ? kTypeNames[type] : "?",
+					blocked ? " - world-owned, NOT moving it" : "",
+					(unsigned long long)gunWrites);
+				// Where it actually sits. A placeholder parked at the aim point sits a sensible
+				// aiming distance away and tracks the crosshair once this is running; a real world
+				// object does not, and that difference is the thing to watch if anything in the
+				// scenery ever moves that should not.
+				const std::optional<float> tx = VCS::ReadFloat(target + VCS::kVCSEntityPositionOffset);
+				const std::optional<float> ty = VCS::ReadFloat(target + VCS::kVCSEntityPositionOffset + 4);
+				const std::optional<float> tz = VCS::ReadFloat(target + VCS::kVCSEntityPositionOffset + 8);
+				const std::optional<u32> playerPed = VCS::ReadAddrU32(VCS::VCSAddr::PlayerBase);
+				if (tx && ty && tz) {
+					float dist = -1.0f;
+					if (playerPed && *playerPed) {
+						const std::optional<float> px = VCS::ReadFloat(*playerPed + VCS::kVCSEntityPositionOffset);
+						const std::optional<float> py = VCS::ReadFloat(*playerPed + VCS::kVCSEntityPositionOffset + 4);
+						const std::optional<float> pz = VCS::ReadFloat(*playerPed + VCS::kVCSEntityPositionOffset + 8);
+						if (px && py && pz) {
+							const float dx = *tx - *px, dy = *ty - *py, dz = *tz - *pz;
+							dist = sqrtf(dx * dx + dy * dy + dz * dz);
+						}
+					}
+					ImGui::Text("   at %.2f %.2f %.2f   %.1f m from the player", *tx, *ty, *tz, dist);
+				}
+			}
+		}
+		ImGui::Checkbox("Turn the character with the aim (redundant)", &s.pedFollowAim);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("OFF because the game already does it: mode 45's Process writes m_fRotationCur and m_fRotationDest every frame as atan2(Front.y, Front.x) - PI/2, which is the same formula. Two writers at different rates is what made the crosshair unable to move horizontally until the body had finished turning. Turn it on only to test whether the game's own write is gated on something.");
+		}
+		if (s.pedFollowAim) {
+			ImGui::Checkbox("Snap heading (off = use the game's turn rate)", &s.pedSnapHeading);
+			ImGui::Checkbox("Invert heading (calibration)", &s.pedHeadingInvert);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("ON by default because play says so, against four static checks that all said otherwise. Unexplained - see the note on pedHeadingInvert. Use the two readings below to settle it properly rather than leaving it as a knob.");
+			}
+			ImGui::SliderFloat("Heading offset (deg)", &s.pedHeadingOffsetDeg, -180.0f, 180.0f, "%.1f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Residual rotation on the ped heading, after the invert.");
+			}
+			bool driving = false;
+			float desired = 0.0f;
+			u64 writes = 0;
+			VCS::PedAimStats(&driving, &desired, &writes);
+			const std::optional<float> live = VCS::ReadAddrFloat(VCS::VCSAddr::PedHeading);
+			if (live) {
+				ImGui::Text("ped heading: live %.4f  desired %.4f  writes %llu  %s",
+					*live, desired, (unsigned long long)writes, driving ? "DRIVING" : "idle");
+			} else {
+				ImGui::Text("ped heading: live unset  desired %.4f  writes %llu  %s",
+					desired, (unsigned long long)writes, driving ? "DRIVING" : "idle");
+			}
+		}
+
+		// THE measurement that settles the heading convention, and the reason it is here rather
+		// than in a comment: both numbers are the same quantity in the same convention, so if the
+		// mapping is `camYaw + PI/2` their difference is CONSTANT as you turn, and if it is
+		// `-camYaw + c` the difference moves at twice the rate you do. One glance while turning
+		// answers it; four single-sample static checks did not.
+		//
+		// Take it with "Turn the character with the aim" OFF and simply walking around on foot,
+		// so nothing here is writing the heading and the game's own relationship is on show.
+		{
+			const std::optional<float> camYaw = VCS::ReadAddrFloat(VCS::VCSAddr::CameraYaw);
+			const std::optional<u32> playerBase = VCS::ReadAddrU32(VCS::VCSAddr::PlayerBase);
+			const std::optional<float> pedAsCamYaw =
+				playerBase ? VCS::ReadEntityHeading(*playerBase) : std::nullopt;
+			if (camYaw && pedAsCamYaw) {
+				const float kPi = 3.14159265358979f;
+				float diff = *camYaw - *pedAsCamYaw;
+				while (diff > kPi) diff -= 2.0f * kPi;
+				while (diff < -kPi) diff += 2.0f * kPi;
+				ImGui::Text("convention check: camYaw %.4f   ped-as-camYaw %.4f   diff %+.4f (%+.1f deg)",
+					*camYaw, *pedAsCamYaw, diff, diff * 180.0f / kPi);
+				ImGui::TextDisabled("turn on foot with the feature OFF: steady diff = camYaw + PI/2, sweeping diff = inverted");
+			} else {
+				ImGui::TextDisabled("convention check: needs CameraYaw and a live player ped");
+			}
 		}
 		ImGui::Separator();
 	}

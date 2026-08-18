@@ -180,6 +180,67 @@ debugger is the one that needs `g_frameMutex`, not this.
   open season for the game to find a target. `aimFreeAimDelay` is 0 now — Free Aim is pressed on
   the same tick as the trigger. No memory writes, no fighting the targeting code; the bug was ours.
 
+- **Mouse-native free aim, end to end**, confirmed in play and described there as *"genuinely
+  smooth, how I wanted it... feels like PC native"*. Four pieces had to be right at once:
+
+  | | |
+  |---|---|
+  | the ray | built from the camera's stored `Front`/`Up`/`Source`, not reconstructed from the angles |
+  | its length | the weapon's own range out of `CWeaponInfo`, not whatever the game's target implied |
+  | the gun | `m_pPointGunAt`'s entity moved onto the crosshair, down the same ray the bullet takes |
+  | vertical | a deadband lead on pitch, because the aim camera will not move until the angle leads it |
+
+  **The settled configuration**, which is now the default: crosshair 0.5/0.5, yaw trim 0,
+  camera-origin ray on, weapon range on, `aimPitchDeadband` **0.165**, `aimYawDeadband` **0**,
+  everything else off. `pedFollowAim` off - the game turns the character itself.
+
+### Pitch needs a deadband lead. Yaw does not. That asymmetry is the whole story
+
+The aim camera will not move vertically until `CameraPitch` leads the real aim by about **9.4
+degrees**, measured directly:
+
+```
+before pitching   Front pitch -0.0442   CameraPitch -0.0442   off  0.00 deg
+still no movement Front pitch -0.0442   CameraPitch +0.1198   off -9.40 deg
+first movement    Front pitch -0.0390   CameraPitch +0.1278   off -9.56 deg
+```
+
+The two start **identical**, so they are normally one number. At 0.004 rad/count that gap is ~41
+mouse counts of nothing before vertical starts - "Y needs a hard flick", in units.
+
+The fix is the same doctrine as `aimResponseModel`: **integrate the intent at 1:1 and solve for the
+lever.** Track where the player is asking to look in `Front`'s own space, then set `CameraPitch` to
+that plus the deadband. The lead appears in full on the first frame, so pitch starts immediately,
+and it collapses when `Front` catches up - it removes delay without adding speed. Anchored to the
+live `Front` every frame, so a wrong deadband costs one frame rather than compounding.
+
+**Scaling the input instead does not work**, and the reason generalises: the deadband is a
+*constant*, so paying for it with gain overcharges every movement that was never near it. That
+build was reported as hyper-sensitive. A constant error wants a constant correction.
+
+**Then the same treatment was applied to yaw, and it caused a snap that took four attempts to
+undo.** Yaw's deadband is **0** - horizontal aiming was already smooth on the plain accumulator, and
+the lead created a limit cycle: `Front` chases a lever leading it by `D`, passes the intent, the
+error crosses zero, the sign flips and the lever moves `2D` in one frame. Measured at 0.340 rad
+against 0.328 predicted.
+
+Three cures were tried on that snap and **all three failed, because all three treated the cycle
+rather than the setting that created it** - re-solving on still frames (a runaway: the lever is
+written directly, so each pass adds another deadband), retracting the lead at stroke end (wrong
+moment, the snap is mid-stroke), and blending the lead through zero (right mechanism, wrong layer).
+What fixed it was `aimYawDeadband = 0`.
+
+**The lesson is about where to look, not about aiming.** The snap was reported in the same build
+that introduced the yaw lead, and that fact was in hand before any of the three attempts. A symptom
+that appears with a change is evidence about that change, and it outranks any mechanism you can
+derive for it afterwards - all three cures rested on real measurements and correct arithmetic, and
+were still aimed at the wrong thing.
+
+Why the axes differ is not mysterious once the camera code is read: they reach `Front` by different
+routes in mode 45 - pitch through `SetRotateX(Alpha)`, yaw through a Z-rotate whose offset is picked
+from four quadrants by `ped + 0x780`. There was never a reason to expect one number to describe
+both. The 9.4 degrees they appeared to share was only ever measured on pitch.
+
 **Addresses found so far**, all verified stable across a fresh boot (the four `Pad*` entries are
 documented in "VCS has a second analog stick" below rather than repeated here):
 
@@ -195,6 +256,8 @@ documented in "VCS has a second analog stick" below rather than repeated here):
 | `IsFreeAiming` | `0x08bafb54` | 1 only while **free-aiming** (sniper/RPG); counted aim cycles matched transitions exactly |
 | `TimeStep` | `0x08bb3b5c` | `gp + 0x1dfc`. Read as a float by every camera mode that integrates the look axis, e.g. at `0x089a37f8`. Reads 1.668 in gameplay and 0.0 at the menu |
 | `FrameCounter` | `0x08bb3bb4` | `gp + 0x1e54`. The `lw / addiu 1 / sw` at `0x08a114c4`, last thing `CTimer::Update` does. 11621 in an in-game savestate, 0 at the menu |
+| `PedHeading` | `PlayerBase + 0x8d0` | the only adjacent float pair matching `atan2(-fwd.x, fwd.y)` from the ped's own matrix; the game reads it back in `FireInstantHit` to see how far the player turned between shots |
+| `PedHeadingTarget` | `PlayerBase + 0x8d4` | `m_fRotationDest`, beside it |
 
 ### Confirm an address by writing to it
 
@@ -624,6 +687,18 @@ doing nothing: it looks correct and misses.
 `mouseLookInFreeAim` is off, and stays visible in the UI marked DISPROVEN so the result is not
 rediscovered by someone reasoning their way to the same idea.
 
+**SUPERSEDED, conditionally — and the condition is the whole point.** The verdict above was
+correct and it was *contingent*: it held because the shot was resolved from the ped's aim state.
+The fire-site hook resolves it from the camera, so the condition is gone and the conclusion goes
+with it. `CameraAimActive` now returns true whenever the hook is installed and enabled, gated on
+**installed** as well as enabled — with the patch not landed, the shot is resolved the old way and
+driving the camera would reintroduce exactly this desync.
+
+Worth asking of any negative result in this project: *what would have to change for this to stop
+holding?* Two documented negatives turned out conditional rather than permanent on the same day —
+this one, and "VCS has no free aim for ordinary weapons". Both were correctly measured. Both
+described the game plus an assumption.
+
 **The consequence is the important part: the stick is the only path to the gun.** The game's
 integrator cannot be removed from aiming, only inverted — so `aimResponseModel` is not a
 workaround for lacking a better route, it *is* the route. That also caps how smooth aiming can
@@ -652,15 +727,135 @@ Layout established while settling this, all read out of the code rather than cor
 | `CCamera + 0x50` | active cam index (u8; observed 0 in gameplay) |
 | `CCamera + 0x70` | `CCam m_asCams[3]`, stride `0x260` — so `cam[0]` is `0x08bc7ea0` |
 | `CCam + 0x00` | mode (s16). 45 and 11 are the two weapon-aim modes |
+| `CCam + 0x10` | **`Front`**, unit — the direction the camera actually looks |
+| `CCam + 0x20` | **`Source`**, the camera's world position |
+| `CCam + 0x60` | **`Up`**, unit and exactly orthogonal to `Front` |
 | `CCam + 0x78` / `+0x7c` | pitch / yaw — i.e. this fork's `CameraPitch` / `CameraYaw`, on `cam[0]` |
 | `CCam + 0x124` / `+0x130` | the smoothed per-frame increment added to those |
-| `CCam + 0x128` | FOV |
+| `CCam + 0x128` | FOV, degrees, vertical |
+| `CCam + 0x190` | the point the camera is looking at (the player, `z + 0.6`) |
 | `CCamera + 0x7b8` | `PlayerWeaponMode.Mode` (s16) |
+
+**The three bold rows correct an earlier claim in this file** that `Front`/`Up` "did not reconcile
+with `CameraYaw` when measured" and therefore could not be used. They don't reconcile, and they
+never will: `Beta`/`Alpha` are the ORBIT angles about the look-at target while `Front` points from
+`Source` at that target, and the player is not in the middle of the screen. See "Shots landed
+chaotically because the ray was built from the wrong two numbers" below — that 4.42° gap is the
+whole aiming bug, not a reason to distrust the fields.
 
 The index math is at `0x08a228a0` (`idx * 608 + 0x70`) and the mode jump table at `0x08b7ed88`.
 Mode 15 — the ordinary on-foot follow camera — routes to `0x08999f60`, which **never reads the
 look axis at all**. That is why writing `CameraYaw` works so cleanly for mouse look and so badly
 for aiming: on foot there is no integrator to fight, and in free aim there is.
+
+### Shots landed chaotically because the ray was built from the wrong two numbers
+
+The fire-site hook worked — the bullet went where it was told, confirmed by deflection test — and
+the bullets still did not land on the crosshair. Three separate errors, and the first one is the
+interesting one because it had already been *found* and then explained away.
+
+**1. The direction came from `CameraYaw`/`CameraPitch`, which are not the camera's forward.**
+
+The hook rebuilt a direction as `(cos, sin)` of `camYaw - PI` with `camPitch` used as-is. Both
+conventions were calibrated in play, and both are correct descriptions of what they measured — the
+camera's **orbit angles about its look-at target**. The camera's actual forward is a separate stored
+vector (`CCam + 0x10`), and the two differ by however far the player sits from screen centre:
+**4.42°** in the savestate, about 3.3 horizontal and 2.8 vertical.
+
+The reason this reads as *chaos* rather than as a constant miss is that an angular offset is not a
+constant: it grows as the camera closes on the player and swings as the camera orbits. The
+`crosshairX` slider was fitting its horizontal half — which is why the value that was right at one
+angle was wrong at another, measured at 0.5125 to 0.5300 across a 180° sweep, non-monotonically —
+and the vertical half had no slider at all.
+
+Two numbers agree on what the trim was really measuring: it wanted **3.2°**, and `Front` sits
+**3.3°** off the angle it was correcting. So with `Front` used directly, `crosshairX` should want
+0.5. It defaults there now, as a prediction rather than a fitted value.
+
+**2. The ray length was whatever the game's own target happened to be.** That length means three
+different things across `FireInstantHit`'s branches — the weapon range on one, the distance to a
+locked-on ped on another, the distance to the free-aim dummy on a third — and an auto-aim assist
+can shorten it again before the raycast. The range is read out of `CWeaponInfo + 0x08` now.
+
+**3. `useCameraOrigin` was off, so the ray started at the gun.** It was off for an honest reason:
+the camera position had been chosen by ranking candidate vec3s for being "most anti-parallel to the
+camera's forward vector", using the forward vector that turns out to be 4.4° wrong. `+0x210` won
+that ranking and put shots nowhere visible. The comment left behind said the method was the suspect,
+and it was right. Measuring instead — which candidate's bearing to the look-at point reproduces the
+stored pitch — gives `+0x020` unambiguously, because the six candidates are hard to separate
+horizontally and trivial to separate vertically.
+
+**The method note, which is the transferable part.** All three were settled offline in one sitting
+with `Tools/vcsstatic.py` and one gameplay savestate, by *geometry* rather than by correlation or by
+play-testing: `Front` reproduces `normalize(LookAt - Source)` to five decimals, `dot(Front, Up)` is
+exactly 0, and `Source` is 4.63 m from the player on the far side. A savestate is a complete world
+state, so anything with a geometric relationship to something already known can be identified
+without booting the game — and a wrong answer shows up as a number that does not fit rather than as
+a shot that goes somewhere odd.
+
+This is the third time in this file that a **correct measurement produced a wrong conclusion**, and
+the shape is always the same: the observation is about a symptom, the conclusion is about a
+mechanism, and nothing in between was read. Here the missing step was two vec3s sitting 16 bytes
+apart from a value the table had held for weeks.
+
+### The bullet followed the crosshair and the man did not
+
+Driving the camera in free aim left the character **frozen, aiming wherever he happened to be
+pointing when the aim key went down**. Not a rendering artefact: his heading is where the gun
+points, and in free aim nothing turns it once we stop feeding the stick.
+
+The cause is the same latch that makes movement in free aim possible. `MoveGateBranch` skips the
+movement call, so nothing re-evaluates the ped's heading either — whatever it was on entry is held
+forever. That is the feature in one place and the failure in the other.
+
+`PedAimTick` in `VCSCamera.cpp` writes `m_fRotationDest` (and `m_fRotationCur`, since a mouse is a
+position control and a turn rate is the lag the aim model exists to remove) from the live camera
+yaw. `PedHeading` / `PedHeadingTarget` are `PlayerBase + 0x8d0` / `+0x8d4`; see
+docs/VCS_ADDRESSES.md for how they were found and for the `camYaw + PI/2` conversion.
+
+**Then the body turned and the gun still did not**, described in play as *"his hand acts exactly like
+a chicken's head — locked into place while the rest of the body is moving"*. That names the mechanism
+exactly: **the arm aims at a world POSITION, not at an angle.** Nothing moved that position once the
+stick stopped being fed, so the hand held its world bearing while the body rotated underneath.
+
+The position is `CPed + 0x81C` (`m_pPointGunAt`), and moving that entity is the fix. It drives the
+native shot as well as the arm — for any non-ped target `FireInstantHit` reads `entity + 0x30`
+straight into its raycast target (`0x08a48a6c`), so the gun and the bullet agree by construction.
+`pedAimGun` writes it every frame, down the same ray `SolveAimRay` gives the fire hook.
+
+**Measured, and it corrected the guess:** the entity is type **4, an OBJECT** — not the type-5 dummy
+that `FireInstantHit`'s special-case branch implied. That branch is the exception, not the rule. The
+guard is therefore a blocklist: never write the position of a ped, vehicle or building, because that
+teleports something the world owns; everything else is a placeholder.
+
+### The game already turns the player, and writing it ourselves was the lag
+
+`pedFollowAim` shipped on, produced a character that turned correctly, and then produced a new
+complaint: *"when aiming, I have to wait until the character's legs/torso turns and then I can move
+the crosshair along with the full body."* Horizontal aim could not outrun the body.
+
+**Mode 45's `Process` writes the ped's heading itself, every frame** — `0x089a3e20`..`0x089a3e5c`:
+
+```
+angle = atan2(Front.y, Front.x)      ; the camera's own look vector, CCam+0x10
+if (angle < 0) angle += 2*PI
+angle -= PI/2                        ; 0x3fc90fdb, loaded at 0x089a3984
+ped->m_fRotationCur  = angle         ; +0x8d0
+ped->m_fRotationDest = angle         ; +0x8d4
+```
+
+which is the same formula this fork had derived independently. So `pedFollowAim` was a **second
+writer of one field at a different rate** — ours at vblank, the game's at its 30fps logic rate. That
+is the exact shape of the CameraPitch runaway documented above, and it is off now.
+
+Two things worth carrying:
+
+- **Before writing a field, check whether the game writes it.** This one is not subtle: the write
+  sits inside the very function whose aim response the fork already reverse-engineered in detail.
+  Reading a function for one purpose does not mean it has been read.
+- **The game resolves the ped's aim through `Front`, not through Beta/Alpha.** Independent
+  confirmation that the fire hook's rewrite was right — the game's own aiming has always gone
+  through the stored basis, and the angles were never the aim.
 
 ### Read the game's code without running the game
 

@@ -131,7 +131,8 @@ void UpdateState(VCSState *state) {
 	// would show up as 255. Range-check before using it as an index rather than reading 255 records
 	// past the array.
 	if (state->playerBase && state->weaponIndex && *state->weaponIndex <= 9) {
-		state->weaponType = ReadU32(*state->playerBase + 0x574 + *state->weaponIndex * 28 + 4);
+		state->weaponType = ReadU32(*state->playerBase + kVCSWeaponRecordsOffset +
+			*state->weaponIndex * kVCSWeaponRecordStride + kVCSWeaponRecordTypeOffset);
 	}
 	state->isAiming = ReadAddrBool(VCSAddr::IsAiming);
 	state->isFreeAiming = ReadAddrBool(VCSAddr::IsFreeAiming);

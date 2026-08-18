@@ -54,9 +54,79 @@ inline constexpr u32 kVCSWeaponRaycastCall = 0x08A41D74;
 // yet, or this is not the build the address was measured on, we must write nothing at all.
 inline constexpr u32 kVCSWeaponRaycastOp = 0x0E225E1B;
 
-// CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70. The camera's own world position lives inside
-// it; see camSourceOffset in VCSFireHook.h for which field and how it was identified.
+// CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70.
 inline constexpr u32 kVCSCam0 = 0x08BC7EA0;
+
+// CCam's stored view BASIS, and the answer to where a shot should actually be aimed.
+//
+// MEASURED out of a gameplay savestate, geometrically, not correlated and not guessed:
+//
+//   +0x010  Front   unit, and exactly normalize(LookAt - Source) to 5 decimal places
+//   +0x020  Source  the camera's world position: 4.63 m from the player, on the far side
+//   +0x060  Up      unit, and dot(Front, Up) == 0.000000 - a real orthonormal pair
+//   +0x128  FOV     70.0, degrees, VERTICAL (re3 multiplies the x term by the aspect ratio)
+//   +0x190  the point the camera looks at: the player's position raised by 0.6
+//
+// The old note here said these "did not reconcile with CameraYaw" and could not be used. The
+// observation was right and the conclusion was wrong. They do not reconcile because Beta/Alpha
+// (CameraYaw/CameraPitch) are the ORBIT angles about the look-at target, while Front points from
+// the source AT that target - and the player does not stand in the middle of the screen. In the
+// savestate the two differ by 4.42 degrees, split roughly 3.3 horizontal and 2.8 vertical.
+//
+// That 4.42 degrees is the entire "shots do not land on the crosshair" bug. It is not a constant:
+// it is the angular size of the player's offset from screen centre, so it scales with 1/distance
+// and swings as the camera orbits. `crosshairX`'s 3.2 degree in-play trim was fitting the
+// horizontal half of it, which is why the fitted value kept wandering with the view angle.
+inline constexpr u32 kVCSCamFrontOffset = 0x010;
+inline constexpr u32 kVCSCamSourceOffset = 0x020;
+inline constexpr u32 kVCSCamUpOffset = 0x060;
+inline constexpr u32 kVCSCamFOVOffset = 0x128;
+
+// The weapon's range, which is what the length of a redirected shot ray has to be.
+//
+// CWeaponInfo::GetWeaponInfo is 0x08b1fd70, and it is three instructions:
+//
+//     offset = type * 128 - type * 16          // i.e. stride 0x70
+//     base   = gp[-0x1ba8] ? tbl[0] : tbl[1]   // tbl = *(void**)(gp + 0x2950)
+//     return base + offset
+//
+// Range is at +0x08 - FireInstantHit builds its fallback target as `source + range * heading`
+// straight out of that field. Read back sensibly across the whole arsenal in a savestate:
+// pistol 30, python 40, shotgun 15, SMG 45, AR 90, M60 100, sniper 55, RPG 75.
+//
+// Worth the plumbing because the alternative is what shipped: reusing whatever length the game's
+// own target happened to have. That is the weapon range only on the plain path - it is the
+// distance to the locked-on entity on another, and the distance to the free-aim dummy on a third.
+// A ray of the wrong length stops short of what the crosshair is on, by a different amount every
+// shot.
+inline constexpr u32 kVCSWeaponInfoTablePtr = 0x08BB46B0;     // gp + 0x2950
+inline constexpr u32 kVCSWeaponInfoTableSelect = 0x08BB01B8;  // gp - 0x1ba8
+inline constexpr u32 kVCSWeaponInfoStride = 0x70;
+inline constexpr u32 kVCSWeaponInfoRangeOffset = 0x08;
+
+// The player's weapon records, indexed by the slot in WeaponIndex. Already documented on that
+// entry; named here so the fire hook can reach the TYPE without a hex literal of its own.
+inline constexpr u32 kVCSWeaponRecordsOffset = 0x574;  // from PlayerBase
+inline constexpr u32 kVCSWeaponRecordStride = 28;
+inline constexpr u32 kVCSWeaponRecordTypeOffset = 0x04;
+
+// CEntity's own layout, which every entity in the game shares. The transform sits at the head with
+// the translation at +0x30 - that relation is how PlayerBase, PlayerVehicle and the whole vehicle
+// pool were all confirmed. The flags word at +0x48 carries a 3-bit type in bits 1..3, so the type
+// is `(flags & 0xe) >> 1`; the game tests the masked value against 6 for a ped (0x08a48934) and
+// against 0xe for the case FireInstantHit treats specially (0x08a489cc).
+//
+// The numbering matches re3's eEntityType, anchored by that ped test: 6 >> 1 == 3 == ENTITY_TYPE_PED.
+// So 1 building, 2 vehicle, 3 ped, 4 object, 5 dummy.
+inline constexpr u32 kVCSEntityPositionOffset = 0x30;
+inline constexpr u32 kVCSEntityFlagsOffset = 0x48;
+inline constexpr u32 kVCSEntityTypeMask = 0x0e;
+inline constexpr u32 kVCSEntityTypeShift = 1;
+inline constexpr int kVCSEntityTypeBuilding = 1;
+inline constexpr int kVCSEntityTypeVehicle = 2;
+inline constexpr int kVCSEntityTypePed = 3;
+inline constexpr int kVCSEntityTypeObject = 4;
+inline constexpr int kVCSEntityTypeDummy = 5;
 
 // How to interpret the bytes at an address. Used both by the typed read helpers and by the
 // debugger window to decide how to display a value.
@@ -151,6 +221,20 @@ enum class VCSAddr {
 	// speed. Based on PlayerBase, because the ped is heap-allocated and moves between runs.
 	PedVelX,
 	PedVelY,
+
+	// Which way the player is FACING, which in free aim is which way the gun points.
+	//
+	// The ped's whole upper body - and therefore the weapon - is carried by its heading. Free aim
+	// normally turns it because the stick turns it; once the mouse drives the camera directly the
+	// stick is no longer fed, nothing re-evaluates the heading, and the character stands frozen
+	// aiming wherever he was pointing when aim was pressed. Writing this is what makes the gun
+	// follow the crosshair instead of the crosshair sliding off the gun.
+	PedHeading,
+	PedHeadingTarget,
+
+	// The entity the ped is pointing its gun at - re3's m_pPointGunAt. Its world position is what
+	// the arm IK aims along, which is why the gun reads as world-locked once nothing moves it.
+	PedPointGunAt,
 
 	// CODE, not data: the branch that makes aiming and moving mutually exclusive.
 	//
@@ -308,6 +392,27 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	{ VCSAddr::CamFOV,        "CamFOV",        VCSAddrType::Float, 0x08bc7fc8,    kNoBase,              "CCam[0]+0x128. Read 70.0 in gameplay. Aim rates scale with FOV/80" },
 	{ VCSAddr::PedVelX,       "PedVelX",       VCSAddrType::Float, 0x140,         VCSAddr::PlayerBase,  "Movement velocity X, per frame. Zero in free aim - that is the thing being worked around" },
 	{ VCSAddr::PedVelY,       "PedVelY",       VCSAddrType::Float, 0x144,         VCSAddr::PlayerBase,  "Movement velocity Y. Pairs with PedVelX" },
+	// re3's CPed::m_fRotationCur / m_fRotationDest, and found by VALUE rather than by correlation:
+	// the ped's matrix forward is (-sin, cos) of its heading, so the heading is computable from the
+	// entity struct - and exactly three floats in the whole 6 KB ped matched it, +0x6b8, +0x8d0 and
+	// +0x8d4. The adjacent pair is the cur/dest pair; +0x6b8 is a third copy, not written here.
+	//
+	// Confirmed independently by the game's own code: FireInstantHit reads +0x8d0 for the player,
+	// compares it against a global copy of its previous value and stores the new one back
+	// (0x08a48694..0x08a486bc) - it is tracking how far the player turned between shots, which is
+	// only meaningful for the live heading.
+	//
+	// Write DEST to turn the way the game turns, with its own animation and rate; write CUR as well
+	// to snap. Both, because a mouse is a position control and a turn rate reintroduces exactly the
+	// lag the whole aim-model effort exists to remove.
+	{ VCSAddr::PedHeading,       "PedHeading",       VCSAddrType::Float, 0x8d0, VCSAddr::PlayerBase, "m_fRotationCur, radians. Forward = (-sin, cos). Free aim freezes without this being driven" },
+	{ VCSAddr::PedHeadingTarget, "PedHeadingTarget", VCSAddrType::Float, 0x8d4, VCSAddr::PlayerBase, "m_fRotationDest. The game eases PedHeading toward it" },
+	// re3's CPed::m_pPointGunAt, read straight out of FireInstantHit (0x08a48950: `lw a0, 0x81c(s2)`
+	// then branch on whether it is null). Set through one setter at 0x08907b98 and cleared at
+	// 0x08913a70 - a pointer with exactly one writer, which is what a member like this should look
+	// like. The game caches its position at CPed+0xC80 and uses that as the shot's target when the
+	// entity is a DUMMY and the shooter is the player.
+	{ VCSAddr::PedPointGunAt, "PedPointGunAt", VCSAddrType::U32, 0x81c, VCSAddr::PlayerBase, "Entity the gun is aimed at. In free aim it is a DUMMY parked at the aim point" },
 	// World position, from the entity matrix. Unlike velocity, nothing recomputes this from the
 	// movement state - so a small step added each frame accumulates instead of being wiped, which
 	// is what makes translating the player directly a viable way to move during free aim.

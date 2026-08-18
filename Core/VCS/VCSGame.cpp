@@ -134,6 +134,10 @@ void Tick() {
 	// After CameraTick, because it steers by the camera yaw and wants this frame's value rather
 	// than last frame's. Writes the ped's velocity, so it has to run every frame or be wiped.
 	FreeAimMoveTick(context);
+
+	// Also after CameraTick, and for the same reason: it turns the character to the camera's yaw
+	// and wants the value CameraTick just wrote, not the one from before it ran.
+	PedAimTick(context);
 }
 
 bool IsActive() {

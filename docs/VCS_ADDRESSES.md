@@ -429,6 +429,116 @@ five parameters where the INI declares one. Sanny's VCS opcode names are partly 
 Vice City and cannot be trusted for an opcode nobody has confirmed. The command table itself is
 fine — the formula was re-verified against the known `02C0` handler while establishing this.
 
+### The camera stores a real view basis, and it is not the same thing as `CameraYaw`
+
+**This is the answer to "shots land chaotically and not where the crosshair is", and it corrects a
+note in the address table that said these fields could not be used.**
+
+`CCam[0]` (`0x08bc7ea0`) holds, alongside the orbit angles already in the table:
+
+| offset | what | measured in `ULUS10160_1.03_1.ppst` |
+|---|---|---|
+| `+0x010` | `Front`, unit | `(-0.22437, +0.96148, -0.15878)` |
+| `+0x020` | `Source` — the camera's world position | `(-1745.340, -241.625, 15.942)`, 4.633 m from the player |
+| `+0x060` | `Up`, unit | `(-0.03608, +0.15462, +0.98731)`, `dot(Front, Up) == 0.000000` |
+| `+0x128` | FOV, degrees, **vertical** | `70.0` |
+| `+0x190` | the look-at point | the player's position with `z + 0.600` |
+
+All of it geometric, none of it correlated: `Front` reproduces `normalize(LookAt - Source)` to five
+decimal places, `Front` and `Up` are exactly orthonormal, and `Source` is the only candidate whose
+bearing to the look-at point carries the stored pitch. That last test is what settles `+0x020`
+against `+0x210` — the six position-shaped vec3s behind the camera are hard to tell apart
+horizontally, and trivial to tell apart *vertically*: `+0x210` sits level with its target, implying
+a camera looking straight ahead, while `Alpha` reads −11.9°.
+
+**Why the earlier attempt concluded these "did not reconcile with `CameraYaw`".** They don't, and
+they shouldn't. `Beta`/`Alpha` are the ORBIT angles about the look-at target; `Front` points from
+the source at that target. The player is not in the middle of the screen, so the two differ by
+however far off-centre he is — **4.42°** in this savestate, roughly 3.3 horizontal and 2.8 vertical.
+
+That discrepancy is the whole bug, and the important property is that **it is not a constant**. It
+is an angular offset, so it grows as the camera closes on the player and swings as the camera
+orbits. The `crosshairX` slider was fitting its horizontal half, which is exactly why the fitted
+value kept wandering — measured in play at 0.5125 to 0.5300 across a 180° sweep, non-monotonically.
+No single trim can hold, and the vertical half had no slider at all.
+
+Two independent numbers agree that the horizontal trim was measuring this and not the crosshair:
+the trim wanted **3.2°** in play, and `Front` sits **3.3°** off the angle it was correcting. So with
+`Front` used directly the crosshair multipliers should sit at 0.5 — which is what they now default
+to, and which is a falsifiable prediction rather than a tuned value.
+
+The port is now re3's `CCamera::Find3rdPersonCamTargetVector` as actually written:
+
+```
+tanHalf = tan(FOV/2)
+right   = Front x Up                       (screen-right; +X for a camera facing +Y)
+dir     = Front + right * (2*(chairX - 0.5)) * tanHalf * (480/272)
+                + Up    * (2*(0.5 - chairY)) * tanHalf
+dir.Normalise()
+origin  = Source, slid along dir to the point nearest the muzzle
+target  = origin + dir * weaponRange
+```
+
+### `CWeaponInfo` and the weapon's range — because the ray length was also wrong
+
+`CWeaponInfo::GetWeaponInfo` is `0x08b1fd70` and is three instructions:
+
+```
+offset = type * 128 - type * 16          ; stride 0x70
+base   = gp[-0x1ba8] ? tbl[0] : tbl[1]   ; tbl = *(void**)(gp + 0x2950)
+return base + offset
+```
+
+so with `gp = 0x08bb1d60`: selector at `0x08bb01b8`, table pointer at `0x08bb46b0`, **range at
+`+0x08`**. Read back across the arsenal in a savestate and it is obviously right — pistol 30, python
+40, shotgun 15, SMG 45, AR 90, M60 100, sniper 55, RPG 75; entries decode as noise past about 40.
+
+**Why this matters to aiming at all.** The hook kept the length of whatever target the game had
+already computed, and that length means three different things depending on which branch of
+`FireInstantHit` (`0x08a4842c`) produced it:
+
+| branch | what `point2` is | so `Dist(source, target)` is |
+|---|---|---|
+| `m_pPointGunAt` is a dummy, shooter is the player | `CPed + 0xC80` | the distance to the free-aim point — near |
+| `m_pPointGunAt` is a ped | that ped's bone position | the distance to him |
+| no `m_pPointGunAt` | `source + range * (-sin, cos, 0)` from the ped's heading | the weapon range |
+
+and on the last one `0x08a5071c` — an auto-aim assist that gathers entities in a sphere and snaps
+the target onto one — runs *before* the raycast and can shorten it again. Redirect the direction
+while keeping that length and the bullet stops short by a different amount every shot, which is
+what "chaotic" was.
+
+Worth recording separately, because it is a fact about the game rather than about this fork: **the
+no-lock-on branch is completely flat.** `target.z = source.z`, always. Vertical aim through the
+game's own path does not exist; the fire-site hook is the only thing that provides it.
+
+### `PedHeading` / `PedHeadingTarget` — **FOUND: `PlayerBase + 0x8d0` / `+0x8d4`**
+
+re3's `CPed::m_fRotationCur` and `m_fRotationDest`, and found by value rather than by correlation:
+the ped's matrix forward is `(-sin, cos)` of its heading, so the heading is computable directly from
+the entity struct. Exactly three floats in the whole 6 KB ped matched it — `+0x6b8`, `+0x8d0` and
+`+0x8d4`. The adjacent pair is cur/dest; `+0x6b8` is a third copy.
+
+Confirmed independently out of the game's own code: `FireInstantHit` reads `+0x8d0` for the player,
+compares it against a global copy of its previous value and stores the new one back
+(`0x08a48694`..`0x08a486bc`) — it is tracking how far the player turned between shots, which is only
+meaningful for the live heading.
+
+Conversion from the camera, since it is the thing that gets got wrong: the camera looks along
+`camYaw - PI` read as `(cos, sin)`, the ped stores a heading whose forward is `(-sin, cos)`, so
+
+```
+pedHeading = atan2(-cos(camYaw - PI), sin(camYaw - PI)) = camYaw + PI/2   (mod 2PI)
+```
+
+Checked against the savestate: `camYaw` 4.88071 gives 0.168 where the ped was facing 0.064, a 6°
+difference which is the follow camera trailing the player rather than a convention error.
+
+**Note this is `+ PI/2`, where the `CameraYaw` entry above says `matrixYaw = CameraYaw - PI/2`.**
+Both are right; they are different quantities. That note is about the camera's own matrix, this is
+about the ped's facing, and they differ by the half turn between "looking at the player" and
+"looking the way the player looks".
+
 ### `IsAiming` — u32 (boolean) — **FOUND: `0x08bb32a0`**
 
 **1 while locked on to a target**, not merely while the aim button is held. Confirmed by two
