@@ -1241,8 +1241,24 @@ void CameraTick(VCSInputContext context) {
 			// Anchored to the LIVE Front every frame, so nothing accumulates and a wrong deadband
 			// costs one frame of lead rather than compounding. Same reasoning as the aim response
 			// model reading CamAimInc instead of predicting it.
+			// NOT for the scoped weapons. Sniper and RPG are weapon camera modes 7 and 8, and this
+			// file already records what is different about them: they are manually aimed and their
+			// reticle is driven DIRECTLY and LINEARLY, with no integrator between the angle and the
+			// aim. So there is no stiction for the lead to break - the camera follows the moment it
+			// is written.
+			//
+			// Feeding a lead to a camera that has none is the yaw limit cycle again, one axis over:
+			// push 0.165 ahead, Front arrives immediately, the error flips sign, push back. Reported
+			// in play as sniper and RPG twitching like crazy, and it is the same shape as the snap
+			// that cost four builds on yaw - which is exactly why it is worth naming rather than
+			// re-deriving.
+			//
+			// The general rule this is the third instance of: a correction shaped like the game's
+			// response is only valid where that response is. aimResponseModel had to learn it,
+			// aimScopedCamera had to learn it, and now so does the deadband.
 			std::optional<float> frontPitch;
-			if (context == VCSInputContext::Aiming && g_settings.aimPitchDeadband > 0.0f) {
+			if (context == VCSInputContext::Aiming && g_settings.aimPitchDeadband > 0.0f &&
+				!ScopedWeaponActive()) {
 				const std::optional<float> fz = ReadFloat(kVCSCam0 + kVCSCamFrontOffset + 8);
 				if (fz && *fz >= -1.0f && *fz <= 1.0f) {
 					frontPitch = std::asin(*fz);
