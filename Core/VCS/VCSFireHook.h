@@ -74,6 +74,20 @@ struct VCSFireHookSettings {
 	// a permanent slider for a fact that has been measured is just somewhere for it to hide.
 	float aimYawOffsetDeg = 0.0f;
 
+	// Horizontal crosshair position, as a fraction of screen width.
+	//
+	// The shot is offset from the camera's centre line because the CROSSHAIR is, and re3 does
+	// exactly this: m_f3rdPersonCHairMultX is 0.53, right of centre because the ped stands in the
+	// left of frame, and Find3rdPersonCamTargetVector unprojects that pixel rather than the middle
+	// of the screen.
+	//
+	// Calibrated in play here: a 3.2 degree trim was needed, and re3's formula run at VCS's numbers
+	// - (x - 0.5) * 0.9 * FOV * aspect, with FOV 70 and 480/272 - gives 3.36 degrees at 0.53 and
+	// 3.2 at 0.529. That agreement is why this is computed rather than stored as a fixed angle:
+	// the offset scales with FOV, so it stays correct through sniper zoom, which a constant would
+	// not.
+	float crosshairX = 0.529f;
+
 	// Flips the vertical axis. Also zeroed out by calibration: pitch is now used as-is, which is
 	// what aimed correctly, rather than negated as the address notes imply.
 	bool aimInvertPitch = false;

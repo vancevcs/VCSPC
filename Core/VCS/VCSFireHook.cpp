@@ -110,7 +110,14 @@ static bool CameraForward(Vec3 *out) {
 	// opposite direction, which is what a mirrored axis looks like. Why the note does not hold
 	// for the shot direction is not established; the measurement is.
 	const VCSFireHookSettings &s = FireHookSettings();
-	const float yaw = *camYaw - kPi + s.aimYawOffsetDeg * kPi / 180.0f;
+	// The crosshair's angular offset from the camera centre line, re3's formula, against live FOV
+	// so zoom stays correct. Falls back to the shipped FOV if the read fails - being 3 degrees off
+	// is much better than not aiming at all.
+	auto fov = ReadAddrFloat(VCSAddr::CamFOV);
+	const float aspect = 480.0f / 272.0f;
+	const float chairDeg = (s.crosshairX - 0.5f) * 0.9f * (fov ? *fov : 70.0f) * aspect;
+
+	const float yaw = *camYaw - kPi - chairDeg * kPi / 180.0f + s.aimYawOffsetDeg * kPi / 180.0f;
 	const float pitch = (s.aimInvertPitch ? -1.0f : 1.0f) * *camPitch;
 
 	const float cp = cosf(pitch);

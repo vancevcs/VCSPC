@@ -528,6 +528,10 @@ void ImVCSWindow::DrawCamera() {
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Rotates camera-derived aim. Only matters with Debug deflect at 0. If shots land a consistent angle off the camera, this is the knob - 90 degree errors are a coordinate convention, small ones are something else.");
 		}
+		ImGui::SliderFloat("Crosshair X", &f.crosshairX, 0.45f, 0.60f, "%.4f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Where the crosshair sits across the screen. The shot is offset from the camera centre because the crosshair is - re3 uses 0.53 for the same reason. Computed against live FOV, so it stays right through zoom.");
+		}
 		ImGui::Checkbox("Invert aim pitch", &f.aimInvertPitch);
 		ImGui::SliderFloat("Player radius", &f.playerRadius, 0.5f, 10.0f, "%.1f");
 		if (ImGui::IsItemHovered()) {
