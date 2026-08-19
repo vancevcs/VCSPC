@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@ namespace VCS {
 struct Option;
 // Legal to forward-declare: a scoped enum has a defined underlying type even undefined.
 enum class OptionPage;
+enum class VCSKeyList;
 }
 
 // The pause menu for the VCS front end, in the shape GTA uses: a left-hand column of large
@@ -52,6 +54,15 @@ enum class VCSMenuPage {
 	Aiming,
 	Audio,
 	Graphics,
+
+	// The read-only controls listing: a menu of the four situations, then a page of bindings
+	// for each. Nothing on those pages can be edited - they are a reference card, which is what
+	// the game's own Controls screen is once you take the rebinding out.
+	Keyboard,
+	KeysOnFoot,
+	KeysVehicle,
+	KeysAircraft,
+	KeysMelee,
 };
 
 // The same screen serves two jobs, because they differ only in what the root page offers and in
@@ -106,6 +117,27 @@ private:
 	bool draggingValue_ = false;
 };
 
+// One line of the controls listing: the action on the left, the keys that perform it in columns
+// to the right, and a bar across the row when it is selected.
+//
+// A ClickableItem purely for the highlight. There is nothing to click - bindings are not
+// editable here - but a row that does not light up under the mouse or the arrow keys reads as
+// dead, and the game's own Controls screen highlights the same way.
+class VCSBindingRow : public UI::ClickableItem {
+public:
+	VCSBindingRow(std::string_view name, const std::vector<std::string> &keys,
+		UI::LayoutParams *layoutParams = nullptr);
+
+	void Draw(UIContext &dc) override;
+	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
+	bool Touch(const TouchInput &input) override;
+	std::string DescribeText() const override;
+
+private:
+	std::string name_;
+	std::vector<std::string> keys_;
+};
+
 class VCSMenuScreen : public UIBaseDialogScreen {
 public:
 	VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode mode = VCSMenuMode::Pause);
@@ -114,6 +146,13 @@ public:
 	const char *tag() const override { return "VCSMenu"; }
 
 	bool key(const KeyInput &key) override;
+
+	// The title art is a GPU object, and screens are deleted long after the graphics device is
+	// destroyed - NativeShutdownGraphics calls deviceLost() and tears Vulkan down, and
+	// NativeShutdown deletes the screen manager much later. So this, not the destructor, is
+	// where the textures have to go.
+	void deviceLost() override;
+	void deviceRestored(Draw::DrawContext *draw) override;
 
 protected:
 	void CreateViews() override;
@@ -130,6 +169,13 @@ private:
 	const char *PageTitle(VCSMenuPage page) const;
 
 	void AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page);
+	void AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page);
+	// True for the four pages that list bindings rather than offering anything to change.
+	static bool IsKeyListPage(VCSMenuPage page);
+	static VCS::VCSKeyList ToKeyList(VCSMenuPage page);
+	// The frame the listing sits in. Sized to the rows actually on the page, so BACK lands just
+	// below it whether the page has eight rows or eighteen.
+	Bounds ListPanel() const;
 	// A row that just walks to another page. The commonest thing on this menu by far.
 	void AddPageRow(UI::ViewGroup *parent, const char *label, VCSMenuPage target);
 	void AddBackRow(UI::ViewGroup *parent);
@@ -141,7 +187,6 @@ private:
 	void OnLoadGame(UI::EventParams &e);
 	void OnExitGame(UI::EventParams &e);
 	void OnQuitApp(UI::EventParams &e);
-	void OnControlMapping(UI::EventParams &e);
 	void OnGameSettings(UI::EventParams &e);
 	void OnRestoreDefaults(UI::EventParams &e);
 
@@ -153,9 +198,19 @@ private:
 
 	VCSMenuPage page_ = VCSMenuPage::Root;
 
+	// How many binding rows the current page drew, so DrawBackground can size the panel behind
+	// them. Zero on every page that is not a listing.
+	int listRowCount_ = 0;
+
 	// Rebuilt by CreateViews. Used only to find the focused row for the helper line, so these
 	// are borrowed pointers into the view tree, never owned.
 	std::vector<VCSMenuItem *> rows_;
+
+	// The page-title textures. A member and not a file-scope static, because a static's
+	// destructor runs at program exit - after Vulkan has gone - and releasing a texture there
+	// is at best too late and at worst a use-after-free. Opaque so this header does not have to
+	// know about Draw::Texture.
+	std::unique_ptr<struct VCSMenuArt> art_;
 };
 
 // Returns the VCS pause menu for VCS, and PPSSPP's ordinary one for everything else. The three

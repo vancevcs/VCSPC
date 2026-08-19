@@ -37,8 +37,8 @@
 #include "Core/Config.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSGame.h"
+#include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSSettings.h"
-#include "UI/ControlMappingScreen.h"
 #include "UI/GameSettingsScreen.h"
 #include "Common/File/FileUtil.h"
 #include "Common/System/Request.h"
@@ -55,6 +55,12 @@ static const uint32_t kItemSelectedColor = COLOR(0xF7E9A6);  // cream, the selec
 static const uint32_t kSliderEmptyColor = COLOR(0x1B5982);   // unfilled slider blocks
 static const uint32_t kHintColor = COLOR(0xE8E8E8);
 static const uint32_t kBarColor = 0xD0000000;
+
+// The background, flat. It was a generated backdrop - a gradient with palm fronds over it - and
+// this is that image's own base colour, the midpoint of its BG_TOP/BG_BOTTOM gradient, so the
+// menu sits on the same purple it always did with nothing drawn on top of it.
+// Tools/vcsmenuart.py can still produce the patterned one; nothing loads it any more.
+static const uint32_t kBackgroundColor = COLOR(0x3E0B4E);
 
 // Layout, in PPSSPP's dp units. Rows are full screen width so that "centred" means centred on
 // the screen, which is what this layout is built around.
@@ -76,6 +82,37 @@ static constexpr float kValueGap = 100.0f;
 
 static constexpr int kSliderBlocks = 10;
 
+// The controls listing is a table rather than a stack of big centred labels, so it has its own
+// metrics and its own face. Pricedown is a display font - it sets four words across a screen
+// beautifully and is unreadable at twenty rows - so the listing uses the UI sans, which is what
+// the game does too: its Controls screen is set in a plain condensed face, not in the logo one.
+static const FontStyle kListFont(FontFamily::SansSerif, 25, FontStyleFlags::Default);
+static constexpr float kListRowHeight = 40.0f;
+static constexpr float kListTop = 150.0f;      // clear of the title art, which is fixed dp
+static constexpr float kListPadding = 22.0f;
+// The band above the rows, naming the columns. Its own height rather than the panel's padding,
+// because the panel has to grow by exactly this much to make room for it.
+static constexpr float kListHeaderHeight = 46.0f;
+
+// Column positions as fractions of the screen width, because that is what this layout aligns
+// to - the name column on the left, then up to three key columns evenly spaced.
+static constexpr float kListPanelInsetFrac = 0.023f;
+static constexpr float kListNameFrac = 0.047f;
+static constexpr float kListKeyFrac = 0.315f;
+static constexpr float kListKeyStepFrac = 0.088f;
+static constexpr size_t kListMaxKeys = 3;
+
+static const uint32_t kListPanelColor = 0x38C8B48D;      // translucent, lifts the list off the art
+static const uint32_t kListNameColor = COLOR(0x9BA6BE);  // muted, the way the original greys labels
+static const uint32_t kListKeyColor = COLOR(0xF0F2F8);
+static const uint32_t kListRowColor = 0x66E8CBAE;        // the bar across the selected row
+static const uint32_t kListHeaderColor = COLOR(0xC9B48D);
+static const uint32_t kListRuleColor = 0x40FFFFFF;       // hairline under the column names
+
+// Smaller than the rows it labels, so the header reads as a caption rather than as another
+// entry in the table.
+static const FontStyle kListHeaderFont(FontFamily::SansSerif, 20, FontStyleFlags::Default);
+
 // Centre of the screen, in the same dp space as a view's bounds. Deliberately not
 // bounds_.centerX(): a row's own bounds are only the screen's width if the layout gave it every
 // pixel, and when that assumption quietly failed the whole menu sat off-centre. The screen's
@@ -92,14 +129,6 @@ struct VCSMenuArt {
 	}
 
 	void Release() {
-		if (background) {
-			background->Release();
-			background = nullptr;
-		}
-		// Must be cleared with the texture. Leaving it set meant the backdrop loaded once and
-		// then never again for the rest of the run, so every menu after the first came up on
-		// the flat fallback colour.
-		backgroundTried = false;
 		for (auto &pair : titles) {
 			if (pair.second) {
 				pair.second->Release();
@@ -120,16 +149,15 @@ struct VCSMenuArt {
 		return tex;
 	}
 
-	Draw::Texture *Background(UIContext &dc) {
-		if (!background && !backgroundTried) {
-			backgroundTried = true;
-			background = Load(dc, "vcs/menu_bg.png");
-		}
-		return background;
-	}
-
 	// Page titles are art, not text - see Tools/vcsmenuart.py for why.
 	Draw::Texture *Title(UIContext &dc, const char *key) {
+		// Between deviceLost and deviceRestored there is no device to make a texture on, and
+		// this function's whole job is to make one whenever the map does not have it. Release()
+		// empties that map, so without this the first draw after a device loss would go
+		// straight back to CreateTextureFromFileData on a dead device.
+		if (deviceLost) {
+			return nullptr;
+		}
 		auto iter = titles.find(key);
 		if (iter != titles.end()) {
 			return iter->second;
@@ -141,12 +169,9 @@ struct VCSMenuArt {
 		return tex;
 	}
 
-	Draw::Texture *background = nullptr;
-	bool backgroundTried = false;
 	std::map<std::string, Draw::Texture *> titles;
+	bool deviceLost = false;
 };
-
-static VCSMenuArt g_art;
 
 static void DrawTexture(UIContext &dc, Draw::Texture *tex, const Bounds &bounds, uint32_t color) {
 	dc.Flush();
@@ -401,8 +426,79 @@ void VCSMenuItem::Draw(UIContext &dc) {
 	hitBoundsValid_ = true;
 }
 
+VCSBindingRow::VCSBindingRow(std::string_view name, const std::vector<std::string> &keys,
+	UI::LayoutParams *layoutParams)
+	: UI::ClickableItem(layoutParams), name_(name), keys_(keys) {}
+
+void VCSBindingRow::GetContentDimensions(const UIContext &dc, float &w, float &h) const {
+	w = 100.0f;  // The row fills the screen; the columns inside it are placed from its width.
+	h = kListRowHeight;
+}
+
+bool VCSBindingRow::Touch(const TouchInput &input) {
+	const bool contains = bounds_.Contains(input.x, input.y);
+
+	// Hover moves the selection, as everywhere else in this menu. Hit-testing bounds_ directly
+	// is right here and wrong for VCSMenuItem: the highlight really is the full width of the
+	// panel, so the band the pointer has to be in really is the whole row.
+	if ((input.flags & TouchInputFlags::MOVE) && input.buttons == 0 && contains && !HasFocus()) {
+		UI::SetFocusedView(this, UI::FocusFlags::CAUSE_OTHER);
+	}
+	// Forced, so the press does not immediately unfocus the row it just selected - see
+	// VCSMenuItem::ClaimFocus for the mechanism. Nothing else happens on a press: there is
+	// nothing to activate.
+	if ((input.flags & TouchInputFlags::DOWN) && contains) {
+		UI::SetFocusedView(this, UI::FocusFlags::CAUSE_FORCED, true);
+	}
+	return contains;
+}
+
+std::string VCSBindingRow::DescribeText() const {
+	std::string text = name_;
+	for (size_t i = 0; i < keys_.size() && i < kListMaxKeys; i++) {
+		text += i == 0 ? ": " : ", ";
+		text += keys_[i];
+	}
+	return text;
+}
+
+void VCSBindingRow::Draw(UIContext &dc) {
+	if (HasFocus()) {
+		// Across the whole panel, not just the text - which is what makes a table read as a
+		// table rather than as a list of buttons.
+		const float inset = g_display.dp_xres * kListPanelInsetFrac;
+		dc.FillRect(UI::Drawable(kListRowColor),
+			Bounds(inset, bounds_.y, g_display.dp_xres - inset * 2.0f, bounds_.h));
+	}
+
+	dc.SetFontStyle(kListFont);
+	dc.DrawTextShadow(name_, g_display.dp_xres * kListNameFrac, bounds_.centerY(),
+		kListNameColor, ALIGN_VCENTER | ALIGN_LEFT);
+
+	for (size_t i = 0; i < keys_.size() && i < kListMaxKeys; i++) {
+		const float x = g_display.dp_xres * (kListKeyFrac + kListKeyStepFrac * (float)i);
+		dc.DrawTextShadow(keys_[i], x, bounds_.centerY(), kListKeyColor,
+			ALIGN_VCENTER | ALIGN_LEFT);
+	}
+}
+
 VCSMenuScreen::VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode mode)
-	: UIBaseDialogScreen(gamePath), bootPending_(bootPending), mode_(mode) {}
+	: UIBaseDialogScreen(gamePath), bootPending_(bootPending), mode_(mode),
+	  art_(new VCSMenuArt()) {}
+
+void VCSMenuScreen::deviceLost() {
+	// Before Vulkan goes. Release() clears the map as well as the textures, so the destructor
+	// below finds nothing left to free.
+	art_->Release();
+	art_->deviceLost = true;
+	UIBaseDialogScreen::deviceLost();
+}
+
+void VCSMenuScreen::deviceRestored(Draw::DrawContext *draw) {
+	// There is somewhere to put a texture again; the next draw reloads them lazily.
+	art_->deviceLost = false;
+	UIBaseDialogScreen::deviceRestored(draw);
+}
 
 VCSMenuScreen::~VCSMenuScreen() {
 	if (mode_ == VCSMenuMode::Startup) {
@@ -413,7 +509,6 @@ VCSMenuScreen::~VCSMenuScreen() {
 	// Every way out of this menu comes through here, which is why the save lives here rather
 	// than on the resume row.
 	VCS::SaveSettings();
-	g_art.Release();
 }
 
 VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) {
@@ -425,6 +520,11 @@ VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) {
 	case VCSMenuPage::Graphics: return VCSMenuPage::Settings;
 	case VCSMenuPage::Mouse: return VCSMenuPage::Controls;
 	case VCSMenuPage::Aiming: return VCSMenuPage::Controls;
+	case VCSMenuPage::Keyboard: return VCSMenuPage::Controls;
+	case VCSMenuPage::KeysOnFoot: return VCSMenuPage::Keyboard;
+	case VCSMenuPage::KeysVehicle: return VCSMenuPage::Keyboard;
+	case VCSMenuPage::KeysAircraft: return VCSMenuPage::Keyboard;
+	case VCSMenuPage::KeysMelee: return VCSMenuPage::Keyboard;
 	default: return VCSMenuPage::Root;
 	}
 }
@@ -438,6 +538,27 @@ bool VCSMenuScreen::IsOptionPage(VCSMenuPage page) {
 		return true;
 	default:
 		return false;
+	}
+}
+
+bool VCSMenuScreen::IsKeyListPage(VCSMenuPage page) {
+	switch (page) {
+	case VCSMenuPage::KeysOnFoot:
+	case VCSMenuPage::KeysVehicle:
+	case VCSMenuPage::KeysAircraft:
+	case VCSMenuPage::KeysMelee:
+		return true;
+	default:
+		return false;
+	}
+}
+
+VCS::VCSKeyList VCSMenuScreen::ToKeyList(VCSMenuPage page) {
+	switch (page) {
+	case VCSMenuPage::KeysVehicle: return VCS::VCSKeyList::InVehicle;
+	case VCSMenuPage::KeysAircraft: return VCS::VCSKeyList::Aircraft;
+	case VCSMenuPage::KeysMelee: return VCS::VCSKeyList::Melee;
+	default: return VCS::VCSKeyList::OnFoot;
 	}
 }
 
@@ -459,6 +580,11 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 	case VCSMenuPage::Aiming: return "aiming";
 	case VCSMenuPage::Audio: return "audio";
 	case VCSMenuPage::Graphics: return "graphics";
+	case VCSMenuPage::Keyboard: return "keyboard";
+	case VCSMenuPage::KeysOnFoot: return "onfoot";
+	case VCSMenuPage::KeysVehicle: return "invehicle";
+	case VCSMenuPage::KeysAircraft: return "aircraft";
+	case VCSMenuPage::KeysMelee: return "melee";
 	default:
 		return mode_ == VCSMenuMode::Pause ? "paused" : "mainmenu";
 	}
@@ -532,17 +658,43 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 	AddBackRow(parent);
 }
 
+void VCSMenuScreen::AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page) {
+	using namespace UI;
+
+	const std::vector<VCS::VCSListingRow> listing = VCS::KeyListing(ToKeyList(page));
+	for (const VCS::VCSListingRow &row : listing) {
+		parent->Add(new VCSBindingRow(row.name, row.keys,
+			new LinearLayoutParams(FILL_PARENT, kListRowHeight)));
+	}
+	listRowCount_ = (int)listing.size();
+
+	// Clear of the panel, which is sized to the rows above.
+	parent->Add(new Spacer(kListPadding * 2.0f));
+	AddBackRow(parent);
+}
+
+Bounds VCSMenuScreen::ListPanel() const {
+	const float inset = g_display.dp_xres * kListPanelInsetFrac;
+	const float height = kListHeaderHeight + (float)listRowCount_ * kListRowHeight + kListPadding;
+	return Bounds(inset, kListTop, g_display.dp_xres - inset * 2.0f, height);
+}
+
 void VCSMenuScreen::CreateViews() {
 	using namespace UI;
 
 	rows_.clear();
+	listRowCount_ = 0;
 
 	root_ = new AnchorLayout(new LayoutParams(FILL_PARENT, FILL_PARENT));
 
 	// As a fraction of the screen rather than a fixed offset, so the block stays put when the
 	// window is resized and so the longer settings pages start higher without a second constant
 	// that has to be kept in step with the row count.
-	const float top = g_display.dp_yres * (page_ == VCSMenuPage::Root ? 0.30f : 0.17f);
+	// The listing starts inside its panel; everything else is a block of large centred rows,
+	// higher up on the longer pages so they still fit.
+	const float top = IsKeyListPage(page_)
+		? kListTop + kListHeaderHeight
+		: g_display.dp_yres * (page_ == VCSMenuPage::Root ? 0.30f : 0.17f);
 	LinearLayout *list = new LinearLayout(ORIENT_VERTICAL,
 		new AnchorLayoutParams(FILL_PARENT, WRAP_CONTENT, 0.0f, top, 0.0f, NONE));
 	list->SetSpacing(0.0f);
@@ -582,14 +734,22 @@ void VCSMenuScreen::CreateViews() {
 		AddPageRow(list, "MOUSE", VCSMenuPage::Mouse);
 		AddPageRow(list, "AIMING", VCSMenuPage::Aiming);
 
-		// PPSSPP's own key-binding screen. It is the PC-standard version of itself already, and
-		// the read-only keyboard listing that belongs here has not been built yet.
-		VCSMenuItem *keyboard = list->Add(new VCSMenuItem("KEYBOARD",
-			new LinearLayoutParams(FILL_PARENT, kRowHeight)));
-		keyboard->OnClick.Handle(this, &VCSMenuScreen::OnControlMapping);
-		rows_.push_back(keyboard);
+		// Read-only, and that is the whole design: the bindings are context-aware, so one key
+		// is several things depending on what you are doing, and a rebinding screen that cannot
+		// express that would be lying about what it changed. PPSSPP's own mapper is deliberately
+		// not offered here either, for the same reason - it binds keys to PSP buttons, one step
+		// below the layer that decides what a PSP button means.
+		AddPageRow(list, "KEYBOARD", VCSMenuPage::Keyboard);
 
 		AddBackRow(list);
+	} else if (page_ == VCSMenuPage::Keyboard) {
+		AddPageRow(list, "ON FOOT", VCSMenuPage::KeysOnFoot);
+		AddPageRow(list, "IN VEHICLE", VCSMenuPage::KeysVehicle);
+		AddPageRow(list, "AIRCRAFT", VCSMenuPage::KeysAircraft);
+		AddPageRow(list, "MELEE COMBAT", VCSMenuPage::KeysMelee);
+		AddBackRow(list);
+	} else if (IsKeyListPage(page_)) {
+		AddBindingRows(list, page_);
 	} else if (IsOptionPage(page_)) {
 		AddOptionRows(list, page_);
 	}
@@ -614,20 +774,34 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 	const Bounds &bounds = dc.GetBounds();
 
 	// Opaque, not a dim over the game. GTA's front end covers the screen, and the paused world
-	// showing through would fight the art behind the text.
-	Draw::Texture *bg = g_art.Background(dc);
-	if (bg) {
-		DrawTexture(dc, bg, bounds, 0xFFFFFFFF);
-	} else {
-		dc.FillRect(UI::Drawable(COLOR(0x3E0B4E)), bounds);
-	}
+	// showing through would fight the text.
+	dc.FillRect(UI::Drawable(kBackgroundColor), bounds);
 
 	// Page title, top left, in the brush script the game sets its headings in.
-	Draw::Texture *title = g_art.Title(dc, PageTitle(page_));
+	Draw::Texture *title = art_->Title(dc, PageTitle(page_));
 	if (title) {
 		const float h = kTitleHeight;
 		const float w = h * (float)title->Width() / (float)title->Height();
 		DrawTexture(dc, title, Bounds(kTitleLeft, kTitleTop, w, h), 0xFFFFFFFF);
+	}
+
+	// The frame behind the listing, sized to its rows so it stops where they do - and the
+	// column names in the band along its top, which is otherwise dead space above the first row.
+	if (IsKeyListPage(page_)) {
+		const Bounds panel = ListPanel();
+		dc.FillRect(UI::Drawable(kListPanelColor), panel);
+
+		dc.SetFontStyle(kListHeaderFont);
+		const float headerY = panel.y + kListHeaderHeight * 0.5f;
+		dc.DrawText("ACTION", g_display.dp_xres * kListNameFrac, headerY, kListHeaderColor,
+			ALIGN_VCENTER | ALIGN_LEFT);
+		dc.DrawText("BINDING", g_display.dp_xres * kListKeyFrac, headerY, kListHeaderColor,
+			ALIGN_VCENTER | ALIGN_LEFT);
+
+		// A hairline rather than a full rule: enough to separate the caption from the data
+		// without drawing a second frame inside the first.
+		dc.FillRect(UI::Drawable(kListRuleColor),
+			Bounds(panel.x, panel.y + kListHeaderHeight - 2.0f, panel.w, 1.0f));
 	}
 
 	// The bar along the bottom: what the selected row means on the left, how to work it on the
@@ -652,7 +826,9 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 	}
 
 	const char *hint = "ENTER / LMB - SELECT     ESC - BACK";
-	if (focused && focused->option()) {
+	if (IsKeyListPage(page_)) {
+		hint = "ESC - BACK";
+	} else if (focused && focused->option()) {
 		hint = focused->option()->type == VCS::OptionType::Bool
 			? "ENTER / LMB - TOGGLE     ESC - BACK"
 			: "LEFT / RIGHT - ADJUST     ESC - BACK";
@@ -697,10 +873,6 @@ void VCSMenuScreen::OnQuitApp(UI::EventParams &e) {
 				System_ExitApp();
 			}
 		}));
-}
-
-void VCSMenuScreen::OnControlMapping(UI::EventParams &e) {
-	screenManager()->push(new ControlMappingScreen(gamePath_));
 }
 
 void VCSMenuScreen::OnGameSettings(UI::EventParams &e) {

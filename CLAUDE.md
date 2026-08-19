@@ -223,8 +223,8 @@ Two more details that will bite if they are "simplified":
 
 ### The page titles are art, and they have to be
 
-`Tools/vcsmenuart.py` bakes the backdrop and the script-font headings into `assets/vcs/`, and the
-headings are baked because PPSSPP cannot draw them any other way. `FontStyle` selects a font
+`Tools/vcsmenuart.py` bakes the script-font headings into `assets/vcs/`, and they are baked
+because PPSSPP cannot draw them any other way. `FontStyle` selects a font
 *family* - `SansSerif` or `Fixed`, and that is the whole enum - and `SetFontNameOverride` maps a
 family to one face **globally**. There is no way to ask for a brush script for one string and the
 UI sans for the next. Baking them also matches what the game does: its headings are sprites.
@@ -233,13 +233,18 @@ Re-run the script after editing the title list; the keys in `TITLES` are the nam
 `VCSMenuScreen::PageTitle` asks for, so the two have to stay in step. It uses stock Windows fonts
 (Brush Script MT) and ships only the rendered pixels, no font file.
 
-The one thing to know about the backdrop generator: the leaflet base width is derived from the
-leaflet spacing, not chosen. Narrower than the gap and the fronds read as fishbones - a row of
-separate spines with the background showing through. At 0.8 of the spacing they overlap into one
-silhouette with a jagged edge, which is the shape the eye reads as a palm.
+**The backdrop is a flat fill now**, `kBackgroundColor` in the menu, and it is the generated
+image's own base colour - the midpoint of that gradient - so nothing moved when the art came out.
+`make_background()` is still in the tool but is no longer called; it is the only record of how
+the patterned version was built, and one line in `main()` brings it back.
 
-Missing art is not fatal - the backdrop falls back to a flat purple and a missing title simply
-does not draw - so the menu still works on a platform where `assets/vcs/` was not deployed.
+The one thing to know about that generator, if it ever is brought back: the leaflet base width is
+derived from the leaflet spacing, not chosen. Narrower than the gap and the fronds read as
+fishbones - a row of separate spines with the background showing through. At 0.8 of the spacing
+they overlap into one silhouette with a jagged edge, which is the shape the eye reads as a palm.
+
+Missing art is not fatal - a missing title simply does not draw - so the menu still works on a
+platform where `assets/vcs/` was not deployed.
 
 ### The menu face: two font systems, two different names for the same font
 
@@ -374,7 +379,7 @@ under the mouse reads as broken on a PC, so `VCSMenuItem::Touch` sets focus on a
 pointer against every row, and it is the only piece of its input handling that genuinely had to be
 written again. The buttonless check is what keeps it from firing mid-drag on a value.
 
-### Four bugs this layout produced, all worth recognising again
+### Five bugs this layout produced, all worth recognising again
 
 - **The row you can see is not the row you can click.** Rows are laid out at the full screen
   width, because the two-column settings layout aligns on the screen's centre line rather than on
@@ -390,10 +395,32 @@ written again. The buttonless check is what keeps it from firing mid-drag on a v
   narrower than the screen - and the entire menu sat 80 pixels left of centre while every
   individual piece of it looked right. `ScreenCenterX()` asks `g_display` instead. Any layout
   built around a centre line wants the screen's, not a view's.
+- **A screen outlives the graphics device, so its GPU objects cannot be freed in its
+  destructor.** The title textures were released in `~VCSMenuScreen` and cached in a file-scope
+  static, and both are too late: `NativeShutdownGraphics` calls `g_screenManager->deviceLost()`
+  and then tears Vulkan down, while `NativeShutdown` deletes the screen manager much later
+  still - and a static's destructor is later than that again. Quitting with the menu open
+  therefore left textures alive past the end of the allocator, which VMA reports as
+  `m_pMetadata->IsEmpty() && "Some allocations were not freed before destruction of this memory
+  block!"`. Quitting from gameplay did not, because closing the menu had already released them -
+  which is what made it look intermittent. The cache is a member now and `deviceLost()` is what
+  empties it. Two things follow that are easy to miss: the release path has to be idempotent,
+  since the destructor still runs afterwards, and a lazy loader has to be **gated** on the
+  device being present - `Title()` creates a texture whenever the map lacks one, and `Release()`
+  empties the map, so without the flag the first draw after a device loss would rebuild them all
+  on a dead device.
+
+  Still open, and deliberately not chased: closing the window with the menu up has once produced
+  `vkQueuePresentKHR failed! result=VK_ERROR_DEVICE_LOST` from `VulkanRenderManager::Run`. It did
+  not reproduce on the next attempt, it is a different failure from the VMA one above, and one
+  occurrence is not enough to act on. Note it if it recurs; do not assume the fix above covers it.
+
 - **A "did we try yet" flag has to be cleared with the thing it guards.** `backgroundTried` was
   set on the first load attempt and never reset by `Release()`, so the backdrop appeared once per
   run and every menu after the first came up on the fallback colour - which looks enough like a
-  deliberate flat background to not read as a bug.
+  deliberate flat background to not read as a bug. The flag and the texture are both gone now
+  that the background really is a flat fill, but the shape of the mistake is not specific to
+  textures: any cache with a companion "already tried" flag has to reset both together.
 - **Taking focus on hover means taking it *forced* on click.** With hover focus added and
   `Clickable::Touch` reimplemented, the mouse stopped selecting anything at all: every row
   highlighted correctly and no click ever fired. `TouchEvent` calls `EnableFocusMovement(false)`

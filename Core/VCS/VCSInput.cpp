@@ -15,12 +15,16 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <atomic>
 #include <mutex>
 #include <set>
 
 #include "Common/Common.h"
+#include "Core/KeyMap.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
@@ -171,9 +175,9 @@ const char *VCSInputContextName(VCSInputContext context) {
 // VIRTKEY_ - check KeyMapDefaults.cpp before adding one.
 const VCSKeyMapping kVCSKeyMappings[] = {
 	// --- On foot ---
-	{ VCSInputContext::OnFoot,    NKCODE_SPACE,              CTRL_SQUARE,    "Jump" },
-	{ VCSInputContext::OnFoot,    NKCODE_SHIFT_LEFT,         CTRL_CROSS,     "Sprint" },
-	{ VCSInputContext::OnFoot,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Attack / fire" },
+	{ VCSInputContext::OnFoot,    NKCODE_SPACE,              CTRL_SQUARE,    "Jump", "Jump", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_SHIFT_LEFT,         CTRL_CROSS,     "Sprint", "Sprint", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Attack / fire", "Fire", VCSKeyList::OnFoot },
 	// Menu keys, living in the OnFoot context on purpose.
 	//
 	// Menus run under OnFoot, because the Menu context never resolves - it needs GameState, which
@@ -187,10 +191,10 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// which collides with anything.
 	{ VCSInputContext::OnFoot,    NKCODE_ENTER,              CTRL_CROSS,     "Confirm in menus (also sprint)" },
 	{ VCSInputContext::OnFoot,    NKCODE_DEL,                CTRL_CIRCLE,    "Back in menus, Backspace (also fires)" },
-	{ VCSInputContext::OnFoot,    kVCSAimKey,                CTRL_RTRIGGER,  "Aim (verified)" },
-	{ VCSInputContext::OnFoot,    NKCODE_F,                  CTRL_TRIANGLE,  "Enter vehicle" },
-	{ VCSInputContext::OnFoot,    NKCODE_E,                  CTRL_RIGHT,     "Next weapon" },
-	{ VCSInputContext::OnFoot,    NKCODE_Q,                  CTRL_LEFT,      "Previous weapon" },
+	{ VCSInputContext::OnFoot,    kVCSAimKey,                CTRL_RTRIGGER,  "Aim (verified)", "Aim weapon", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_F,                  CTRL_TRIANGLE,  "Enter vehicle", "Enter vehicle", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_E,                  CTRL_RIGHT,     "Next weapon", "Next weapon", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_Q,                  CTRL_LEFT,      "Previous weapon", "Previous weapon", VCSKeyList::OnFoot },
 	// L trigger on foot is NOT unused, which this file claimed for a long time. Standing near a
 	// dropped weapon, it switches to that weapon's type - a pickup/swap, distinct from the Q/E
 	// cycle through what you already carry. Verified in game.
@@ -198,7 +202,7 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Tab costs PPSSPP's fast-forward (VIRTKEY_FASTFORWARD in Core/KeyMapDefaults.cpp) - a
 	// claimed key is withheld from PPSSPP's mapper, which is the inverse Escape trap, accepted
 	// deliberately here. Rebind fast-forward in PPSSPP's own controls if you want it back.
-	{ VCSInputContext::OnFoot,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
+	{ VCSInputContext::OnFoot,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)", "Take nearby weapon", VCSKeyList::OnFoot },
 
 	// --- vehicle spawner (patched-ISO feature) ---------------------------------------------------
 	//
@@ -217,25 +221,25 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::OnFoot,    NKCODE_DPAD_RIGHT,         CTRL_RIGHT,     "Spawner: next model" },
 	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LTRIGGER,  "Spawner: previous model (with the row below)" },
 	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LEFT,      "Spawner: previous model" },
-	{ VCSInputContext::OnFoot,    NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)" },
-	{ VCSInputContext::OnFoot,    NKCODE_P,                  CTRL_START,     "Pause (Start)" },
+	{ VCSInputContext::OnFoot,    NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)", "Change camera", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_P,                  CTRL_START,     "Pause (Start)", "Pause", VCSKeyList::OnFoot },
 
 	// --- In a vehicle ---
-	{ VCSInputContext::InVehicle, NKCODE_W,                  CTRL_CROSS,     "Accelerate" },
-	{ VCSInputContext::InVehicle, NKCODE_S,                  CTRL_SQUARE,    "Brake / reverse" },
-	{ VCSInputContext::InVehicle, NKCODE_SPACE,              CTRL_RTRIGGER,  "Handbrake" },
-	{ VCSInputContext::InVehicle, NKCODE_F,                  CTRL_TRIANGLE,  "Exit vehicle" },
-	{ VCSInputContext::InVehicle, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Drive-by fire" },
-	{ VCSInputContext::InVehicle, NKCODE_H,                  CTRL_DOWN,      "Horn (verified)" },
+	{ VCSInputContext::InVehicle, NKCODE_W,                  CTRL_CROSS,     "Accelerate", "Accelerate", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_S,                  CTRL_SQUARE,    "Brake / reverse", "Brake / reverse", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_SPACE,              CTRL_RTRIGGER,  "Handbrake", "Handbrake", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_F,                  CTRL_TRIANGLE,  "Exit vehicle", "Exit vehicle", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Drive-by fire", "Drive-by fire", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_H,                  CTRL_DOWN,      "Horn (verified)", "Horn", VCSKeyList::InVehicle },
 	// These two are the radio in an ordinary vehicle - and, verified in play, the FORKS in a
 	// forklift: R raises and T lowers. The game repurposes d-pad left/right there rather than
 	// leaving them on the radio, so no new binding was needed; the keys already did it and
 	// nobody had pressed them in one. The description below is therefore wrong for exactly one
 	// vehicle, which a per-vehicle context could fix and isn't worth adding for a string.
-	{ VCSInputContext::InVehicle, NKCODE_T,                  CTRL_RIGHT,     "Next radio station / raise forks (verified)" },
-	{ VCSInputContext::InVehicle, NKCODE_R,                  CTRL_LEFT,      "Previous radio station / lower forks (verified)" },
-	{ VCSInputContext::InVehicle, NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)" },
-	{ VCSInputContext::InVehicle, NKCODE_P,                  CTRL_START,     "Pause (Start)" },
+	{ VCSInputContext::InVehicle, NKCODE_T,                  CTRL_RIGHT,     "Next radio station / raise forks (verified)", "Next radio station", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_R,                  CTRL_LEFT,      "Previous radio station / lower forks (verified)", "Previous radio station", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)", "Change camera", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_P,                  CTRL_START,     "Pause (Start)", "Pause", VCSKeyList::InVehicle },
 	// Claimed but deliberately mapped to nothing. Sprint is meaningless in a car, and leaving
 	// Shift unclaimed let it fall through to PPSSPP, whose default binding is VIRTKEY_RAPID_FIRE
 	// - that alternates held buttons, so it machine-gunned the accelerator and made throttle
@@ -257,18 +261,18 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Laid out like flying in GTA San Andreas: W/S climb and descend, Q/E yaw, arrow keys pitch
 	// and roll. A/D roll as well, so short hops don't need the right hand to leave the mouse -
 	// delete those two rows if that feels like a mistake, nothing else depends on them.
-	{ VCSInputContext::InAircraft, NKCODE_W,                  CTRL_CROSS,     "Climb / throttle up" },
-	{ VCSInputContext::InAircraft, NKCODE_S,                  CTRL_SQUARE,    "Descend / throttle down" },
+	{ VCSInputContext::InAircraft, NKCODE_W,                  CTRL_CROSS,     "Climb / throttle up", "Climb", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_S,                  CTRL_SQUARE,    "Descend / throttle down", "Descend", VCSKeyList::Aircraft },
 	// Yaw. On the PSP these are the two shoulder buttons directly, NOT the glance modifier they
 	// are in a car - which is why GlanceDirection deliberately answers only for InVehicle.
-	{ VCSInputContext::InAircraft, NKCODE_Q,                  CTRL_LTRIGGER,  "Yaw left" },
-	{ VCSInputContext::InAircraft, NKCODE_E,                  CTRL_RTRIGGER,  "Yaw right" },
-	{ VCSInputContext::InAircraft, NKCODE_F,                  CTRL_TRIANGLE,  "Exit aircraft" },
-	{ VCSInputContext::InAircraft, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire (Hunter)" },
-	{ VCSInputContext::InAircraft, NKCODE_T,                  CTRL_RIGHT,     "Next radio station" },
-	{ VCSInputContext::InAircraft, NKCODE_R,                  CTRL_LEFT,      "Previous radio station" },
-	{ VCSInputContext::InAircraft, NKCODE_V,                  CTRL_SELECT,    "Change camera" },
-	{ VCSInputContext::InAircraft, NKCODE_P,                  CTRL_START,     "Pause (Start)" },
+	{ VCSInputContext::InAircraft, NKCODE_Q,                  CTRL_LTRIGGER,  "Yaw left", "Yaw left", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_E,                  CTRL_RTRIGGER,  "Yaw right", "Yaw right", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_F,                  CTRL_TRIANGLE,  "Exit aircraft", "Exit aircraft", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire (Hunter)", "Fire (Hunter)", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_T,                  CTRL_RIGHT,     "Next radio station", "Next radio station", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_R,                  CTRL_LEFT,      "Previous radio station", "Previous radio station", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_V,                  CTRL_SELECT,    "Change camera", "Change camera", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_P,                  CTRL_START,     "Pause (Start)", "Pause", VCSKeyList::Aircraft },
 	// Claimed and inert, all for the inverse-Escape-trap reason rather than for anything they do
 	// here. Shift would otherwise reach PPSSPP's rapid-fire and stutter the climb button exactly
 	// as it stuttered the throttle in a car. Space is handbrake in a car, which in an aircraft
@@ -278,21 +282,19 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// roll via ApplyAnalog rather than through this table.
 	{ VCSInputContext::InAircraft, NKCODE_SHIFT_LEFT,         0,              "Suppressed (blocks PPSSPP rapid-fire)" },
 	{ VCSInputContext::InAircraft, NKCODE_SPACE,              0,              "Suppressed (no handbrake in the air)" },
-	{ VCSInputContext::InAircraft, NKCODE_A,                  0,              "Roll left (via the stick)" },
-	{ VCSInputContext::InAircraft, NKCODE_D,                  0,              "Roll right (via the stick)" },
-	{ VCSInputContext::InAircraft, NKCODE_DPAD_UP,            0,              "Pitch nose down (via the stick)" },
-	{ VCSInputContext::InAircraft, NKCODE_DPAD_DOWN,          0,              "Pitch nose up (via the stick)" },
-	{ VCSInputContext::InAircraft, NKCODE_DPAD_LEFT,          0,              "Roll left (via the stick)" },
-	{ VCSInputContext::InAircraft, NKCODE_DPAD_RIGHT,         0,              "Roll right (via the stick)" },
+	{ VCSInputContext::InAircraft, NKCODE_A,                  0,              "Roll left (via the stick)", "Roll left", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_D,                  0,              "Roll right (via the stick)", "Roll right", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_UP,            0,              "Pitch nose down (via the stick)", "Pitch nose down", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_DOWN,          0,              "Pitch nose up (via the stick)", "Pitch nose up", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_LEFT,          0,              "Roll left (via the stick)", "Roll left", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_RIGHT,         0,              "Roll right (via the stick)", "Roll right", VCSKeyList::Aircraft },
 
 	// --- Aiming (on foot, aim key held) ---
 	// Separate from OnFoot because the same inputs mean different things here: the mouse becomes
 	// the reticle instead of the camera, WASD goes quiet because the stick is now the reticle, and
 	// Q/E cycle targets instead of weapons.
-	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire" },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire", "Light attack / fire", VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,    kVCSAimKey,                CTRL_RTRIGGER,  "Hold aim (verified)" },
-	{ VCSInputContext::Aiming,    NKCODE_Q,                  CTRL_LEFT,      "Previous target" },
-	{ VCSInputContext::Aiming,    NKCODE_E,                  CTRL_RIGHT,     "Next target" },
 	// Same as on foot. Bound here mainly so Tab can't fall through to PPSSPP's fast-forward
 	// mid-fight, which would suddenly run the game at several times speed while aiming.
 	{ VCSInputContext::Aiming,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
@@ -324,7 +326,7 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Shift was a psp = 0 claim before, purely to keep PPSSPP's rapid-fire (VIRTKEY_RAPID_FIRE on
 	// left shift) off the fire button. That suppression is unaffected: claiming is what withholds a
 	// key from PPSSPP's mapper, not the button the row produces.
-	{ VCSInputContext::Aiming,    NKCODE_SHIFT_LEFT,        CTRL_CROSS,     "Heavy hit / stomp / knee (melee)" },
+	{ VCSInputContext::Aiming,    NKCODE_SHIFT_LEFT,        CTRL_CROSS,     "Heavy hit / stomp / knee (melee)", "Heavy hit / stomp", VCSKeyList::Melee },
 	// Space was NOT claimed in this context until now, and the cost of that was not the harmless
 	// fall-through it looked like: PPSSPP's default keyboard map binds Space to CTRL_START
 	// (Core/KeyMapDefaults.cpp, `Start = 1-62` in memstick/PSP/SYSTEM/controls.ini), so pressing it
@@ -333,11 +335,11 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// The sniper-zoom comment further down describes this as "it only opens a menu when pressed
 	// unscoped, where Square is still Jump" - that reading was wrong. The menu was Start, from
 	// PPSSPP, in every case; the key never reached Square here at all, because no row sent it there.
-	{ VCSInputContext::Aiming,    NKCODE_SPACE,             CTRL_SQUARE,    "Block (melee) / sniper zoom in" },
+	{ VCSInputContext::Aiming,    NKCODE_SPACE,             CTRL_SQUARE,    "Block (melee) / sniper zoom in", "Block", VCSKeyList::Melee },
 	// F is free in PPSSPP's defaults, so this row is a pure gain - and "F grabs" is about as
 	// idiomatic as PC bindings get. Near a vehicle while not targeting anyone, Triangle is still
 	// enter-vehicle; that ambiguity is the game's own and the PSP has it too.
-	{ VCSInputContext::Aiming,    NKCODE_F,                 CTRL_TRIANGLE,  "Grab / throw / neckbreak / pull up" },
+	{ VCSInputContext::Aiming,    NKCODE_F,                 CTRL_TRIANGLE,  "Grab / throw / neckbreak / pull up", "Grab / throw", VCSKeyList::Melee },
 	// WASD claimed here with psp = 0, which looks pointless because they steer the stick rather
 	// than pressing buttons - but the claim is the point. PPSSPP's default keyboard mapping binds
 	// them to real PSP buttons (W to R trigger, A to Square, S to Triangle - see
@@ -367,8 +369,10 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Claimed, sends nothing. Held, it suppresses the automatic free-aim pulse and leaves the
 	// PSP's lock-on - so it inverts the handheld's priorities, which is the right way round on a
 	// PC. Listed here so it shows up in the debugger's mapping table rather than being invisible.
-	{ VCSInputContext::OnFoot,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)" },
+	{ VCSInputContext::OnFoot,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)", "Toggle lock-on mode", VCSKeyList::OnFoot },
 	{ VCSInputContext::Aiming,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)" },
+	{ VCSInputContext::Aiming,    NKCODE_Q,                  CTRL_LEFT,      "Previous target", "Previous target", VCSKeyList::OnFoot | VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,    NKCODE_E,                  CTRL_RIGHT,     "Next target", "Next target", VCSKeyList::OnFoot | VCSKeyList::Melee },
 	// Sniper zoom.
 	//
 	// Square zooms IN and Cross zooms OUT - measured, not guessed. Each PSP button was injected
@@ -387,10 +391,10 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Z/Y and the wheel therefore double as block and heavy hit during a fistfight. Harmless, since
 	// nobody scrolls mid-fight, and the alternative - gating these rows on ScopedWeaponActive - is
 	// not something a static table can express.
-	{ VCSInputContext::Aiming,    NKCODE_Z,                 CTRL_SQUARE,    "Sniper zoom in (verified)" },
-	{ VCSInputContext::Aiming,    NKCODE_Y,                 CTRL_CROSS,     "Sniper zoom out (verified)" },
-	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_UP,   CTRL_SQUARE,  "Sniper zoom in (verified)" },
-	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_DOWN, CTRL_CROSS,   "Sniper zoom out (verified)" },
+	{ VCSInputContext::Aiming,    NKCODE_Z,                 CTRL_SQUARE,    "Sniper zoom in (verified)", "Sniper zoom in", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_Y,                 CTRL_CROSS,     "Sniper zoom out (verified)", "Sniper zoom out", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_UP,   CTRL_SQUARE,  "Sniper zoom in (verified)", "Sniper zoom in", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_DOWN, CTRL_CROSS,   "Sniper zoom out (verified)", "Sniper zoom out", VCSKeyList::OnFoot },
 
 	// --- Menus / pause screens ---
 	// Keyboard navigation, so the player never has to think in PSP buttons.
@@ -413,6 +417,132 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 };
 
 const size_t kVCSKeyMappingCount = ARRAY_SIZE(kVCSKeyMappings);
+
+// --- The read-only controls listing ---------------------------------------------------------
+//
+// Rows the listing needs that kVCSKeyMappings cannot hold, because they are not buttons: WASD
+// steers the analog stick and its meaning changes per context (see ApplyAnalog), and the mouse
+// drives the camera through VCSCamera rather than through sceCtrl at all. Leaving them out
+// would produce a controls screen that never mentions how to walk or look, so they are listed
+// here - as text only, with nothing reading them but the menu.
+//
+// Everything else on the listing comes from the mapping table itself, so the keys a page shows
+// are the keys that page's rows actually produce. That is the whole reason for the listName
+// column: a second hand-written table of bindings would drift the first time one changed.
+struct VCSListingExtra {
+	VCSKeyList list;
+	const char *name;
+	const char *keys[3];
+	// Movement belongs at the top of a page and the odd-job keys at the bottom, and neither has
+	// a place in the mapping table's order to be interleaved with. One bit is enough to say
+	// which end.
+	bool atEnd;
+};
+
+static const VCSListingExtra kVCSListingExtras[] = {
+	{ VCSKeyList::OnFoot,    "Forward",        { "W" } },
+	{ VCSKeyList::OnFoot,    "Backwards",      { "S" } },
+	{ VCSKeyList::OnFoot,    "Left",           { "A" } },
+	{ VCSKeyList::OnFoot,    "Right",          { "D" } },
+	{ VCSKeyList::OnFoot,    "Look",           { "MOUSE" } },
+
+	{ VCSKeyList::InVehicle, "Steer left",     { "A" } },
+	{ VCSKeyList::InVehicle, "Steer right",    { "D" } },
+	{ VCSKeyList::InVehicle, "Look",           { "MOUSE" } },
+	// Glances, for shooting out of the side of a car. Not in the mapping table because on the
+	// PSP they are L trigger plus a stick direction - a button and an axis at once, which a row
+	// there cannot express. See GlanceDirection.
+	{ VCSKeyList::InVehicle, "Look left",      { "Q" } },
+	{ VCSKeyList::InVehicle, "Look right",     { "E" } },
+	// The same two keys as the radio above, which is the game's doing rather than ours: a
+	// special vehicle reuses d-pad left and right for its own function. Listed separately
+	// because one row cannot carry both meanings, and a player in a forklift is not looking for
+	// the radio.
+	{ VCSKeyList::InVehicle, "Raise forks / turret", { "T" }, true },
+	{ VCSKeyList::InVehicle, "Lower forks / turret", { "R" }, true },
+
+	{ VCSKeyList::Aircraft,  "Pitch and roll", { "MOUSE" } },
+
+	{ VCSKeyList::Melee,     "Face target",    { "MOUSE" } },
+};
+
+// Short and upper case, the way the game sets them. PPSSPP's own names are the fallback and are
+// mostly right once upper-cased; these are the ones where they are not - nobody calls the left
+// mouse button "MB1".
+std::string KeyDisplayName(InputKeyCode key) {
+	switch (key) {
+	case NKCODE_EXT_MOUSEBUTTON_1: return "LMB";
+	case NKCODE_EXT_MOUSEBUTTON_2: return "RMB";
+	case NKCODE_EXT_MOUSEBUTTON_3: return "MMB";
+	case NKCODE_EXT_MOUSEWHEEL_UP: return "MS WHEEL UP";
+	case NKCODE_EXT_MOUSEWHEEL_DOWN: return "MS WHEEL DN";
+	default:
+		break;
+	}
+	std::string name = KeyMap::GetKeyName(key);
+	for (char &c : name) {
+		c = toupper((unsigned char)c);
+	}
+	return name;
+}
+
+std::vector<VCSListingRow> KeyListing(VCSKeyList list) {
+	std::vector<VCSListingRow> rows;
+	if (list == VCSKeyList::None) {
+		return rows;
+	}
+
+	auto addExtras = [&rows, list](bool atEnd) {
+		for (const VCSListingExtra &extra : kVCSListingExtras) {
+			if (!(extra.list & list) || extra.atEnd != atEnd) {
+				continue;
+			}
+			VCSListingRow row;
+			row.name = extra.name;
+			for (const char *key : extra.keys) {
+				if (key) {
+					row.keys.push_back(key);
+				}
+			}
+			rows.push_back(row);
+		}
+	};
+
+	addExtras(false);
+
+	for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
+		const VCSKeyMapping &mapping = kVCSKeyMappings[i];
+		if (!(mapping.list & list) || !mapping.listName) {
+			continue;
+		}
+
+		// Rows sharing a name are one line with several keys against it - which is how the
+		// listing shows that Fire is the left mouse button and Backspace, without either of
+		// them being written down twice.
+		VCSListingRow *row = nullptr;
+		for (VCSListingRow &existing : rows) {
+			if (!strcmp(existing.name, mapping.listName)) {
+				row = &existing;
+				break;
+			}
+		}
+		if (!row) {
+			rows.push_back(VCSListingRow{mapping.listName, {}});
+			row = &rows.back();
+		}
+
+		// The same key can reach one action through two contexts - Q cycles weapons on foot and
+		// targets while aiming, and the aim key appears in both the OnFoot and Aiming rows. Show
+		// it once.
+		const std::string name = KeyDisplayName(mapping.key);
+		if (std::find(row->keys.begin(), row->keys.end(), name) == row->keys.end()) {
+			row->keys.push_back(name);
+		}
+	}
+
+	addExtras(true);
+	return rows;
+}
 
 VCSInputContext ResolveContext(const VCSState &state) {
 	// With an empty address table there is nothing to base a decision on, and guessing would

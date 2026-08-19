@@ -18,7 +18,10 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <vector>
 
+#include "Common/Common.h"
 #include "Common/CommonTypes.h"
 #include "Common/Input/InputState.h"
 #include "Common/Input/KeyCodes.h"
@@ -76,6 +79,24 @@ const char *VCSInputContextName(VCSInputContext context);
 // context while it is held.
 extern const InputKeyCode kVCSAimKey;
 
+// Which page of the read-only controls listing a row appears on, if any.
+//
+// Deliberately not the same thing as VCSInputContext, and the Aiming context is why: its rows
+// split between two pages. Holding aim on foot is an on-foot action and belongs with the rest of
+// them, exactly as the game's own Controls screen puts Aim Weapon and the zoom keys on its On
+// Foot page - while the face buttons that only mean anything mid-fight get their own.
+// Flags rather than a plain enum, because a few rows genuinely belong on two pages: cycling
+// locked-on targets with Q and E is something you do on foot and something you do mid-fight, and
+// listing it on only one of them would leave the other page lying by omission.
+enum class VCSKeyList {
+	None = 0,  // not shown: suppression claims, the spawner's debug rows, the dead Menu context
+	OnFoot = 1 << 0,
+	InVehicle = 1 << 1,
+	Aircraft = 1 << 2,
+	Melee = 1 << 3,
+};
+ENUM_CLASS_BITOPS(VCSKeyList);
+
 // One row of the mapping table: in this context, this host key produces these PSP button bits.
 // psp is a mask of the CTRL_* defines from Core/HLE/sceCtrl.h, so a single key can produce a
 // combination if we ever need that.
@@ -83,13 +104,39 @@ struct VCSKeyMapping {
 	VCSInputContext context;
 	InputKeyCode key;
 	u32 psp;
+
+	// Engineering note, for the debugger's mapping table. Says why the row exists, and is free to
+	// say things like "Suppressed (blocks PPSSPP rapid-fire)" that no player should ever read.
 	const char *description;
+
+	// Player-facing name, for the controls listing, and the page it appears on. Both left unset
+	// on a row that should not be listed - which is most of the interesting ones, since a
+	// suppression claim does nothing and a debug spawner is not a control. Rows sharing a
+	// listName merge into one line with several keys against it, which is how the listing shows
+	// that Fire is both the left mouse button and Backspace.
+	const char *listName;
+	VCSKeyList list;
 };
 
 // The mapping table. Rows are matched in order; the first row whose context and key both match
 // wins. A row with context Unknown would apply everywhere, which we deliberately never use.
 extern const VCSKeyMapping kVCSKeyMappings[];
 extern const size_t kVCSKeyMappingCount;
+
+// One line of the controls listing: an action, and the keys that perform it in table order.
+struct VCSListingRow {
+	const char *name;
+	std::vector<std::string> keys;
+};
+
+// The listing for one page. Built by grouping kVCSKeyMappings on listName, after the handful of
+// rows that cannot be in that table at all - see kVCSListingExtras.
+std::vector<VCSListingRow> KeyListing(VCSKeyList list);
+
+// A key as the listing prints it: short and upper case, the way the game's own Controls screen
+// sets them. PPSSPP's GetKeyName is the fallback; the overrides exist because "MB1" and
+// "MWheelD" are not what a player calls those.
+std::string KeyDisplayName(InputKeyCode key);
 
 // Decides which context the player is in, from the decoded state. Returns Unknown whenever the
 // state doesn't give us enough to be sure, which is the safe answer - callers treat Unknown as

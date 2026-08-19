@@ -43,6 +43,10 @@ TITLES = {
     "audio": "Audio",
     "quit": "Quit Game",
     "loadgame": "Load Game",
+    "onfoot": "On Foot",
+    "invehicle": "In Vehicle",
+    "aircraft": "Aircraft",
+    "melee": "Melee Combat",
 }
 
 # Brush Script MT is the closest thing Windows ships to the logo script. Freestyle Script is the
@@ -173,8 +177,10 @@ def make_title(key, text, size=96):
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    path, size = make_background()
-    print("%-34s %dx%d" % (os.path.relpath(path, os.path.dirname(HERE)), size[0], size[1]))
+    # make_background() is deliberately not called: the menu draws a flat fill in the backdrop's
+    # own base colour instead of loading an image. The generator is kept because it is the only
+    # record of how that backdrop was built - see the leaflet-width note in CLAUDE.md - and
+    # calling it here again is all it takes to go back to the patterned version.
 
     used_font = None
     for key, text in sorted(TITLES.items()):
