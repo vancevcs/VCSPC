@@ -45,6 +45,24 @@ void Shutdown();
 
 // Called once per vblank from hleEnterVblank, on the emu thread. Decodes game state and applies
 // the input mapping. Returns immediately when inactive.
+// Where the game is in its boot sequence, which the front end needs because VCS has no menu of
+// its own - it goes logos, credits, straight into the story. See "The boot sequence, measured"
+// in CLAUDE.md for the measurements behind this.
+enum class BootPhase {
+	Intro,    // logos and credits are playing; FrameCounter reads 0
+	AtMenu,   // the world has just started - the moment to put our menu up
+	Playing,  // the menu has been dismissed and the player is in the game
+};
+
+BootPhase GetBootPhase();
+
+// Called once the startup menu has been dismissed, so it is not shown again this run.
+void NotifyMenuDismissed();
+
+// Skip the credits. Presses the game's own skip button rather than trying to fast-forward it,
+// which is why the seam still takes about four seconds to arrive afterwards.
+void RequestIntroSkip();
+
 void Tick();
 
 // True when this is VCS and the compat flag is on. Used by the debugger window to decide

@@ -81,6 +81,9 @@ using namespace std::placeholders;
 #include "UI/BackgroundAudio.h"
 #include "UI/GamepadEmu.h"
 #include "UI/PauseScreen.h"
+#include "Core/VCS/VCSGame.h"
+#include "Core/VCS/VCSSettings.h"
+#include "UI/VCSMenuScreen.h"
 #include "UI/LoadStateConfirmScreen.h"
 #include "UI/MainScreen.h"
 #include "UI/Background.h"
@@ -342,6 +345,16 @@ void EmuScreen::ProcessGameBoot(const Path &filename) {
 
 // Only call this on successful boot.
 void EmuScreen::bootComplete() {
+	// Remember a VCS disc so the app can open on the VCS main menu next launch. This
+	// is the only moment we can know it - the disc ID is only readable once the game
+	// has loaded.
+	if (VCS::IsActive()) {
+		// Resolved, because gamePath_ is whatever was passed in and that is routinely relative
+		// (a command line, a drag-and-drop). Storing it as given meant the main menu only found
+		// the disc when the app happened to be started from the same working directory.
+		VCS::SetGamePath(File::ResolvePath(gamePath_.ToString()));
+	}
+
 	__DisplayListenFlip([](void *userdata) {
 		EmuScreen *scr = (EmuScreen *)userdata;
 		scr->HandleFlip();
@@ -534,7 +547,7 @@ void EmuScreen::sendMessage(UIMessage message, const char *value) {
 	// External commands, like from the Windows UI.
 	// This happens on the main thread.
 	if (message == UIMessage::REQUEST_GAME_PAUSE && screenManager()->topScreen() == this) {
-		screenManager()->push(new GamePauseScreen(gamePath_, bootPending_));
+		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 	} else if (message == UIMessage::REQUEST_GAME_STOP) {
 		// We will push MainScreen in update().
 		if (bootPending_) {
@@ -663,7 +676,7 @@ void EmuScreen::sendMessage(UIMessage message, const char *value) {
 				// use this as the fallback way to get into the menu.
 				// Don't do it on the first resume though, in case we launch directly into emuscreen, like from a frontend - see #18926
 				if (!equals(value, "first")) {
-					screenManager()->push(new GamePauseScreen(gamePath_, bootPending_));
+					screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 				}
 			}
 		}
@@ -1428,9 +1441,16 @@ void EmuScreen::update() {
 		pauseTrigger_ = true;
 	}
 
+	// VCS has no front end of its own - it runs logos, credits, then drops straight into
+	// the story. This is that seam, and it is where our main menu belongs.
+	if (VCS::GetBootPhase() == VCS::BootPhase::AtMenu && !bootPending_ &&
+			screenManager()->topScreen() == this) {
+		screenManager()->push(new VCSMenuScreen(gamePath_, false, VCSMenuMode::Startup));
+	}
+
 	if (pauseTrigger_) {
 		pauseTrigger_ = false;
-		screenManager()->push(new GamePauseScreen(gamePath_, bootPending_));
+		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 	}
 
 	if (!PSP_IsInited())

@@ -250,6 +250,9 @@
     <ClCompile Include="VCS\VCSState.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
+    <ClCompile Include="VCS\VCSSettings.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
     <ClCompile Include="HLE\sceDisplay.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
@@ -1560,6 +1563,9 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSState.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSSettings.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="HLE\sceDisplay.h">

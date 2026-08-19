@@ -337,6 +337,21 @@ static const FontDesc g_fontDescs[] = {
 	{FontFamily::SansSerif, FontStyleFlags::Italic, "Roboto Condensed", "Roboto_Condensed-Italic"},
 	{FontFamily::SansSerif, FontStyleFlags::Light, "Roboto Condensed", "Roboto_Condensed-Light"},
 	{FontFamily::Fixed, FontStyleFlags::Default, "Inconsolata", "Inconsolata-Regular"},
+	// The VCS front end's face. Loaded from assets like the others, so nothing has to register it
+	// at runtime - the loader above picks up every filename listed here when it builds the
+	// DirectWrite collection.
+	//
+	// The name is the *typographic* family (name-table ID 16), which is what DirectWrite matches
+	// on. Worth knowing that GDI does not: it matches ID 1, which for this file is the fuller
+	// "Pricedown Black". On Win10+ TextDrawerUWP (DirectWrite) is what runs, so this is the name
+	// that matters; on the TextDrawerWin32 fallback (Win7, or RenderDoc attached) the face will
+	// not resolve and GDI will silently substitute. A miss is never an error in either API - the
+	// text just comes out in the wrong font.
+	//
+	// The file is sfnt-with-CFF-outlines (an OTF) despite the .ttf name, because the loader
+	// hardcodes that extension. Every backend sniffs the container rather than trusting the name.
+	{FontFamily::Display, FontStyleFlags::Default, "Pricedown", "vcs/pricedown"},
+	{FontFamily::Display, FontStyleFlags::Bold, "Pricedown", "vcs/pricedown"},
 };
 
 std::map<FontFamily, std::string> g_fontOverrides;

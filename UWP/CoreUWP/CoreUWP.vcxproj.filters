@@ -98,6 +98,7 @@
     <ClCompile Include="..\..\Core\VCS\VCSInput.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSMemory.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSState.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSSettings.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceDeflt.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceDisplay.cpp" />
     <ClCompile Include="..\..\Core\HLE\sceDmac.cpp" />
@@ -524,6 +525,7 @@
     <ClInclude Include="..\..\Core\VCS\VCSInput.h" />
     <ClInclude Include="..\..\Core\VCS\VCSMemory.h" />
     <ClInclude Include="..\..\Core\VCS\VCSState.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSSettings.h" />
     <ClInclude Include="..\..\Core\HLE\sceDeflt.h" />
     <ClInclude Include="..\..\Core\HLE\sceDisplay.h" />
     <ClInclude Include="..\..\Core\HLE\sceDmac.h" />

@@ -6,6 +6,7 @@ cp -r ../assets/themes assets/
 cp -r ../assets/debugger assets/
 cp -r ../assets/upload assets/
 cp -r ../assets/ui_images assets/
+cp -r ../assets/vcs assets/
 cp ../assets/*.ini assets/
 cp ../assets/*.ttf assets/
 cp ../assets/*.zim assets/

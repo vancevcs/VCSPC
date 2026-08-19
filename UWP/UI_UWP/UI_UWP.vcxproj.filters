@@ -37,6 +37,9 @@
     <ClCompile Include="..\..\UI\ImDebugger\ImVCS.cpp">
       <Filter>ImDebugger</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\UI\VCSMenuScreen.cpp">
+      <Filter>Screens</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\UI\ChatScreen.cpp">
       <Filter>Screens</Filter>
     </ClCompile>
@@ -182,6 +185,9 @@
     </ClInclude>
     <ClInclude Include="..\..\UI\ImDebugger\ImVCS.h">
       <Filter>ImDebugger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\UI\VCSMenuScreen.h">
+      <Filter>Screens</Filter>
     </ClInclude>
     <ClInclude Include="..\..\UI\ChatScreen.h">
       <Filter>Screens</Filter>

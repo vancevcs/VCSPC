@@ -18,11 +18,14 @@
 #include "Common/Log.h"
 #include "Core/Config.h"
 #include "Core/ELF/ParamSFO.h"
+#include "Core/HLE/sceCtrl.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
+#include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSInput.h"
+#include "Core/VCS/VCSSettings.h"
 #include "Core/VCS/VCSState.h"
 
 namespace VCS {
@@ -37,10 +40,60 @@ static bool g_active = false;
 static std::string g_discID;
 static u64 g_tickCount = 0;
 
+// --- Boot phase ---
+//
+// Measured: FrameCounter is 0 for the whole of the logos and credits, and becomes nonzero - a
+// fixed 30602, deterministically - the instant the world starts. That edge is the seam we hang
+// the startup menu on.
+//
+// This is NOT the reverted "logic stopped means menu" idea from 03c1f3cfe0. That watched the
+// counter stall *continuously* during play, where loading screens and cutscenes make it wrong.
+// This reads the first 0 -> nonzero transition after boot, once. It is monotonic, so the
+// ambiguity that sank the other one cannot arise.
+static BootPhase g_bootPhase = BootPhase::Intro;
+static int g_introSkipFrames = 0;
+
+// Long enough for the game to notice the press across its 30Hz logic rate.
+static constexpr int kIntroSkipHoldFrames = 8;
+
+BootPhase GetBootPhase() {
+	return g_bootPhase;
+}
+
+void NotifyMenuDismissed() {
+	g_bootPhase = BootPhase::Playing;
+}
+
+void RequestIntroSkip() {
+	if (g_bootPhase == BootPhase::Intro) {
+		g_introSkipFrames = kIntroSkipHoldFrames;
+	}
+}
+
+static void UpdateBootPhase() {
+	if (g_bootPhase != BootPhase::Intro) {
+		return;
+	}
+
+	// Cross is what skips the credits - measured, and Start on its own does not do it.
+	if (g_introSkipFrames > 0) {
+		g_introSkipFrames--;
+		__CtrlUpdateButtons(CTRL_CROSS, 0);
+	}
+
+	const std::optional<u32> frames = ReadAddrU32(VCSAddr::FrameCounter);
+	if (frames && *frames != 0) {
+		g_bootPhase = BootPhase::AtMenu;
+		g_introSkipFrames = 0;
+	}
+}
+
 void Init() {
 	g_active = false;
 	g_discID.clear();
 	g_tickCount = 0;
+	g_bootPhase = BootPhase::Intro;
+	g_introSkipFrames = 0;
 
 	ResetHostKeys();
 	ClearSharedState();
@@ -61,6 +114,10 @@ void Init() {
 	}
 
 	g_active = true;
+
+	// Only now, once we know this is actually VCS. The settings apply to nothing otherwise, and
+	// reading the file for every game booted would be work done for no one.
+	LoadSettings();
 
 	int known = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(kVCSAddresses); i++) {
@@ -92,6 +149,9 @@ void Tick() {
 	}
 
 	g_tickCount++;
+
+	// Cheap, and the front end needs it before anything else this tick.
+	UpdateBootPhase();
 
 	// Free aim at the fire site. Installed HERE rather than in Init, because Init runs at
 	// __KernelInit - before the EBOOT is loaded - so anything written there is overwritten by the

@@ -101,6 +101,7 @@
 #include "Core/CmdLine.h"
 #include "Core/ControlMapper.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
@@ -1611,6 +1612,13 @@ bool NativeKey(const KeyInput &key) {
 	}
 
 	if (passKeyThrough) {
+		// Fork-specific: any key skips the opening credits. It presses the game's own skip
+		// button rather than fast-forwarding anything, so the world still takes about four
+		// seconds to arrive afterwards - the seam, and the menu with it, just comes sooner.
+		if ((key.flags & KeyInputFlags::DOWN) && VCS::GetBootPhase() == VCS::BootPhase::Intro) {
+			VCS::RequestIntroSkip();
+		}
+
 		// Fork-specific: GTA VCS context-aware mapping. Claims a key only when the VCS layer is
 		// active AND has resolved a context AND actually maps that key, in which case the normal
 		// mapper must not also see it, or a key bound in both places would fire twice. Returns

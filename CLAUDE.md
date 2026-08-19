@@ -48,9 +48,13 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
   VCSInput.h/cpp    input context enum, (context, host key) -> PSP button table, WASD analog
   VCSCamera.h/cpp   mouse look; writes CameraYaw/CameraPitch directly, not via sceCtrl
   VCSGame.h/cpp     lifecycle + per-frame tick; the only entry point the rest of PPSSPP sees
+  VCSSettings.h/cpp the player-facing option table, and the only thing that persists any of it
 
 UI/ImDebugger/
   ImVCS.h/cpp       the "VCS" debugger window (lives here so Core stays ImGui-free)
+
+UI/
+  VCSMenuScreen.h/cpp  the GTA-styled pause menu and its option pages
 ```
 
 Data flows one way: `VCSAddresses` → `VCSMemory` → `VCSState` → `VCSInput` → `sceCtrl`, with
@@ -119,6 +123,7 @@ The entire integration is five small edits. Keep it that way.
 | Host keys | `NativeKey()` in [UI/NativeApp.cpp](UI/NativeApp.cpp) | Inside the existing `passKeyThrough` branch, which already handles ImGui capture and UI-vs-ingame gating |
 | Mouse look | `NativeMouseDelta()` in [UI/NativeApp.cpp](UI/NativeApp.cpp) | Same claim pattern as keys; skipped while the ImGui debugger wants the mouse |
 | Compat flag | [Core/Compatibility.h](Core/Compatibility.h) + `.cpp` + [assets/compat.ini](assets/compat.ini) | One struct field, one `CheckSetting` line, one `[VCSInputOverhaul]` section |
+| Pause menu | the three `GamePauseScreen` sites in [UI/EmuScreen.cpp](UI/EmuScreen.cpp) | All three now call `CreatePauseScreen()`, which returns PPSSPP's own screen unless `VCS::IsActive()` |
 
 **Mouse input requires "Use Mouse Control" to be on** (Settings → Controls, `UseMouse` in
 `ppsspp.ini`). PPSSPP gates mouse delta delivery on it. Turning it on costs nothing here because
@@ -137,6 +142,269 @@ on the same thread, regardless of graphics backend (see the upstream threading s
 the VCS debugger window reads PSP memory directly, with no marshalling and no snapshot buffer,
 and still satisfies the emu-thread-only rule. Don't "fix" this by adding a lock; the legacy Win32
 debugger is the one that needs `g_frameMutex`, not this.
+
+## The front end
+
+**Status: working, confirmed against the running game.** Esc opens it over a paused VCS, the page
+table navigates, hover and keyboard both move the selection, left/right edits a value and the
+blocks track it, Esc walks back up the pages and then resumes, and `vcs.ini` is written on the way
+out with all 14 options.
+
+It imitates VCS's own front end, not Vice City's PC one, and the difference is the whole design:
+
+| | VC on PC (what this was built as first) | VCS (what it is now) |
+|---|---|---|
+| list | left column, left-aligned | centred on the screen |
+| selection | slanted highlight quad behind the row | carried by colour alone |
+| palette | pink on pink | cyan, selected row cream |
+| headings | sans, top right | brush script, top left |
+| values | number and a continuous bar | discrete blocks |
+| backdrop | the dimmed game | opaque purple with palm fronds |
+| bottom | nothing | a bar: what the row means, and how to work it |
+
+Worth stating plainly because the first build got it wrong: "the GTA menu look" is not one thing.
+Building it from Vice City's PC frontend produced something coherent that was recognisably the
+wrong game.
+
+### What was taken from reVC, and how little of it
+
+reVC's `CMenuManager` is ~6600 lines, and most of that is a UI toolkit: hit-testing, hover state,
+keyboard repeat, layout, text measurement. The game had no toolkit, so the menu had to be one.
+PPSSPP already has that layer, themed and working on mouse, keyboard and pad, so re-implementing
+it would have been several thousand lines spent to arrive back where we started.
+
+Three things *were* worth taking:
+
+- **The page table.** A page is a header, a parent page, and a list of rows; a row is either a
+  jump to another page or a binding to one setting. Back-navigation is data (`ParentPage`), not
+  code. reVC stores this as `aScreens[MENUPAGES]`.
+- **CFO** - re3's "Custom Frontend Options", the reason `Core/VCS/VCSSettings.h` exists. A row is
+  described by the variable it edits plus the ini key it saves to, so adding an option is one row
+  in one table: no renderer change, no switch arm, no new save code.
+- **The helper line.** The selected row's explanation along the bottom, which is what lets an
+  option be called "Free aim" instead of a sentence.
+
+Its *palettes* are worth knowing about too, and they are not what you would guess. reVC ships two
+whole front ends - `Frontend.cpp` for PC and `Frontend_PS2.cpp` behind `PS2_MENU` - and neither is
+this one: PC is pink (`LABEL_COLOR(255,150,225)`), PS2 is gold (`SELECTED_TEXT_COLOR(255,182,48)`).
+The cyan-and-cream here came from VCS itself.
+
+### The settings did not persist before this
+
+Every VCS tunable lived in the ImGui debugger, bound to `VCSCameraSettings` and
+`VCSFireHookSettings`, and reset to defaults on every launch. `VCSSettings` is the fix, and it
+deliberately does not move the values - those structs go on owning them, documented where they are
+used, with the debugger still binding to them directly. What the table adds is names, ranges and
+persistence for the subset a *player* would set. A knob that needs a paragraph of measurements to
+interpret stays in the debugger window.
+
+A row is `Bool`, `Float`, `Int` or `Choice`, and the split between the last two is the one worth
+stating: **`Choice` stores an index into a label list, `Int` stores the value itself.** Master
+volume was written as a `Choice` over `"0"`..`"100"` in tens, which reads correctly and is wrong -
+`g_Config.iGameVolume` runs 0..100, so the index and the value are different numbers, and the
+first left-press took the volume from 100 to 10. `Int` carries `minInt`/`maxInt`/`stepInt`,
+renders as the same ten blocks a `Float` does, and one press moves one block. Anything owned by
+the rest of the emulator is a value, not an index; reach for `Choice` only when the thing really
+is a list of names.
+
+Two more details that will bite if they are "simplified":
+
+- `Options()` captures each default from the live variable the first time it is called, so it
+  **must** run before the ini is read. `LoadSettings()` guarantees that by calling it first thing.
+  Reverse the order and "restore defaults" quietly means "restore whatever was last saved".
+- Settings live in `memstick/PSP/SYSTEM/vcs.ini`, next to `imdebugger.ini`, **not** in
+  `ppsspp.ini`. Putting them in `Core/Config.cpp` would mean editing a file upstream touches
+  constantly, which is the difference between a clean rebase and a conflict on every pull.
+- An `external` row's default belongs to PPSSPP, so ask it: `Config::GetDefaultValueInt(&g_Config.x)`.
+  Restating the number here means "restore defaults" quietly disagrees with the value the rest of
+  the emulator would restore - anisotropy was written as `0` against an upstream default of `4`.
+  It is safe to call for anything in `struct Config`; only the blocks that override
+  `CanResetToDefault()` (display layout, touch controls, gestures) assert.
+
+### The page titles are art, and they have to be
+
+`Tools/vcsmenuart.py` bakes the backdrop and the script-font headings into `assets/vcs/`, and the
+headings are baked because PPSSPP cannot draw them any other way. `FontStyle` selects a font
+*family* - `SansSerif` or `Fixed`, and that is the whole enum - and `SetFontNameOverride` maps a
+family to one face **globally**. There is no way to ask for a brush script for one string and the
+UI sans for the next. Baking them also matches what the game does: its headings are sprites.
+
+Re-run the script after editing the title list; the keys in `TITLES` are the names
+`VCSMenuScreen::PageTitle` asks for, so the two have to stay in step. It uses stock Windows fonts
+(Brush Script MT) and ships only the rendered pixels, no font file.
+
+The one thing to know about the backdrop generator: the leaflet base width is derived from the
+leaflet spacing, not chosen. Narrower than the gap and the fronds read as fishbones - a row of
+separate spines with the background showing through. At 0.8 of the spacing they overlap into one
+silhouette with a jagged edge, which is the shape the eye reads as a palm.
+
+Missing art is not fatal - the backdrop falls back to a flat purple and a missing title simply
+does not draw - so the menu still works on a platform where `assets/vcs/` was not deployed.
+
+### The menu face: two font systems, two different names for the same font
+
+Menu items are set in Pricedown (`assets/vcs/pricedown.ttf`, listed in `g_fontDescs` under the
+new `FontFamily::Display`). Getting there took four wrong turns, all worth writing down because
+every one of them fails *silently* - a font that cannot be found is never an error in either API,
+the text just comes out in some substituted face.
+
+1. **A family maps to exactly one face, globally.** `FontStyle` picks `SansSerif` or `Fixed`, and
+   `SetFontNameOverride` sets the face for a whole family. Wanting Pricedown for menu items *and*
+   the UI sans for the hint bar therefore means wanting a third family, which is why
+   `FontFamily::Display` exists. Hijacking `Fixed` would have worked and would have quietly
+   changed the code font in the dev screens.
+2. **On Win10+ the text drawer is DirectWrite, not GDI.** `TextDrawer::Create` picks
+   `TextDrawerUWP` unless RenderDoc is attached or the OS is older than Win10, in which case it is
+   `TextDrawerWin32`. The first attempt registered the font with `AddFontMemResourceEx` - a GDI
+   call - and it succeeded, handle and all, into a font table nothing was reading.
+3. **The two APIs match on different names.** This font's name-table ID 1 is "Pricedown Black"
+   and its typographic family (ID 16) is "Pricedown". **GDI matches ID 1; DirectWrite matches
+   ID 16.** No single string satisfies both, so the desc carries the DirectWrite name, which is
+   the one that matters on the platform this fork targets. Tools mostly report ID 16, so the name
+   you get from asking a font library is the one that does *not* work under GDI.
+4. **Nothing needs to register it at runtime.** `TextDrawerUWP` already builds its own
+   `IDWriteFontCollection` from an in-memory font set, loading every filename in `g_fontDescs`
+   through the VFS. Adding a row to that table is the entire integration. The file is an OTF
+   (CFF outlines) named `.ttf` because the loader appends that extension unconditionally; every
+   backend sniffs the container rather than trusting the name.
+
+### A screen that pauses the game has to say so
+
+`VCSMenuScreen::update()` calls `UpdateUIState(UISTATE_PAUSEMENU)` every frame, exactly as
+PPSSPP's own pause screen does, and it is not decoration. The mouse pointer is the visible
+symptom: `CorrectCursor()` in `Windows/MainWindow.cpp` only un-hides the cursor once the UI state
+is something other than `UISTATE_INGAME`, and with mouse control on it also keeps the pointer
+clipped to the window. Without the call the menu came up with no pointer at all. The framebuffer
+manager and the WebSocket game broadcaster read the same state, so this is not only about the
+cursor.
+
+Measured rather than assumed, via `GetCursorInfo`: `HIDDEN` in gameplay, `SHOWING` with the menu
+open.
+
+### The main menu at launch, and the one thing it needs to know
+
+`CreateStartScreen()` is what the app opens on, hooked into the `AfterLogoScreen::DEFAULT` arm of
+LogoScreen. It returns the VCS main menu when a VCS disc has been booted before, and PPSSPP's
+ordinary game browser otherwise - there is nothing to put behind LOAD GAME until we have been told
+which ISO that is.
+
+The main menu and the pause menu are the *same screen* in two modes (`VCSMenuMode`), because they
+differ only in what the top row does and in what Back means. One page table, one look, one set of
+option rows. Two things the MainMenu mode has to get right:
+
+- Back on the root page is swallowed. The main menu is the bottom of the screen stack, and
+  letting `UIDialogScreen` finish it would pop the last screen and leave the app with nothing.
+- `EmuScreen::bootComplete()` records the disc through `File::ResolvePath`, not as given.
+  `gamePath_` is routinely relative - a command line, a drag-and-drop - and storing it raw meant
+  the main menu only found the disc when the app was started from the same working directory.
+  It looked like it worked, because during testing it always was.
+
+### The boot sequence, measured: there is no menu to bridge to
+
+The launch-time main menu was expected to need a bridge into the game's own front end - drive its
+menu, pick New Game, get out of the way. **That front end does not exist.** Measured on the retail
+disc, cold boot, nothing touched:
+
+| time | on screen | `FrameCounter` `0x08bb3bb4` | `TimeStep` `0x08bb3b5c` |
+|---|---|---|---|
+| 0-60s | logos, then the credits sequence | `0` | `0.0` |
+| ~60-68s | the seam | | |
+| 68s+ | gameplay, Fort Baxter, story running | `30919`, climbing ~32/s | `1.6684` |
+
+VCS goes logos → credits → straight into the story. There is no New Game / Load Game screen at
+boot at all; loading a save is reached from the pause menu once you are in. So the hardest part of
+the launch-menu problem was never there, and "START GAME continues the autoloading" is the literal
+truth: the game is already on its way in.
+
+**The hook is the `FrameCounter` 0 → nonzero edge.** It is the moment the world starts, it happens
+exactly once per boot, and both clocks agree on it.
+
+Two things this measurement corrected:
+
+- **`FrameCounter` does not count frames since boot.** It jumps 0 → ~30600 at the seam rather
+  than counting up, so it is initialised with the world, not incremented from power-on. Only the
+  edge is meaningful; the magnitude is not.
+- **This is not the idea that was reverted in `03c1f3cfe0`.** That one used "logic stopped" as a
+  *continuous* gate during play, where loading screens and cutscenes make it wrong. This uses the
+  *first* 0 → nonzero transition after boot, once, to place the menu at the seam. Same address,
+  different claim - and this one is monotonic, so the ambiguity that killed the other cannot
+  arise.
+
+**Cross skips the credits; Start alone does not.** Measured by injecting a press through the
+WebSocket debugger 20s into the credits and timing the seam: it arrived 3.7s later instead of the
+~60s the sequence takes on its own. So the skip presses the game's own button rather than trying
+to fast-forward anything, which is why there is still a few seconds of wait after a keypress.
+`FrameCounter` reads a fixed 30602 at the seam every run, so the value is deterministic even
+though only the edge is used.
+
+**The flow, as built.** `CreateStartScreen` boots the remembered disc with no menu in front of
+it; `VCS::UpdateBootPhase` watches for the edge; `EmuScreen` raises the menu in
+`VCSMenuMode::Startup` when it lands; START GAME just resumes. Any key during the intro calls
+`RequestIntroSkip`, hooked in `NativeKey` next to the existing VCS key claim.
+
+Do not trust a reading taken from a session that has been running a while: mid-investigation this
+looked disproven, because the sample was taken from an instance that had already crossed the seam
+and was showing the gameplay values. The credits really do run with both clocks at zero; check
+what is on screen before believing a reading.
+
+### A menu we own sidesteps the GameState problem entirely
+
+reVC's menu knows the game is paused because it *is* the game. This fork cannot ask VCS the same
+question - `GameState` was hunted for and never found, and the `FrameCounter`-stall shortcut was
+shipped and reverted for breaking the controls (see the `Menu` context note below).
+
+None of that matters here, and it is worth being clear about why: the pause menu is a PPSSPP
+`UIDialogScreen`, so PPSSPP owns its open/closed state and pauses emulation for it the same way
+it does for its own. The unsolved problem is only reachable if a menu tries to sit on top of the
+*game's* front end and mirror it. **A launch-time main menu - New Game, Load Game - is the case
+that does need a bridge into the game's own front end**, and that bridge is a one-shot scripted
+input sequence right after boot, not a per-frame state read. That is the narrow version of the
+problem and it is still open.
+
+Being a normal PPSSPP screen also means it runs on the same thread as `VCS::Tick()`, for the same
+reason `UI/ImDebugger` does - see Threading above - so it reads and writes the settings structs
+directly, with no marshalling.
+
+### Hover is the one thing PPSSPP does not give you
+
+PPSSPP moves focus on click and on keyboard/pad navigation, and has no notion of a hovered row -
+`TouchInputFlags::HOVER` exists in the enum and nothing uses it. A menu whose rows do not light up
+under the mouse reads as broken on a PC, so `VCSMenuItem::Touch` sets focus on a buttonless
+`MOVE` inside its bounds. That is exactly what reVC's `UserInput()` does when it hit-tests the
+pointer against every row, and it is the only piece of its input handling that genuinely had to be
+written again. The buttonless check is what keeps it from firing mid-drag on a value.
+
+### Four bugs this layout produced, all worth recognising again
+
+- **The row you can see is not the row you can click.** Rows are laid out at the full screen
+  width, because the two-column settings layout aligns on the screen's centre line rather than on
+  anything the row owns. That makes `bounds_` a band the entire width of the display, so
+  hit-testing it meant any pointer at the same *height* as a label counted as being on it, however
+  far away horizontally. Measured, not guessed: a trace of the touch events showed every row as
+  `bounds = 0.0, y, 1920.0 x 76.0`. `VCSMenuItem` now measures the drawn text during `Draw` and
+  hit-tests that box, and reproduces `Clickable::Touch`'s press/release handling against it -
+  delegating to the base is not possible, because every containment test in it reads `bounds_`.
+
+- **Centre on the screen, not on the row.** Every row is laid out full width, so `bounds_.centerX()`
+  looks like the screen's midpoint and reads correctly in code. It was not - the rows came out
+  narrower than the screen - and the entire menu sat 80 pixels left of centre while every
+  individual piece of it looked right. `ScreenCenterX()` asks `g_display` instead. Any layout
+  built around a centre line wants the screen's, not a view's.
+- **A "did we try yet" flag has to be cleared with the thing it guards.** `backgroundTried` was
+  set on the first load attempt and never reset by `Release()`, so the backdrop appeared once per
+  run and every menu after the first came up on the fallback colour - which looks enough like a
+  deliberate flat background to not read as a bug.
+- **Taking focus on hover means taking it *forced* on click.** With hover focus added and
+  `Clickable::Touch` reimplemented, the mouse stopped selecting anything at all: every row
+  highlighted correctly and no click ever fired. `TouchEvent` calls `EnableFocusMovement(false)`
+  on any press that did not force focus, which sends `LOST_FOCUS` to the focused view, and
+  `Clickable::FocusChanged` clears `down_` and `dragging_` - so the release found nothing pressed.
+  Stock survives this because it claims focus only `if (IsFocusMovementEnabled())`, and after the
+  first press there is no focused view left to lose. Hover puts one back every frame, so that
+  escape hatch is gone. `VCSMenuItem::ClaimFocus` uses `SetFocusedView(this, CAUSE_FORCED, true)`,
+  which is what `TextEdit::Touch` uses to keep the focus it takes - and it has to run *before*
+  `down_` is set, because `SetFocusedView` sends `LOST_FOCUS` to the outgoing view even when the
+  outgoing view is this one.
 
 ## Status
 
@@ -1677,9 +1945,17 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
 - **`INFO_LOG` is invisible at default log levels.** Only warnings and above reach the log file,
   so debug printfs added at INFO level will look like the code never ran. Use `WARN_LOG` or
   higher when probing.
-- **The ImGui debugger swallows the keyboard when focused.** `WantCaptureKeyboard` strips
-  `InputMode::Keyboard` before `passKeyThrough`, so click the game area, not the VCS window, when
-  testing input by hand.
+- **The ImGui debugger swallows the keyboard when focused, and it swallows our menu's too.**
+  `WantCaptureKeyboard` strips `InputMode::Keyboard` before `passKeyThrough`, so click the game
+  area, not the VCS window, when testing input by hand. The part that wastes an afternoon is the
+  *second* place it filters: `NativeFrame` drops queued key events on the same flag, but keeps UP
+  events "to avoid stuck keys" (`UI/NativeApp.cpp`, the `filterKey` branch). A view then sees the
+  release of a key whose press it never saw, and since `Clickable::Key` sets `down_` on the press
+  and only clicks on the release, **every row in the VCS menu silently stops responding to Enter
+  while the debugger has focus** - which looks exactly like a broken menu rather than like
+  captured input. Arrow keys still work throughout, because focus movement is driven from
+  `KeyEventToFocusMoves` inside `NativeKey`, upstream of the queue. Rows that highlight but will
+  not activate mean ImGui has the keyboard, nothing more.
 
 **Deliberately not implemented yet:**
 

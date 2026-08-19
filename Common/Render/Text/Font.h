@@ -22,6 +22,11 @@ ENUM_CLASS_BITOPS(FontStyleFlags);
 enum class FontFamily : u8 {
 	SansSerif = 1,
 	Fixed = 2,
+	// A display face, for headings and menu items rather than body text. Added for the VCS front
+	// end, which needs its own face at the same time as the UI sans - and since a family maps to
+	// exactly one face (see SetFontNameOverride), wanting two faces at once means wanting two
+	// families. Nothing else uses it, and no switch dispatches on this enum.
+	Display = 3,
 };
 
 struct FontStyle {

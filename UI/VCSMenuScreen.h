@@ -1,0 +1,168 @@
+// Copyright (c) 2026- PPSSPP Project.
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 2.0 or later versions.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License 2.0 for more details.
+
+// A copy of the GPL 2.0 should have been included with the program.
+// If not, see http://www.gnu.org/licenses/
+
+// Official git repository and contact information can be found at
+// https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
+
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "Common/File/Path.h"
+#include "Common/UI/UIScreen.h"
+#include "Common/UI/View.h"
+#include "UI/BaseScreens.h"
+
+namespace VCS {
+struct Option;
+// Legal to forward-declare: a scoped enum has a defined underlying type even undefined.
+enum class OptionPage;
+}
+
+// The pause menu for the VCS front end, in the shape GTA uses: a left-hand column of large
+// options, the page name in the top right, the selected row's explanation along the bottom.
+//
+// It follows reVC's *structure* and none of its drawing. reVC had to write its own hit-testing,
+// hover state, keyboard repeat and layout because the game had no UI toolkit; PPSSPP has one,
+// with mouse, keyboard and pad navigation already working and already themed. So a row here is a
+// UI::ClickableItem subclass that paints itself the way the GTA menu looks - and inherits focus,
+// clicks and navigation for free.
+//
+// What IS taken from reVC is how pages are described: a table of rows, each row either a jump to
+// another page or a binding to one setting, with back-navigation expressed as the page's parent
+// rather than as code. See Core/VCS/VCSSettings.h for the settings half of that.
+
+enum class VCSMenuPage {
+	Root,
+	Settings,
+	Controls,
+	Mouse,
+	Aiming,
+	Audio,
+	Graphics,
+};
+
+// The same screen serves two jobs, because they differ only in what the root page offers and in
+// what Back means. Sharing it keeps one page table, one look and one set of option rows.
+enum class VCSMenuMode {
+	Pause,     // over a running game: RESUME at the top, Back closes and resumes
+	MainMenu,  // at startup, nothing loaded: LOAD GAME at the top, Back on the root does nothing
+	Startup,   // over the credits seam: START GAME at the top, and it just resumes
+};
+
+// One row. Either an action ("RESUME GAME") or a setting bound to a VCS::Option, in which case
+// the value sits in the right-hand column and left/right edits it.
+class VCSMenuItem : public UI::ClickableItem {
+public:
+	VCSMenuItem(std::string_view label, UI::LayoutParams *layoutParams = nullptr);
+	VCSMenuItem(const VCS::Option *option, UI::LayoutParams *layoutParams = nullptr);
+
+	void Draw(UIContext &dc) override;
+	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
+	bool Key(const KeyInput &input) override;
+	bool Touch(const TouchInput &input) override;
+	std::string DescribeText() const override;
+
+	const VCS::Option *option() const { return option_; }
+	std::string_view help() const;
+
+protected:
+	// A toggle row flips its value on click. Float rows are edited through the bar and the
+	// arrow keys instead, so this leaves them alone.
+	void ClickInternal() override;
+
+private:
+	// direction is -1 or +1; a bool flips either way, a float moves one step of its range.
+	void Adjust(int direction);
+	// Focus this row on a press, in the one way that survives the press. See the definition.
+	void ClaimFocus();
+	// Where along the row's value bar x falls, 0..1. Only meaningful for float options.
+	float ValueFractionAt(float x) const;
+
+	// The box the pointer actually has to be inside, which is NOT bounds_. Rows are laid out at
+	// the full screen width so that the two-column settings layout can align on the screen's
+	// centre line; using that for hit-testing made every row a full-width band, so anything at
+	// the same height counted as a hit no matter how far from the text it was. Measured during
+	// Draw, which is the only place with a UIContext to measure text with, and falls back to the
+	// row until the first frame has been drawn.
+	Bounds HitBounds() const;
+	mutable Bounds hitBounds_;
+	mutable bool hitBoundsValid_ = false;
+
+	std::string label_;
+	const VCS::Option *option_ = nullptr;
+	bool draggingValue_ = false;
+};
+
+class VCSMenuScreen : public UIBaseDialogScreen {
+public:
+	VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode mode = VCSMenuMode::Pause);
+	~VCSMenuScreen();
+
+	const char *tag() const override { return "VCSMenu"; }
+
+	bool key(const KeyInput &key) override;
+
+protected:
+	void CreateViews() override;
+	void update() override;
+	void DrawBackground(UIContext &dc) override;
+	ViewLayoutMode LayoutMode() const override {
+		return ViewLayoutMode::ApplyInsets;
+	}
+
+private:
+	void GoToPage(VCSMenuPage page);
+	// The page one Back press lands on. Root's parent is "close the menu", handled by the caller.
+	static VCSMenuPage ParentPage(VCSMenuPage page);
+	const char *PageTitle(VCSMenuPage page) const;
+
+	void AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page);
+	// A row that just walks to another page. The commonest thing on this menu by far.
+	void AddPageRow(UI::ViewGroup *parent, const char *label, VCSMenuPage target);
+	void AddBackRow(UI::ViewGroup *parent);
+	// True for the leaf pages that are a list of settings rather than a list of pages.
+	static bool IsOptionPage(VCSMenuPage page);
+	static VCS::OptionPage ToOptionPage(VCSMenuPage page);
+
+	void OnResume(UI::EventParams &e);
+	void OnLoadGame(UI::EventParams &e);
+	void OnExitGame(UI::EventParams &e);
+	void OnQuitApp(UI::EventParams &e);
+	void OnControlMapping(UI::EventParams &e);
+	void OnGameSettings(UI::EventParams &e);
+	void OnRestoreDefaults(UI::EventParams &e);
+
+	// Carried because the pause-screen call sites pass it and PPSSPP's own pause menu needs it to
+	// grey out save-state controls mid-boot. Nothing here reads it yet - this menu has no
+	// save-state rows - but it is what those rows would have to be gated on.
+	bool bootPending_;
+	VCSMenuMode mode_;
+
+	VCSMenuPage page_ = VCSMenuPage::Root;
+
+	// Rebuilt by CreateViews. Used only to find the focused row for the helper line, so these
+	// are borrowed pointers into the view tree, never owned.
+	std::vector<VCSMenuItem *> rows_;
+};
+
+// Returns the VCS pause menu for VCS, and PPSSPP's ordinary one for everything else. The three
+// places EmuScreen opens a pause screen go through here, which is the whole integration.
+UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending);
+
+// The screen the app opens on: the VCS main menu once a VCS disc has been booted at least once,
+// and PPSSPP's ordinary game browser until then - there is nothing to put behind LOAD GAME
+// before we have been told which disc that is.
+UIScreen *CreateStartScreen();

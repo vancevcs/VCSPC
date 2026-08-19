@@ -57,6 +57,7 @@
 #include "UI/EmuScreen.h"
 #include "UI/GameSettingsScreen.h"
 #include "UI/MainScreen.h"
+#include "UI/VCSMenuScreen.h"
 #include "UI/MiscScreens.h"
 #include "UI/MemStickScreen.h"
 #include "UI/MiscViews.h"
@@ -382,7 +383,8 @@ void LogoScreen::Next() {
 			if (boot_filename.size()) {
 				screenManager()->switchScreen(new EmuScreen(gamePath));
 			} else {
-				screenManager()->switchScreen(new MainScreen());
+				// CreateStartScreen returns MainScreen for anyone not set up for VCS.
+				screenManager()->switchScreen(CreateStartScreen());
 			}
 			break;
 		}

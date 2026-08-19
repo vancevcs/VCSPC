@@ -439,6 +439,8 @@ add_library(Core STATIC
 	VCS/VCSInput.h
 	VCS/VCSMemory.cpp
 	VCS/VCSMemory.h
+	VCS/VCSSettings.cpp
+	VCS/VCSSettings.h
 	VCS/VCSState.cpp
 	VCS/VCSState.h
 
