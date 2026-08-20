@@ -2163,6 +2163,64 @@ The through-line: **a state is not an entry point.** Three of those four were re
 right values in them, and setting a field the game writes is not the same as doing the thing the
 game does when it writes it. The entry point was a function all along, and the way to a function
 nobody can name is to break on the field and read the stack.
+
+### Draw distance — ported, measured, and not the constraint
+
+**Status: built, working, and it changes nothing you can see.** Off by default
+(`DrawDistanceSettings().enabled`, the Graphics page, or the Draw distance tab in the debugger
+window). `Core/VCS/VCSDrawDistance.cpp`.
+
+Every address came from PSPRecomp's VCS profile — a static-recompilation project targeting this
+same disc, whose `vcs_draw_distance_patch.cpp` names `CDraw::ms_fFarClipZ` at `$gp + 0x1e74`, the
+setter at `0x08a1ad6c`, the IDE/model-info table at `$gp + 24` with its count at `$gp + 7656`, and
+three draw distances at `+0x2c`, `+0x30` and `+0x34` off each model-info. None of it was hunted
+for here. All of it was disassembled out of a savestate before being trusted, which is the only
+reason the port took an afternoon.
+
+The METHOD is not theirs and could not be. A static recompiler swaps whole functions out of a
+dispatch table and jumps to a continuation address when it is done; PPSSPP runs the real MIPS and
+a replacement always returns to `$ra`. So each of their five hooks was read first and then
+re-expressed as the smallest thing reaching the same value. Three of the five stopped being code
+patches at all — the vehicle and ped range constants are `lui` immediates, so they are one 16-bit
+field each. `SetFarClipZ` is a two-instruction leaf, which is the one case PPSSPP's replacement
+path fits exactly. Only the entity LOD site needed a hook.
+
+**What the measurement said.** The far clip scales exactly as intended: 1978.9 out to 3957.9 at
+2x, read live off the debugger tab. At 8x the view is indistinguishable from stock.
+
+That is not a bug in the port, and it is the finding worth keeping: **the far clip only governs
+how far the game is WILLING to draw.** Whether anything is out there to draw is decided by
+streaming and the per-model distances, and VCS appears to carry no separate LOD geometry to put at
+range — the level containers show essentially no LOD-prefixed models, against one in `GAME.DTZ`.
+Flown and looked at; vanilla draw distance is adequate. Do not spend more on this without a reason
+that is not "the far clip is too close".
+
+The one lever never actually pulled is the model-info table walk. It reported zero entries scaled
+in the build that was tested, because of the second trap below, and the fix for that has not
+itself been exercised. If the question ever comes back, start there — and the `$gp` offsets are
+worth trusting: on this build `$gp` reads `0x08bb1d60`, putting the far clip at `0x08bb3bd4` and
+the model count at `0x08bb3b48`, right among `TimeStep` and `FrameCounter` in the address table.
+
+### Two traps in patching this emulator's code
+
+Both cost real time on the draw-distance port, and neither is visible from the API. Anything that
+patches game code will meet them again — the fire hook only escaped them because it patches a
+`jal` in the middle of a function, which no block starts at and nothing reinstalls.
+
+**PPSSPP hides the game's instruction behind its own marker.** Once a block has been compiled, the
+raw word at its first instruction is a `0x68xxxxxx` RUNBLOCK marker, so a raw read sees neither the
+game's opcode nor your replacement. Every check has to go through `Memory::Read_Instruction`, which
+resolves both back. The sharp edge is on the way out: `RestoreReplacedInstruction` reads the RAW
+word and silently declines unless it sees a replacement marker there — so uninstalling a hook whose
+address has since become a block start does nothing at all, and the hook stays live while every
+flag in your own code says it is gone. Invalidate the block FIRST, then restore.
+
+**`WriteReplaceInstructionAt` returns false for success.** It reports false both when the write
+failed and when the identical replacement was already installed. Treating the return value as the
+answer made a working, running hook report "far clip replacement refused" on every frame after the
+first — which, combined with the trap above, produced a remove/reinstall loop that left the feature
+permanently half-installed. Ask what is actually at the address instead of what the writer returned.
+
 ## Working on this
 
 Build and test exactly as upstream describes. To exercise the VCS layer you need the game
