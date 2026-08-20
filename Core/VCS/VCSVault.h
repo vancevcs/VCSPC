@@ -102,8 +102,8 @@ struct VCSVaultSettings {
 	//
 	// Measured references, in the same units: a waist wall reads +0.91, a head-height wall +2.01,
 	// and the ped's own origin sits 1.04 above what it stands on.
-	float minHeight = 1.60f;
-	float maxHeight = 2.80f;
+	float minHeight = 1.50f;
+	float maxHeight = 2.90f;
 
 	// The motion, in 60 Hz ticks. Rise first, then step forward onto the surface, which is the
 	// shape of the swimming climb-out: hang, pull up, plant a foot.
