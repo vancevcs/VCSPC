@@ -64,10 +64,10 @@
 namespace VCS {
 
 struct VCSVaultSettings {
-	// Off by default while the motion is still the written-position fallback rather than the
-	// game's own climb. It takes over the jump key when a ledge is in front of the player, which
-	// is not something to hand someone without them asking for it first.
-	bool enabled = false;
+	// On. It was off while the motion was still the written-position fallback - handing someone a
+	// jump key that sometimes slid the character up a wall with no animation is not a default -
+	// but the climb is the game's own now, animation and all, so there is nothing to opt into.
+	bool enabled = true;
 
 	// How far in front of the player to look, in world units (metres, near enough). The three
 	// wall samples are spread between these two.
