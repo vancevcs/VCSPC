@@ -36,6 +36,7 @@
 #include "GPU/Common/SoftwareTransformCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/ShaderUniforms.h"
+#include "GPU/Common/VCSShadow.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
 #include "GPU/Vulkan/TextureCacheVulkan.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
@@ -51,6 +52,7 @@ enum {
 DrawEngineVulkan::DrawEngineVulkan(Draw::DrawContext *draw)
 	: draw_(draw) {
 	decOptions_.expand8BitNormalsToFloat = false;
+	VCSShadow::Init();
 }
 
 void DrawEngineVulkan::InitDeviceObjects() {
@@ -94,6 +96,7 @@ void DrawEngineVulkan::InitDeviceObjects() {
 
 DrawEngineVulkan::~DrawEngineVulkan() {
 	DestroyDeviceObjects();
+	VCSShadow::Shutdown();
 }
 
 void DrawEngineVulkan::DestroyDeviceObjects() {
@@ -143,6 +146,9 @@ void DrawEngineVulkan::DeviceRestore(Draw::DrawContext *draw) {
 
 void DrawEngineVulkan::BeginFrame() {
 	DrawEngineCommon::BeginFrame();
+
+	// Returns on its first line for every game but VCS with the shadow flag set.
+	VCSShadow::BeginFrame();
 
 	lastPipeline_ = nullptr;
 
@@ -363,6 +369,9 @@ void DrawEngineVulkan::Flush() {
 		if (useDepthRaster_) {
 			DepthRasterSubmitRaw(prim, dec_, dec_->VertexType(), vertexCount);
 		}
+		if (VCSShadow::IsActive()) {
+			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
+		}
 	} else {
 		gpuStats.perFrame.numSoftTransformedDraws++;
 
@@ -389,6 +398,9 @@ void DrawEngineVulkan::Flush() {
 		// should clean up one day...
 		if (useDepthRaster_) {
 			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
+		}
+		if (VCSShadow::IsActive()) {
+			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
 		}
 
 		u16 *inds = decIndex_;

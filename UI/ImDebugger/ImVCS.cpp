@@ -38,6 +38,8 @@
 #include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSWorld.h"
 
+#include "GPU/Common/VCSShadow.h"
+
 static const ImVec4 kUnsetColor = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
 static const ImVec4 kGoodColor = ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
 static const ImVec4 kBadColor = ImVec4(0.90f, 0.45f, 0.45f, 1.0f);
@@ -1491,6 +1493,117 @@ void ImVCSWindow::DrawDrawDistance() {
 	ImGui::TextDisabled("Changes re-apply on the next frame.");
 }
 
+void ImVCSWindow::DrawShadows() {
+	if (!VCSShadow::IsActive()) {
+		ImGui::TextColored(kUnsetColor, "inactive - VCSDynamicShadows is not set for this disc");
+		return;
+	}
+
+	const VCSShadow::FrameStats &s = VCSShadow::LastFrameStats();
+
+	ImGui::TextDisabled("Milestone 1: classification only. Nothing is rendered yet.");
+	ImGui::Separator();
+
+	// The sun, taken from the GE rather than from PSP memory. If this never goes valid while the
+	// city is on screen then the game is not lighting the world through the hardware, and the
+	// shadow projection needs another source - most likely the game clock, which would mean an
+	// address hunt and a hand-built solar model instead of a value the game already computes.
+	if (s.sunValid) {
+		ImGui::TextColored(kGoodColor, "sun: directional light %d", s.sunChannel);
+		ImGui::Text("   towards light: %7.3f %7.3f %7.3f", s.sunDir[0], s.sunDir[1], s.sunDir[2]);
+		ImGui::Text("   diffuse:       %7.3f %7.3f %7.3f", s.sunDiffuse[0], s.sunDiffuse[1], s.sunDiffuse[2]);
+	} else {
+		ImGui::TextColored(kBadColor, "sun: no enabled directional light this frame");
+	}
+	ImGui::Text("draws lit by hardware: %d, of those with a directional light: %d",
+		s.lightingDraws, s.dirLightDraws);
+
+	ImGui::Separator();
+
+	// By construction draws == casters + sum(rejected). If that ever stops adding up, the filter
+	// has grown a path that returns without counting and every number below is suspect.
+	int rejectedTotal = 0;
+	for (int i = 0; i < (int)VCSShadow::Reject::Count; i++) {
+		rejectedTotal += s.rejected[i];
+	}
+	ImGui::Text("draws last frame: %d", s.draws);
+	if (s.casters + rejectedTotal != s.draws) {
+		ImGui::TextColored(kBadColor, "counts do not partition: %d + %d != %d",
+			s.casters, rejectedTotal, s.draws);
+	}
+
+	const float pct = s.draws ? 100.0f / (float)s.draws : 0.0f;
+
+	if (ImGui::BeginTable("vcsshadowcasters", 3,
+			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersH | ImGuiTableFlags_Resizable)) {
+		ImGui::TableSetupColumn("");
+		ImGui::TableSetupColumn("count");
+		ImGui::TableSetupColumn("note");
+		ImGui::TableHeadersRow();
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::TextColored(kGoodColor, "casters");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.casters);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f%% of draws", s.casters * pct);
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::Text("   skinned");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.castersSkinned);
+		ImGui::TableNextColumn(); ImGui::TextDisabled("peds and the player");
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::Text("   with normals");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.castersWithNormals);
+		ImGui::TableNextColumn(); ImGui::TextDisabled("can use normal-offset bias");
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::Text("   vertices");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.casterVerts);
+		ImGui::TableNextColumn(); ImGui::TextDisabled("per shadow cascade, per frame");
+
+		for (int i = 1; i < (int)VCSShadow::Reject::Count; i++) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::Text("rejected: %s", VCSShadow::RejectName((VCSShadow::Reject)i));
+			ImGui::TableNextColumn(); ImGui::Text("%d", s.rejected[i]);
+			ImGui::TableNextColumn(); ImGui::Text("%.1f%%", s.rejected[i] * pct);
+		}
+
+		ImGui::EndTable();
+	}
+
+	// The blend breakdown. If the big bucket turns out to be a blend that cannot change the
+	// destination - or one whose source was fully opaque every time - then those draws are the
+	// world, the filter is throwing away the entire scene, and the blend test is the thing to
+	// fix rather than anything downstream.
+	if (s.rejected[(int)VCSShadow::Reject::Blended] > 0) {
+		ImGui::Separator();
+		ImGui::Text("blended rejects by blend setup (all of these write depth):");
+		if (ImGui::BeginTable("vcsshadowblends", 4,
+				ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersH | ImGuiTableFlags_Resizable)) {
+			ImGui::TableSetupColumn("src");
+			ImGui::TableSetupColumn("dst");
+			ImGui::TableSetupColumn("eq");
+			ImGui::TableSetupColumn("draws (opaque verts)");
+			ImGui::TableHeadersRow();
+			for (int i = 0; i < s.blendBucketCount; i++) {
+				const VCSShadow::BlendBucket &b = s.blendBuckets[i];
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::Text("%s", VCSShadow::BlendSrcName(b.funcA));
+				ImGui::TableNextColumn(); ImGui::Text("%s", VCSShadow::BlendDstName(b.funcB));
+				ImGui::TableNextColumn(); ImGui::Text("%s", VCSShadow::BlendEqName(b.eq));
+				ImGui::TableNextColumn(); ImGui::Text("%d  (%d)", b.count, b.fullAlpha);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TextColored(kGoodColor, "casters if the blend test were dropped: %d", s.castersIfBlendIgnored);
+	}
+
+	// What to actually do with this tab. The counts are only worth anything as a response to
+	// something you did in the game.
+	ImGui::TextDisabled("Walk around, get in a car, then open a menu. Casters should track the geometry\non screen, skinned casters should follow the pedestrians, and the 2D count\nshould jump the moment the menu opens.");
+}
+
 void ImVCSWindow::Draw(ImConfig &cfg) {
 	ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("VCS", &cfg.vcsOpen)) {
@@ -1528,6 +1641,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Draw distance")) {
 			DrawDrawDistance();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Shadows")) {
+			DrawShadows();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();

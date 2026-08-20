@@ -125,6 +125,7 @@ struct CompatFlags {
 	bool TextureCLUTInShader;
 	bool DisableRangeCulling;
 	bool VCSInputOverhaul;
+	bool VCSDynamicShadows;
 };
 
 struct VRCompat {
