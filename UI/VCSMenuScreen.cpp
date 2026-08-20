@@ -149,8 +149,13 @@ struct VCSMenuArt {
 		return tex;
 	}
 
-	// Page titles are art, not text - see Tools/vcsmenuart.py for why.
-	Draw::Texture *Title(UIContext &dc, const char *key) {
+	// Anything in assets/vcs, loaded once and kept until the device goes.
+	//
+	// A miss is cached as nullptr on purpose: without that, a missing file would be re-read from
+	// the VFS on every single frame. Which is also why there is no separate "did we try" flag -
+	// the map entry IS the flag, and Release() clearing the map clears both together. An earlier
+	// version of this screen kept them apart and the backdrop appeared exactly once per run.
+	Draw::Texture *Image(UIContext &dc, const char *path, const char *key) {
 		// Between deviceLost and deviceRestored there is no device to make a texture on, and
 		// this function's whole job is to make one whenever the map does not have it. Release()
 		// empties that map, so without this the first draw after a device loss would go
@@ -162,24 +167,59 @@ struct VCSMenuArt {
 		if (iter != titles.end()) {
 			return iter->second;
 		}
-		char path[128];
-		snprintf(path, sizeof(path), "vcs/title_%s.png", key);
 		Draw::Texture *tex = Load(dc, path);
 		titles[key] = tex;
 		return tex;
+	}
+
+	// Page titles are art, not text - see Tools/vcsmenuart.py for why.
+	Draw::Texture *Title(UIContext &dc, const char *key) {
+		char path[128];
+		snprintf(path, sizeof(path), "vcs/title_%s.png", key);
+		return Image(dc, path, key);
+	}
+
+	Draw::Texture *Background(UIContext &dc) {
+		return Image(dc, "vcs/background.png", "#background");
 	}
 
 	std::map<std::string, Draw::Texture *> titles;
 	bool deviceLost = false;
 };
 
-static void DrawTexture(UIContext &dc, Draw::Texture *tex, const Bounds &bounds, uint32_t color) {
+static void DrawTexture(UIContext &dc, Draw::Texture *tex, const Bounds &bounds, uint32_t color,
+                        float u0 = 0.0f, float v0 = 0.0f, float u1 = 1.0f, float v1 = 1.0f) {
 	dc.Flush();
 	dc.Begin();
 	dc.GetDrawContext()->BindTexture(0, tex);
-	dc.Draw()->DrawTexRect(bounds, 0.0f, 0.0f, 1.0f, 1.0f, color);
+	dc.Draw()->DrawTexRect(bounds, u0, v0, u1, v1, color);
 	dc.Flush();
 	dc.RebindTexture();
+}
+
+// Fill `bounds` with the image, keeping its proportions and cropping the overflow - what CSS calls
+// "cover". Stretching instead would be one line shorter and would distort the art on any window
+// that is not the image's own aspect, which on a resizable desktop window is most of them.
+static void DrawCover(UIContext &dc, Draw::Texture *tex, const Bounds &bounds) {
+	const float texW = (float)tex->Width();
+	const float texH = (float)tex->Height();
+	if (texW <= 0.0f || texH <= 0.0f || bounds.h <= 0.0f) {
+		return;
+	}
+	const float want = bounds.w / bounds.h;
+	const float have = texW / texH;
+	float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+	if (have > want) {
+		// Image is wider than the window: keep a centred slice of its width.
+		const float span = want / have;
+		u0 = (1.0f - span) * 0.5f;
+		u1 = u0 + span;
+	} else {
+		const float span = have / want;
+		v0 = (1.0f - span) * 0.5f;
+		v1 = v0 + span;
+	}
+	DrawTexture(dc, tex, bounds, 0xFFFFFFFF, u0, v0, u1, v1);
 }
 
 // A value shown as a row of blocks rather than a number, which is how this front end renders
@@ -775,7 +815,14 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 
 	// Opaque, not a dim over the game. GTA's front end covers the screen, and the paused world
 	// showing through would fight the text.
+	//
+	// The flat fill goes down first and stays: it is what shows if assets/vcs is not deployed, and
+	// it is the artwork's own base colour, so a missing file reads as a plain backdrop rather than
+	// as a broken menu. Missing art is never fatal here - same rule the page titles follow.
 	dc.FillRect(UI::Drawable(kBackgroundColor), bounds);
+	if (Draw::Texture *backdrop = art_->Background(dc)) {
+		DrawCover(dc, backdrop, bounds);
+	}
 
 	// Page title, top left, in the brush script the game sets its headings in.
 	Draw::Texture *title = art_->Title(dc, PageTitle(page_));
