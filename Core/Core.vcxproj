@@ -612,6 +612,7 @@
     <ClCompile Include="VCS\VCSInput.cpp" />
     <ClCompile Include="VCS\VCSMemory.cpp" />
     <ClCompile Include="VCS\VCSState.cpp" />
+    <ClCompile Include="VCS\VCSDrawDistance.cpp" />
     <ClCompile Include="VCS\VCSVault.cpp" />
     <ClCompile Include="VCS\VCSWorld.cpp" />
     <ClCompile Include="VCS\VCSSettings.cpp" />
@@ -1124,6 +1125,7 @@
     <ClInclude Include="VCS\VCSInput.h" />
     <ClInclude Include="VCS\VCSMemory.h" />
     <ClInclude Include="VCS\VCSState.h" />
+    <ClInclude Include="VCS\VCSDrawDistance.h" />
     <ClInclude Include="VCS\VCSVault.h" />
     <ClInclude Include="VCS\VCSWorld.h" />
     <ClInclude Include="VCS\VCSSettings.h" />

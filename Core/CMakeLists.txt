@@ -443,6 +443,8 @@ add_library(Core STATIC
 	VCS/VCSSettings.h
 	VCS/VCSState.cpp
 	VCS/VCSState.h
+	VCS/VCSDrawDistance.cpp
+	VCS/VCSDrawDistance.h
 	VCS/VCSVault.cpp
 	VCS/VCSVault.h
 	VCS/VCSWorld.cpp

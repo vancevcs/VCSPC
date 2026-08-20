@@ -25,6 +25,7 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
+#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSSettings.h"
 
 namespace VCS {
@@ -46,6 +47,7 @@ const std::vector<Option> &Options() {
 	// table would be racing their construction.
 	static const std::vector<Option> options = [] {
 		VCSCameraSettings &cam = CameraSettings();
+		VCSDrawDistanceSettings &dd = DrawDistanceSettings();
 
 		std::vector<Option> opts;
 
@@ -193,6 +195,21 @@ const std::vector<Option> &Options() {
 			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
 			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
+
+		// Draw distance. Ported from PSPRecomp's VCS profile - see Core/VCS/VCSDrawDistance.cpp
+		// for what each multiplier actually reaches.
+		addBool(OptionPage::Graphics, "DrawDistance", "Extended draw distance",
+			"Pushes the far clip and the streaming ranges past what the PSP was asked to draw.",
+			&dd.enabled);
+		addFloat(OptionPage::Graphics, "DrawDistanceWorld", "World distance",
+			"Buildings, props and the far clip. Costs streaming and fill rate.",
+			&dd.world, 1.0f, 8.0f, "%.2fx");
+		addFloat(OptionPage::Graphics, "DrawDistanceVehicles", "Vehicle distance",
+			"How far off-screen traffic survives. Above 2x, missions that count on the original range can misbehave.",
+			&dd.vehicles, 1.0f, 4.0f, "%.2fx");
+		addFloat(OptionPage::Graphics, "DrawDistanceNPCs", "Pedestrian distance",
+			"Ped population ranges. Costs emulated CPU per pedestrian, so it bites the frame rate before it looks better.",
+			&dd.npcs, 1.0f, 4.0f, "%.2fx");
 
 		return opts;
 	}();

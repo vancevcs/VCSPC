@@ -125,6 +125,70 @@ inline constexpr u32 kVCSPedClimbStageOffset = 0x1D9;   // 0, then 1..4 through 
 // could refuse to climb a moving vehicle.
 inline constexpr u32 kVCSProcessVerticalLine = 0x08891DD4;
 
+// --- Draw distance ------------------------------------------------------------------------------
+//
+// Everything below was published by PSPRecomp's VCS profile (vcs_draw_distance_patch.cpp) against
+// this same disc, and every one of them was then disassembled out of a savestate here before being
+// written down - see Core/VCS/VCSDrawDistance.cpp for what each site actually contains. Taking the
+// addresses on trust and the instructions on evidence is the only reason this went in quickly.
+//
+//     float CDraw::SetFarClipZ(float)      0x08a1ad6c
+//
+// A two-instruction leaf: `jr $ra` with `swc1 $f12, 0x1e74($gp)` in the delay slot. The game picks
+// its own far clip every frame and funnels it through here, which is why this is replaced rather
+// than the global being written directly - scaling the setter keeps the game's own selection.
+inline constexpr u32 kVCSSetFarClipZ = 0x08A1AD6C;
+
+// The SECOND instruction, and the one the install checks. Never the first: this is a function
+// ENTRY, so it is where a JIT block starts, and the live word there is a 0x68xxxxxx marker once
+// the game has called it - the same trap kVCSFindGroundZOp2 exists to avoid.
+inline constexpr u32 kVCSSetFarClipZOp2 = 0xE78C1E74;
+
+// `swc1 $f12, 0x7a0($s0)` in the entity LOD setup at 0x08a24128. The four instructions there read
+// the entity's base LOD distance from +0x7a8 and store it to +0x7a0; hooking the STORE lets the
+// value be scaled on its way past, without touching the base it came from.
+inline constexpr u32 kVCSEntityLodStore = 0x08A2412C;
+inline constexpr u32 kVCSEntityLodStoreOp = 0xE60C07A0;
+
+// Range constants, each built by a `lui` of the float's top half - so each is one 16-bit immediate
+// to rewrite, and no code has to be replaced at all. Verified against the words below before any
+// of them is touched.
+//
+//   0x08b45ac0  lui $a0, 0x4270   60.0f  vehicle off-screen despawn range
+//   0x089cb3a0  lui $a0, 0x424c   51.0f  ped population range
+//   0x089cb3a8  lui $a0, 0x41c8   25.0f    "
+//   0x089cb3b0  lui $a0, 0x42a0   80.0f    "
+//
+// The 120.0f at 0x089cb398 is deliberately left alone, exactly as the patch this came from leaves
+// it: it is the outer bound the other three are compared against, not a range of its own.
+inline constexpr u32 kVCSVehicleRangeConst = 0x08B45AC0;
+inline constexpr u32 kVCSVehicleRangeConstOp = 0x3C044270;
+inline constexpr u32 kVCSPedRangeConstA = 0x089CB3A0;
+inline constexpr u32 kVCSPedRangeConstAOp = 0x3C04424C;
+inline constexpr u32 kVCSPedRangeConstB = 0x089CB3A8;
+inline constexpr u32 kVCSPedRangeConstBOp = 0x3C0441C8;
+inline constexpr u32 kVCSPedRangeConstC = 0x089CB3B0;
+inline constexpr u32 kVCSPedRangeConstCOp = 0x3C0442A0;
+
+// $gp-relative globals. These are OFFSETS, not addresses: $gp is captured from the far-clip
+// replacement, which by construction runs on the game's own thread with the right value in r28.
+inline constexpr u32 kVCSGpFarClipZ = 0x1E74;    // CDraw::ms_fFarClipZ
+inline constexpr u32 kVCSGpModelTable = 24;      // IDE/model-info pointer table
+inline constexpr u32 kVCSGpModelCount = 7656;    // how many slots that table has
+
+// CBaseModelInfo-like layout, as reached through the table above.
+inline constexpr u32 kVCSModelHashOffset = 0x08;
+inline constexpr u32 kVCSModelTypeOffset = 0x10;
+inline constexpr u32 kVCSModelDrawDist1 = 0x2C;
+inline constexpr u32 kVCSModelDrawDist2 = 0x30;
+inline constexpr u32 kVCSModelDrawDist3 = 0x34;
+inline constexpr u8 kVCSModelTypeObject = 1;      // OBJ
+inline constexpr u8 kVCSModelTypeTimedObject = 3; // TOBJ
+
+// Entity LOD fields, used by the store hooked at kVCSEntityLodStore.
+inline constexpr u32 kVCSEntityLodDistance = 0x7A0;
+inline constexpr u32 kVCSEntityBaseLodDistance = 0x7A8;
+
 // CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70.
 inline constexpr u32 kVCSCam0 = 0x08BC7EA0;
 

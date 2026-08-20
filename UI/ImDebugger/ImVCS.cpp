@@ -35,6 +35,7 @@
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSState.h"
 #include "Core/VCS/VCSVault.h"
+#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSWorld.h"
 
 static const ImVec4 kUnsetColor = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
@@ -1444,6 +1445,52 @@ void ImVCSWindow::DrawVault() {
 	}
 }
 
+void ImVCSWindow::DrawDrawDistance() {
+	VCS::VCSDrawDistanceSettings &s = VCS::DrawDistanceSettings();
+
+	ImGui::Text("patches: %s (%s)", VCS::DrawDistanceInstalled() ? "installed" : "NOT installed",
+		VCS::DrawDistanceStatus());
+
+	u32 models = 0, gp = 0;
+	float farIn = 0.0f, farOut = 0.0f;
+	VCS::DrawDistanceStats(&models, &farIn, &farOut, &gp);
+
+	// The three numbers that tell apart the ways this fails. A zero gp means the far-clip
+	// replacement has never run, so nothing downstream can have; a live gp with zero models means
+	// the replacement runs but the model table walk is being rejected; and a far clip that comes
+	// out equal to what went in means the multiplier is 1.0 whatever the slider says.
+	if (gp) {
+		ImGui::Text("gp: %08x", gp);
+	} else {
+		ImGui::Text("gp: not captured yet");
+	}
+	ImGui::Text("far clip: %.1f -> %.1f", farIn, farOut);
+	ImGui::Text("model-info entries scaled: %u", models);
+	if (VCS::DrawDistanceInstalled() && gp != 0 && models == 0 && s.world > 1.0f) {
+		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+			"table walk has not taken - still loading, or the gp offsets are wrong for this build");
+	}
+
+	ImGui::Separator();
+	ImGui::Checkbox("Enabled", &s.enabled);
+	ImGui::SliderFloat("World", &s.world, 1.0f, 8.0f, "%.2fx");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Scales CDraw::SetFarClipZ and every OBJ/TOBJ model-info draw distance. This is the one that actually makes the city visible further away, and the one that costs streaming.");
+	}
+	ImGui::SliderFloat("Vehicles", &s.vehicles, 1.0f, 4.0f, "%.2fx");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("The 60.0f off-screen despawn range, and half of the entity LOD multiplier. Past 2x, missions written against the original range can misbehave.");
+	}
+	ImGui::SliderFloat("NPCs", &s.npcs, 1.0f, 4.0f, "%.2fx");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("The 51/25/80 ped population ranges, and the other half of the entity LOD multiplier. Costs emulated CPU per pedestrian - this is the slider most likely to cost frame rate.");
+	}
+
+	// Changing any of these takes everything out and puts it back on the next tick; there is no
+	// apply button because there is no state to apply, only settings to notice.
+	ImGui::TextDisabled("Changes re-apply on the next frame.");
+}
+
 void ImVCSWindow::Draw(ImConfig &cfg) {
 	ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("VCS", &cfg.vcsOpen)) {
@@ -1477,6 +1524,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Vault")) {
 			DrawVault();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Draw distance")) {
+			DrawDrawDistance();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
