@@ -192,6 +192,14 @@ bool WriteAddrFloat(VCSAddr id, float value) {
 	return addr ? WriteFloat(*addr, value) : false;
 }
 
+bool WriteU32(u32 address, u32 value) {
+	if (!MemoryReady() || !Memory::IsValid4AlignedRange(address, sizeof(u32))) {
+		return false;
+	}
+	Memory::WriteUnchecked_U32(value, address);
+	return true;
+}
+
 bool WriteU16(u32 address, u16 value) {
 	// Only 2-byte alignment is required here, so IsValid4AlignedRange would wrongly reject the
 	// odd-numbered pad fields. IsValidRange is the right check for a halfword.

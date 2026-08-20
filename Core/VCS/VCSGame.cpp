@@ -27,6 +27,8 @@
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSSettings.h"
 #include "Core/VCS/VCSState.h"
+#include "Core/VCS/VCSVault.h"
+#include "Core/VCS/VCSWorld.h"
 
 namespace VCS {
 
@@ -137,6 +139,8 @@ void Shutdown() {
 	CameraReset();
 	// Put the game's own instruction back before anything else tears down.
 	RemoveFireHook();
+	VaultReset();
+	RemoveWorldQuery();
 
 	g_active = false;
 	g_discID.clear();
@@ -159,9 +163,31 @@ void Tick() {
 	// so retrying every tick until the code exists costs a single compare.
 	InstallFireHook();
 
+	// The world query, installed on the same terms and for the same reason - it writes a small
+	// program into PSP memory, which cannot happen before there is a game to write it next to.
+	//
+	// Gated on vaulting being ON, unlike the fire hook, because unlike the fire hook it TAKES
+	// something: 512 bytes out of the game's own user memory partition. That is almost certainly
+	// harmless - the game sizes its pools from a fixed budget rather than from what is left - but
+	// "almost certainly harmless" is not a reason to do it to someone who has not asked for the
+	// feature. Nothing gives the block back until shutdown; a call could still be in flight.
+	if (VaultSettings().enabled) {
+		InstallWorldQuery();
+	}
+
 	// Decode first, then map - the context depends on what we just read.
 	UpdateSharedState();
 	const VCSInputContext context = ResolveContext(GetState());
+
+	// Collect any answer the game left us, then let vaulting ask its next question and drive
+	// whatever climb is running.
+	//
+	// BEFORE ApplyMapping, and that ordering is the whole trigger: a vault starts on the tick the
+	// jump key goes down, and the mapping has to already know that so it can send the game nothing
+	// instead of a jump. Reversed, every vault would begin with a hop.
+	WorldQueryTick();
+	VaultTick(context);
+
 	ApplyMapping(context);
 
 	// These three MUST stay in this order. All of them want this frame's mouse delta and exactly

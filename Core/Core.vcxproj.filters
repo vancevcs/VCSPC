@@ -235,6 +235,8 @@
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
     <ClCompile Include="VCS\VCSCamera.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
     <ClCompile Include="VCS\VCSFireHook.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -251,6 +253,12 @@
       <Filter>VCS</Filter>
     </ClCompile>
     <ClCompile Include="VCS\VCSSettings.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSVault.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSWorld.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
     <ClCompile Include="HLE\sceDisplay.cpp">
@@ -1547,6 +1555,8 @@
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSCamera.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
     <ClInclude Include="VCS\VCSFireHook.h">
       <Filter>VCS</Filter>
     </ClInclude>
@@ -1566,6 +1576,12 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSSettings.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSVault.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSWorld.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="HLE\sceDisplay.h">

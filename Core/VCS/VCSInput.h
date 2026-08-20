@@ -79,6 +79,12 @@ const char *VCSInputContextName(VCSInputContext context);
 // context while it is held.
 extern const InputKeyCode kVCSAimKey;
 
+// The host key that means "jump", named for the same reason: the mapping row that presses the
+// PSP's jump button and VCSVault's trigger have to agree on it. A vault happens INSTEAD of a jump
+// when there is a ledge in front of the player, so the day these two disagree is the day the game
+// gets a jump and a climb at once.
+extern const InputKeyCode kVCSJumpKey;
+
 // Which page of the read-only controls listing a row appears on, if any.
 //
 // Deliberately not the same thing as VCSInputContext, and the Aiming context is why: its rows
@@ -282,7 +288,8 @@ u32 GetForcedButtons();
 VCSInputContext GetCurrentContext();
 
 // Whether the lock-on toggle is on. While it is, aiming stays in the game's lock-on: no Free Aim
-// press, and the mouse does not take the analog stick - so WASD moves and the mouse looks around.
+// press, the mouse does not take the analog stick, and it does not turn the camera either - so
+// WASD moves, the game frames the target, and the mouse does nothing until aim is released.
 // Exists for melee, whose lock-on does not register in IsAiming.
 bool LockOnModeActive();
 

@@ -35,6 +35,7 @@
 #include "Core/MIPS/MIPS.h"
 #include "Core/Replay.h"
 #include "Core/Util/AudioFormat.h"  // for clamp_u8
+#include "Core/VCS/VCSWorld.h"
 
 /* Index for the two analog directions */
 #define CTRL_ANALOG_X   0
@@ -497,6 +498,11 @@ static int sceCtrlGetIdleCancelThreshold(u32 idleResetPtr, u32 idleBackPtr)
 
 static int sceCtrlReadBufferPositive(u32 ctrlDataPtr, u32 nBufs)
 {
+	// VCS only: note which thread reads the pad. A game reads its pad once per frame from its main
+	// loop, so this identifies that thread - and VCS::WorldQueryDispatch refuses to run game code
+	// on any other. No-op for every other game.
+	VCS::WorldQueryNoteMainThread();
+
 	int done = __CtrlReadBuffer(ctrlDataPtr, nBufs, false, false);
 	hleEatCycles(330);
 	if (done != 0) {

@@ -780,7 +780,20 @@ static bool ContextWantsMouse(VCSInputContext context) {
 // PluginAimActive is the other way the mouse gets spoken for: with the CLEO plugin driving aim
 // from the right stick, the plugin owns the view while aim is held, so writing camera angles
 // underneath it would fight whatever it does.
+//
+// The lock-on TOGGLE is the exception to the paragraph above, and the last piece of that mode.
+// Ordinary lock-on is something the player passes through on the way to free aim, so the camera
+// keeping its mouse look there is right. The toggle is the opposite: it says "leave this to the
+// game", and while it is on the game is steering the camera around the target it picked - so a
+// written yaw fights the follow logic every frame and the view judders between the two. Both
+// axes go, not just yaw: pitch is equally the game's while it frames a target.
+//
+// The delta is still CLAIMED here - see ContextWantsMouse - and CameraTick drains it whether it
+// drives anything or not, so nothing accumulates and dumps into the camera on the way out.
 static bool ContextDrivesCamera(VCSInputContext context) {
+	if (context == VCSInputContext::Aiming && LockOnModeActive()) {
+		return false;
+	}
 	return ContextWantsMouse(context) && !ReticleActive(context) && !PluginAimActive(context) &&
 	       !PadStickActive(context);
 }

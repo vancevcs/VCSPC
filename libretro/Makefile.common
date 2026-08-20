@@ -777,6 +777,8 @@ SOURCES_CXX += \
 	       $(COREDIR)/VCS/VCSInput.cpp \
 	       $(COREDIR)/VCS/VCSMemory.cpp \
 	       $(COREDIR)/VCS/VCSState.cpp \
+	       $(COREDIR)/VCS/VCSVault.cpp \
+	       $(COREDIR)/VCS/VCSWorld.cpp \
 	       $(COREDIR)/VCS/VCSSettings.cpp \
 	       $(COREDIR)/HLE/sceDeflt.cpp \
 	       $(COREDIR)/HLE/sceDisplay.cpp \

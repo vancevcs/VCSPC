@@ -101,4 +101,8 @@ bool WriteAddrU16(VCSAddr id, u16 value);
 bool WriteU8(u32 address, u8 value);
 bool WriteAddrU8(VCSAddr id, u8 value);
 
+// Word writes. Added for the world-query block in VCSWorld, which has to place a small program
+// and its arguments in PSP memory - the one thing this fork writes that is not a game variable.
+bool WriteU32(u32 address, u32 value);
+
 }  // namespace VCS

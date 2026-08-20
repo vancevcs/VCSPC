@@ -298,8 +298,8 @@ struct VCSCameraSettings {
 	// lock-on is the special case here, the reverse of how the PSP scheme is arranged.
 	//
 	// Implemented by pulsing d-pad DOWN shortly after entering the Aiming context, which is the
-	// game's own Free Aim button. Holding the lock-on key (CapsLock) suppresses the pulse and
-	// leaves ordinary lock-on.
+	// game's own Free Aim button. The lock-on key (L) toggles the pulse off and leaves ordinary
+	// lock-on, with the mouse standing down from the camera as well - see ContextDrivesCamera.
 	bool autoFreeAim = true;
 
 	// Ticks to wait after the aim trigger before pressing Free Aim.

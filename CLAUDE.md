@@ -47,6 +47,9 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
   VCSState.h/cpp    per-frame decoded game state
   VCSInput.h/cpp    input context enum, (context, host key) -> PSP button table, WASD analog
   VCSCamera.h/cpp   mouse look; writes CameraYaw/CameraPitch directly, not via sceCtrl
+  VCSFireHook.h/cpp free aim resolved at the fire site, by rewriting the raycast's target
+  VCSWorld.h/cpp    calls the game's own collision code, via a program written into PSP memory
+  VCSVault.h/cpp    ledge detection and the pull-up, built on that query
   VCSGame.h/cpp     lifecycle + per-frame tick; the only entry point the rest of PPSSPP sees
   VCSSettings.h/cpp the player-facing option table, and the only thing that persists any of it
 
@@ -414,6 +417,14 @@ written again. The buttonless check is what keeps it from firing mid-drag on a v
   `vkQueuePresentKHR failed! result=VK_ERROR_DEVICE_LOST` from `VulkanRenderManager::Run`. It did
   not reproduce on the next attempt, it is a different failure from the VMA one above, and one
   occurrence is not enough to act on. Note it if it recurs; do not assume the fix above covers it.
+
+  **Second sighting, 2026-08-19**, and this one was NOT at a menu: the process died mid-session
+  during the vaulting work, a few minutes after an experiment that dropped the player through the
+  world (writing the ped's climb state on land - see the vaulting section). Whether the fall is
+  related is unknown; a ped below the map does put the camera somewhere the renderer never expects.
+  Two occurrences, two different contexts, still not enough to act on - but if a third arrives,
+  the common factor to look at first is the camera being somewhere absurd rather than anything
+  about menus.
 
 - **A "did we try yet" flag has to be cleared with the thing it guards.** `backgroundTried` was
   set on the first load attempt and never reset by `Release()`, so the backdrop appeared once per
@@ -1766,6 +1777,15 @@ the input may have been going out all along.
 fight; reach for it only when the weapon read is wrong, or a gun should be aimed under lock-on on
 purpose.
 
+**Lock-on mode also stands the mouse down from the camera** (`ContextDrivesCamera`, 2026-08-19).
+It already refused the pulse and refused the analog stick, but yaw and pitch were still written
+from the mouse while it was on — and under lock-on the game is steering the camera around the
+target it picked, so the two fought every frame and the view juddered between them. While the
+toggle is on and aim is held, the mouse now does nothing: WASD moves, the game frames the target.
+Outside the `Aiming` context mouse look is untouched, so the toggle can be left on between fights
+without losing the camera on foot. The delta is still *claimed* and still drained in `CameraTick`
+— dropping the claim would hand it to PPSSPP's mouse-to-analog path, which is strafing here.
+
 **Space was falling through to PPSSPP's `CTRL_START` — the inverse Escape trap, third instance.**
 The `Aiming` context never claimed it, and PPSSPP's default keyboard map binds Space to Start
 (`Start = 1-62` in `memstick/PSP/SYSTEM/controls.ini`), so pressing it with aim held opened the pause
@@ -2025,6 +2045,124 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
   wrong until someone holds them and looks.
 - **PAL / JP builds.** Different builds, different addresses; would need a second table.
 
+### Vaulting — pulling up onto a ledge, and calling game code to find one
+
+**Status: working in play, without an animation.** Off by default (`VaultSettings().enabled`, or
+the Vault tab in the debugger window). Confirmed 2026-08-19 against a head-height wall: the probe
+armed, the jump key vaulted instead of jumping, and the player ended up standing on top.
+
+The motion, recorded from memory at 20Hz as it happened:
+
+```
+20.36s   z 11.121   start (footing 10.068 + the ped origin's 1.040)
+20.70s   z 13.223   rise done, 0.55m forward - the 25% share
+21.03s   z 13.116   stepped on and settled
+21.36s   z 13.116   standing, not falling, not ejected
+```
+
+`13.116` is exactly `ledge 12.076 + origin 1.040`, so the offset cancellation is right to the
+millimetre, and the whole move takes 0.67s. **The game accepts a written position on top of a
+wall** - no collision rejection, no sinking, no snap-back - which was the real unknown in the
+fallback path.
+
+**Measured constants, since they anchor every setting here.** World units are metres: a waist wall
+reads **+0.908** above the player's footing, a head-height wall **+2.008**. The ped origin sits
+**1.040** above the surface it stands on - the number this design deliberately avoids needing, now
+known anyway. The default band (1.10 .. 2.30) therefore excludes the waist wall by design and
+catches the head-height one, which is the scope this was asked for.
+
+The design decisions, in the order they were made:
+
+**It lives in the fork, not in `MAIN.SCM`.** The script VM has no raycast and runs at script
+granularity; everything this needs — per-frame probing, a state machine, memory writes — the fork
+already does.
+
+**The trigger is the jump key, contextually.** Space vaults when a ledge is in front of the player
+and jumps when there isn't, so nothing is taken away and there is no new key. `VaultTick` runs
+*before* `ApplyMapping` for exactly this reason: it consumes the press on the tick it happens, and
+`ApplyMapping` then sends the game nothing at all for the duration. Reversed, every vault would
+begin with a hop.
+
+**Height is measured against the player's own footing, never against the ped's position.** Nobody
+knows where in the character the entity origin sits — GTA peds carry it somewhere around the hips —
+so the first of the five probe lines is fired straight down *through the player*, and every height
+is a difference against what it hits. The unknown offset is in both terms and cancels. This is also
+what makes the landing height work at the far end: the ped is placed at `ledge + (its own height
+above the surface it was standing on)`.
+
+**The probe's start height is the climbing ceiling, for free.** `FindGroundZFor3DCoord` only
+reports surfaces *below* the point you ask from, so a wall taller than `probeCeiling` above the
+footing simply does not register — no check, no arbitrary rejection rule.
+
+**Five lines, once every one or two frames:** one through the player (footing), three at the wall
+(near/mid/far, nearest match wins), one past it (somewhere to stand). The last one is what
+distinguishes a ledge from a fence rail, and refusing a ledge with nothing behind it is the
+difference between climbing onto a roof and being placed inside it.
+
+**How the query works at all** is the genuinely new capability here, and it is written up in
+"Asking the world a question" in [docs/VCS_ADDRESSES.md](docs/VCS_ADDRESSES.md): a ~40 instruction
+MIPS program in a `userMemory` block, run on the game's own thread through `hleEnqueueCall`,
+because the function takes its arguments in `$f12..$f14` and that call path fills `$a0..$a3` only.
+It is asynchronous — ask on one tick, read on the next — which a ledge probe can afford.
+
+**The one hard rule, learned by crashing the game (2026-08-19):** a call may only be enqueued from
+inside a syscall, from one that neither blocks nor reschedules, and **not from an interrupt
+handler**. Enqueuing from `VCS::Tick` — a vblank timing event, not a syscall — planted the call on
+an unrelated thread and produced `Corrupt stack on HLE mips call return: 28fefefe`, a stack-fill
+pattern with a marker half written over it. `RequestGroundZ` now only *prepares* a question;
+`WorldQueryDispatch` sends it.
+
+**The host that works is `sceGeListEnQueue`**, and finding it took three wrong guesses that are
+worth keeping, because each was wrong for a different reason:
+
+| candidate | why not |
+|---|---|
+| `sceKernelGetSystemTimeLow`, `sceKernelLibcClock`, both dcache calls | call `hleReSchedule` |
+| `sceCtrlReadBufferPositive` | blocks waiting for the next pad sample |
+| `sceDisplaySetFrameBuf`, `sceDisplayIsVblank`, `sceKernelPowerTick` | **VCS calls them from inside its vblank interrupt handler** |
+
+That last row is the interesting one and it was measured, not guessed: with a refusal reason
+written into the block, the count climbed with `refusedWhy = "intr"` and `refusedThread = 0x110`,
+which is `idle0` — i.e. an interrupt borrowing whatever context was current. VCS imports
+`sceKernelRegisterSubIntrHandler`, and the thread list has no render thread, so the flip had to be
+happening somewhere other than `threadmain` (`0x116`, identified by the pad read). **An interrupt
+is not a thread**, and a call planted on one lands on a stack the game never used — which is very
+likely what the original crash actually was, rather than merely "not a syscall".
+
+The display-list submit is the right host for the same reason the flip looked like one: every game
+does it once a frame from its own main loop. It just does it from the loop rather than from the
+interrupt.
+
+#### The animation: the game climbs it, and this only asks
+
+**Confirmed in play, 2026-08-19: the player pulls up with the game's own animation.** Two of the
+game's functions do all of it - `CanClimb(ped, &result)` searches for something to climb and
+`StartClimb(ped, &result)` plays the pull-up and moves the ped - and `VCSWorld` runs both in one
+dispatch when the jump key fires. See "The climb-out is two calls" in
+[docs/VCS_ADDRESSES.md](docs/VCS_ADDRESSES.md) for how they were found and what the struct holds.
+
+So there are two motions now, and the fallback is not dead code: the game's own search can decline
+a wall this fork's probe was happy with, and the written-position curve is what runs when it does.
+The Vault tab counts them separately for exactly that reason - a native count stuck at zero while
+attempts climb means the game is refusing every ledge, which is a different problem from the vault
+not triggering.
+
+**Four things were tried before the two calls, and each one looked like the answer.** They are
+written up in the addresses doc rather than repeated here, but the shape is worth carrying:
+
+- the climb **stage** byte (`CPed+0x1d9`, 0 then 1..4) is a *status*, not an input - writing it on
+  land sticks and does nothing;
+- the climb **state** (`CPed+0x8b4 = 44`) engages the game's climb and then aborts within a second,
+  because nothing told it *what* to climb;
+- the **in-water flag** cannot be forced - the game recomputes it from the world every frame, and
+  the attempt left the ped under the collision and dropped him through the map;
+- `0x0892f140` is the **script command's** anim API, not the engine's - measured, zero calls during
+  ordinary play.
+
+The through-line: **a state is not an entry point.** Three of those four were real fields with the
+right values in them, and setting a field the game writes is not the same as doing the thing the
+game does when it writes it. The entry point was a function all along, and the way to a function
+nobody can name is to break on the field and read the stack.
 ## Working on this
 
 Build and test exactly as upstream describes. To exercise the VCS layer you need the game

@@ -31,6 +31,7 @@
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
+#include "Core/VCS/VCSVault.h"
 
 namespace VCS {
 
@@ -94,6 +95,10 @@ const InputKeyCode kVCSAimKey = NKCODE_EXT_MOUSEBUTTON_2;
 // fists need no flipping before a fight - reach for this only when the weapon read is wrong or a
 // gun should be aimed under lock-on deliberately.
 const InputKeyCode kVCSLockOnKey = NKCODE_L;
+
+// Jump, and - when a ledge is in front of the player - vault. See VCSVault: the vault consumes
+// the press, so the game never sees a jump on the tick a climb starts.
+const InputKeyCode kVCSJumpKey = NKCODE_SPACE;
 
 // Set on the input thread by the key above, read on the emu thread by FreeAimActive.
 static std::atomic<bool> g_lockOnMode{false};
@@ -175,7 +180,7 @@ const char *VCSInputContextName(VCSInputContext context) {
 // VIRTKEY_ - check KeyMapDefaults.cpp before adding one.
 const VCSKeyMapping kVCSKeyMappings[] = {
 	// --- On foot ---
-	{ VCSInputContext::OnFoot,    NKCODE_SPACE,              CTRL_SQUARE,    "Jump", "Jump", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,    NKCODE_SPACE,              CTRL_SQUARE,    "Jump (vaults a ledge when there is one)", "Jump", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,    NKCODE_SHIFT_LEFT,         CTRL_CROSS,     "Sprint", "Sprint", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Attack / fire", "Fire", VCSKeyList::OnFoot },
 	// Menu keys, living in the OnFoot context on purpose.
@@ -828,6 +833,21 @@ u32 ApplyMapping(VCSInputContext context) {
 		return 0;
 	}
 
+	// A vault owns the character for its whole duration, so the game is sent nothing at all.
+	//
+	// Not just the jump that started it: the motion is a written position, and every button that
+	// could move the player - sprint, jump, enter vehicle - is the game trying to move someone who
+	// is already being moved. Releasing what we held rather than freezing it is the same discipline
+	// the Unknown branch above follows.
+	if (VaultInProgress()) {
+		if (g_lastAppliedMask != 0) {
+			__CtrlUpdateButtons(0, g_lastAppliedMask);
+			g_lastAppliedMask = 0;
+		}
+		g_prevAppliedContext = context;
+		return 0;
+	}
+
 	// Arm the auto-free-aim pulse on the edge into Aiming - not while in it, or it would retrigger
 	// every frame and hold d-pad down forever.
 	if (context == VCSInputContext::Aiming && g_prevAppliedContext != VCSInputContext::Aiming) {
@@ -906,6 +926,19 @@ u32 GlanceButtonMask(VCSInputContext context) {
 void ApplyAnalog(VCSInputContext context) {
 	float x = 0.0f;
 	float y = 0.0f;
+
+	// The stick goes with the buttons during a vault - see ApplyMapping. A held W would otherwise
+	// walk the player forward through the wall he is being lifted over.
+	if (VaultInProgress()) {
+		if (g_analogHeld) {
+			__CtrlSetAnalogXY(CTRL_STICK_LEFT, 0.0f, 0.0f);
+			g_analogHeld = false;
+			g_analogX = 0.0f;
+			g_analogY = 0.0f;
+		}
+		g_analogIsReticle = false;
+		return;
+	}
 
 	// A glance takes the stick over completely: on the PSP you steer with the stick, and while
 	// L is held that same stick chooses the look direction instead. Reproducing that ordering is

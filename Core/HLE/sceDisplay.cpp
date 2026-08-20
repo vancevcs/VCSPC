@@ -56,6 +56,8 @@
 #include "Core/RetroAchievements.h"
 #include "Core/ControlMapper.h"
 #include "Core/VCS/VCSGame.h"
+#include "Core/VCS/VCSWorld.h"
+#include "Core/VCS/VCSWorld.h"
 
 #include "GPU/GPU.h"
 #include "GPU/GPUState.h"
@@ -799,6 +801,7 @@ void hleLagSync(u64 userdata, int cyclesLate) {
 }
 
 static u32 sceDisplayIsVblank() {
+	VCS::WorldQueryDispatch("vblk");
 	return hleLogDebug(Log::sceDisplay, DisplayIsVblank());
 }
 
@@ -934,11 +937,19 @@ int sceDisplaySetFramebuf(u32 topaddr, int linesize, int pixelformat, int sync) 
 
 	// No delaying while inside an interrupt.  It'll cause idle threads to starve.
 	if (delayCycles > 0 && !__IsInInterrupt()) {
+		// Deliberately no VCS dispatch on this branch: hleDelayResult reschedules the thread, and a
+		// queued MIPS call set up immediately before a context switch is the failure recorded in
+		// WorldQueryDispatch. VCS is not in the ForceMax60FPS list, so this branch is dead for it
+		// anyway - which is exactly why the flip is a safe host for that game and not in general.
 		// Okay, the game is going at too high a frame rate.  God of War and Fat Princess both do this.
 		// Simply eating the cycles works and is fast, but breaks other games (like Jeanne d'Arc.)
 		// So, instead, we delay this HLE thread only (a small deviation from correct behavior.)
 		return hleDelayResult(hleLogDebug(Log::sceDisplay, 0, "delaying frame thread"), "set framebuf", cyclesToUs(delayCycles));
 	} else {
+		// The frame flip: every game calls it once a frame, and on this branch it neither blocks
+		// nor reschedules. The primary host for the VCS world query - the other three fire only
+		// when the game happens to ask about vblanks or power.
+		VCS::WorldQueryDispatch("flip");
 		if (topaddr == 0) {
 			return hleLogDebug(Log::sceDisplay, 0, "disabling display");
 		} else {
@@ -1041,6 +1052,7 @@ static int sceDisplayGetVcount() {
 }
 
 static int sceDisplayGetCurrentHcount() {
+	VCS::WorldQueryDispatch("hcnt");
 	hleEatCycles(275);
 	return hleLogDebug(Log::sceDisplay, __DisplayGetCurrentHcount());
 }

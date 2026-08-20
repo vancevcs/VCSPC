@@ -38,6 +38,7 @@
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HLE/KernelWaitHelpers.h"
+#include "Core/VCS/VCSWorld.h"
 #include "GPU/GPUState.h"
 #include "GPU/GPUCommon.h"
 
@@ -353,6 +354,9 @@ static int __GeSubIntrBase(int callbackId) {
 }
 
 u32 sceGeListEnQueue(u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr) {
+	// A game submits its display list once a frame from its own main loop, which is exactly the
+	// context the VCS world query needs. See WorldQueryDispatch.
+	VCS::WorldQueryDispatch("gelq");
 	auto optParam = PSPPointer<PspGeListArgs>::Create(optParamAddr);
 
 	bool runList;

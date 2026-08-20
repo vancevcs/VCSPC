@@ -443,6 +443,10 @@ add_library(Core STATIC
 	VCS/VCSSettings.h
 	VCS/VCSState.cpp
 	VCS/VCSState.h
+	VCS/VCSVault.cpp
+	VCS/VCSVault.h
+	VCS/VCSWorld.cpp
+	VCS/VCSWorld.h
 
 	HLE/sceDeflt.cpp
 	HLE/sceDeflt.h

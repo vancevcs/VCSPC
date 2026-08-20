@@ -34,6 +34,8 @@
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSState.h"
+#include "Core/VCS/VCSVault.h"
+#include "Core/VCS/VCSWorld.h"
 
 static const ImVec4 kUnsetColor = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
 static const ImVec4 kGoodColor = ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
@@ -1004,24 +1006,25 @@ void ImVCSWindow::DrawCamera() {
 				"Legacy units: stick deflection per count of mouse movement in one frame.");
 		}
 	}
-	ImGui::Checkbox("Free aim on aim key (G toggles lock-on)", &s.autoFreeAim);
+	ImGui::Checkbox("Free aim on aim key (L toggles lock-on)", &s.autoFreeAim);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
 			"Pulses the game's Free Aim button (d-pad down) after the aim key goes down, so "
 			"aiming starts in free aim instead of lock-on.\n\n"
-			"G toggles lock-on mode, which skips the pulse AND stops the mouse taking the analog "
-			"stick - so WASD moves and the mouse looks. That is what melee needs, because melee's "
-			"lock-on does not register in IsAiming and free aim would otherwise be assumed.");
+			"L toggles lock-on mode, which skips the pulse, stops the mouse taking the analog "
+			"stick, and stops it turning the camera - so WASD moves and the game frames the "
+			"target. That is what melee needs, because melee's lock-on does not register in "
+			"IsAiming and free aim would otherwise be assumed.");
 	}
 	// The state has to be visible. The previous version of this was a HELD key that never once
 	// arrived, and nothing on screen would have shown that - it looked correctly bound everywhere
 	// anyone would have checked.
-	ImGui::Text("Lock-on mode (G):");
+	ImGui::Text("Lock-on mode (L):");
 	ImGui::SameLine();
 	const bool lockOn = VCS::LockOnModeActive();
 	ImGui::TextColored(lockOn ? kGoodColor : kUnsetColor, "%s", lockOn ? "ON" : "off");
 	ImGui::SameLine();
-	ImGui::TextDisabled(lockOn ? "(mouse looks, WASD moves)" : "(mouse aims)");
+	ImGui::TextDisabled(lockOn ? "(game aims, WASD moves, mouse idle)" : "(mouse aims)");
 	if (s.autoFreeAim) {
 		ImGui::SliderInt("Free aim delay", &s.aimFreeAimDelay, 0, 16, "%d ticks");
 		if (ImGui::IsItemHovered()) {
@@ -1289,6 +1292,158 @@ void ImVCSWindow::DrawCamera() {
 		"differs per camera: about -0.05 on foot, about -1.55 in a vehicle.");
 }
 
+// Vaulting, and the geometry query underneath it.
+//
+// The numbers here are the whole point of the tab. A ledge either registers or it doesn't, and
+// standing in front of a wall watching the four heights is the only way to tell which of the two
+// dozen reasons applies - the answer never arrived, the footing was never found, the wall is
+// outside the band, or the far side has nothing to stand on.
+void ImVCSWindow::DrawVault() {
+	VCS::VCSVaultSettings &s = VCS::VaultSettings();
+	const VCS::VCSVaultDebug &d = VCS::VaultDebugState();
+
+	ImGui::Checkbox("Vaulting", &s.enabled);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Pull up onto a ledge with the jump key when there is one in front of the player.\n\n"
+			"Off by default while the motion is still a written position rather than the game's "
+			"own climb-out: it moves the character without an animation to match.");
+	}
+
+	// The query first, because everything below it is meaningless if this is not running.
+	u64 requests = 0, dispatches = 0, answers = 0, abandoned = 0;
+	u32 block = 0;
+	const char *host = nullptr;
+	VCS::WorldQueryStats(&requests, &dispatches, &answers, &abandoned, &block, &host);
+	ImGui::Text("World query:");
+	ImGui::SameLine();
+	if (!VCS::WorldQueryReady()) {
+		ImGui::TextColored(kBadColor, "not installed - %s", VCS::WorldQueryStatus());
+	} else {
+		ImGui::TextColored(kGoodColor, "%08x", block);
+		ImGui::SameLine();
+		// Answers trailing requests by more than the one in flight is the failure this whole path
+		// is most likely to have: the call is being enqueued and never reaching the game.
+		const bool healthy = requests - answers <= 1 && abandoned == 0;
+		ImGui::TextColored(healthy ? kUnsetColor : kBadColor,
+			"%llu asked / %llu sent / %llu answered%s",
+			(unsigned long long)requests, (unsigned long long)dispatches,
+			(unsigned long long)answers, abandoned ? " (some abandoned)" : "");
+		// Which syscall carried it. Asked climbing while sent stays at zero means no host fired -
+		// either the game does not call these, or the main thread was never identified.
+		ImGui::TextDisabled("carried by %s", host ? host : "nothing yet");
+	}
+
+	ImGui::Separator();
+
+	ImGui::Text("Footing:");
+	ImGui::SameLine();
+	if (d.haveFooting) {
+		ImGui::TextColored(kGoodColor, "%.2f", d.footingZ);
+		ImGui::SameLine();
+		// The gap between the two is the ped origin's height above the surface. Nothing depends on
+		// it - every height here is measured against the footing precisely so it doesn't - but it
+		// is worth being able to see, because it is the constant a naive version would have
+		// guessed at.
+		ImGui::TextDisabled("(ped Z %.2f, origin sits %.2f above)", d.playerZ,
+			d.playerZ - d.footingZ);
+	} else {
+		ImGui::TextColored(kBadColor, "none");
+	}
+
+	static const char *kSampleNames[4] = {"near", "mid", "far", "landing"};
+	for (int i = 0; i < 4; i++) {
+		ImGui::Text("%-8s", kSampleNames[i]);
+		ImGui::SameLine();
+		if (!d.found[i]) {
+			ImGui::TextColored(kUnsetColor, "nothing below");
+			continue;
+		}
+		const bool inBand = d.heights[i] >= s.minHeight && d.heights[i] <= s.maxHeight;
+		ImGui::TextColored(i < 3 && inBand ? kGoodColor : kUnsetColor, "%+.2f", d.heights[i]);
+	}
+
+	ImGui::Separator();
+
+	ImGui::Text("Ledge:");
+	ImGui::SameLine();
+	if (d.armed) {
+		ImGui::TextColored(kGoodColor, "armed - %+.2f at %.2f ahead", d.targetHeight,
+			d.targetDistance);
+	} else {
+		ImGui::TextColored(kUnsetColor, "%s", d.reject ? d.reject : "no answer yet");
+	}
+
+	ImGui::Text("Phase:");
+	ImGui::SameLine();
+	switch (d.phase) {
+	case VCS::VaultPhase::AskingGame:
+		ImGui::TextColored(kGoodColor, "asking the game (%d)", d.phaseTicks);
+		break;
+	case VCS::VaultPhase::Climbing:
+		ImGui::TextColored(kGoodColor, "the game is climbing (%d)", d.phaseTicks);
+		break;
+	case VCS::VaultPhase::Rising:
+		ImGui::TextColored(kGoodColor, "rising (%d)", d.phaseTicks);
+		break;
+	case VCS::VaultPhase::Stepping:
+		ImGui::TextColored(kGoodColor, "stepping (%d)", d.phaseTicks);
+		break;
+	default:
+		ImGui::TextColored(kUnsetColor, "idle");
+		break;
+	}
+	ImGui::SameLine();
+	// The split that matters: how many the GAME animated, against how many this had to move by
+	// hand. A native count stuck at zero with attempts climbing means the game keeps declining.
+	ImGui::TextDisabled("%llu vaulted, %llu animated by the game",
+		(unsigned long long)d.vaults, (unsigned long long)d.nativeClimbs);
+
+	ImGui::Separator();
+
+	ImGui::SliderFloat("Min height", &s.minHeight, 0.20f, 5.00f, "%.2f");
+	ImGui::SliderFloat("Max height", &s.maxHeight, 0.50f, 5.00f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"The pull-up band, measured from the surface the player is standing on rather than "
+			"from the ped's own position - which sits somewhere around the hips, at an offset "
+			"nobody has measured.");
+	}
+	ImGui::SliderFloat("Probe ceiling", &s.probeCeiling, 1.00f, 8.00f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"How high above the footing the probe lines start. Also the hard ceiling on what can "
+			"be climbed: the query only reports surfaces BELOW its start point, so a wall taller "
+			"than this does not register at all - keep it above Max height, or the band silently "
+			"stops at this number instead.");
+	}
+	ImGui::SliderFloat("Reach near", &s.reachNear, 0.10f, 1.50f, "%.2f");
+	ImGui::SliderFloat("Reach far", &s.reachFar, 0.30f, 2.50f, "%.2f");
+	ImGui::SliderFloat("Landing depth", &s.landingDepth, 0.20f, 2.00f, "%.2f");
+	ImGui::Checkbox("Require somewhere to land", &s.requireLanding);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Refuse ledges with nothing behind them - a fence rail, or a parapet with a drop on "
+			"the far side. Turning this off allows narrow ledges and the landings that go with "
+			"them.");
+	}
+	ImGui::SliderFloat("Landing tolerance", &s.landingTolerance, 0.05f, 1.00f, "%.2f");
+
+	ImGui::SliderInt("Rise ticks", &s.riseTicks, 4, 60);
+	ImGui::SliderInt("Step ticks", &s.stepTicks, 2, 40);
+	ImGui::SliderFloat("Rise forward share", &s.riseForwardFraction, 0.0f, 0.8f, "%.2f");
+	ImGui::SliderFloat("Clearance", &s.clearance, 0.0f, 0.50f, "%.2f");
+
+	ImGui::Checkbox("Prefer the game's own climb", &s.preferNative);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Ask the game to climb, rather than moving the player by hand - which is what gets the "
+			"animation, because it is the game's own swimming climb-out.\n\n"
+			"It runs the game's own ledge search first, so it can decline a wall this probe was "
+			"happy with; the written motion is the fallback when it does.");
+	}
+}
+
 void ImVCSWindow::Draw(ImConfig &cfg) {
 	ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("VCS", &cfg.vcsOpen)) {
@@ -1318,6 +1473,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Camera")) {
 			DrawCamera();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Vault")) {
+			DrawVault();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();

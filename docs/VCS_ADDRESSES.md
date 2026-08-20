@@ -329,6 +329,145 @@ and masks `0x7fff`, dispatching via `0x08adca6c` into a `std::map<u16,handler*>`
 node+`0x10`, value at node+`0x14`). It looks exactly like the thing you want and is a dead end: its
 registry `*(gp + 0x16f0)` reads 0 during gameplay, so it is not the live interpreter.
 
+### Asking the world a question — `FindGroundZFor3DCoord`, and calling game code from the host
+
+The vaulting work needed something no address can answer: *is there a ledge in front of the player,
+and how high is it*. Collision geometry is not a variable — it is a sector list of entities each
+carrying a collision model, walked by code — so the only sane way to ask is to call the code.
+
+**The script table handed it over in two steps, with no searching at all.** Opcode `01BB
+get_ground_z_for_3d_coord` exists in `VCSSCM.INI`, so it has a handler, so it has an address:
+
+```python
+handler = u32(0x08b846e0 + 0x01BB * 8 + 4)   # -> 0x08a9e434
+```
+
+and that handler is nine instructions of glue:
+
+```
+08a9e464  jal 0x886589c            ; CollectParameters(thread, buf, 3, 0x08bc7408)
+08a9e46c  lwc1 $f12, 0x7408($s2)   ; x
+08a9e470  lwc1 $f13, 4($s3)        ; y
+08a9e474  lwc1 $f14, 8($s3)        ; z
+08a9e478  jal 0x8893460            ; <- the engine function
+08a9e47c  move $a0, $sp            ;    with a bool* out-parameter
+08a9e480  mfc1 $a0, $f0            ; the answer comes back in $f0
+```
+
+| what | address |
+|---|---|
+| `CWorld::FindGroundZFor3DCoord(float x, float y, float z, bool *found)` | `0x08893460` |
+| `CWorld::ProcessVerticalLine(point1, z2, colPoint&, entity&, ...)` | `0x08891dd4` |
+| `CollectParameters` / `StoreParameters` (any script handler's glue) | `0x0886589c` / `0x08862890` |
+
+`0x08893460` is itself a wrapper: it builds `point1` on its stack from the three floats, loads
+`-1000.0` (`lui $v0, 0xc47a`) as the floor, calls `ProcessVerticalLine` with `checkBuildings = 1`
+and every other flag 0, and returns `colPoint.z` — read back from `0x28($sp)`, which is the
+position field of the `CColPoint` it passed in at `0x20($sp)`. So it answers **"what is the height
+of the first surface below this point"**, and a wall taller than the point you ask from is
+invisible to it. That last property is load-bearing for vaulting: the probe's start height *is* the
+ceiling on what can be climbed, without a check.
+
+**Calling it from the host needed a program.** `hleEnqueueCall()` runs a MIPS function on the
+game's own thread — the same machinery that delivers PSP callbacks — but it fills `$a0..$a3` and
+nothing else, and this function takes its arguments in `$f12..$f14`. So `Core/VCS/VCSWorld.cpp`
+writes a ~40 instruction program into a 512-byte `userMemory` block and calls that instead: it
+loads the floats out of the block, calls the game function once per sample point, and stores the
+answers back. Three things follow from doing it that way rather than trying to set up the call
+directly:
+
+- the calling convention is **copied from the game's own call site** rather than assumed, which
+  matters on a build that passes eight integer arguments in `$a0-$a3` and `$t0-$t3`;
+- one enqueued call answers several sample points, because the program loops;
+- the answer is data in a block, so nothing has to be read back at a particular instant.
+
+**Where the call is enqueued from matters, and getting it wrong crashes the game.**
+`hleEnqueueCall` means *"call this after **this HLE call** finishes"*: it sets a flag that
+`hleFinishSyscall` acts on. Enqueued from anywhere that is not inside a syscall, the flag survives
+until some unrelated syscall finishes, and the call is then planted on whatever thread made it, at
+whatever point that thread had reached. The first version enqueued from `VCS::Tick`, which runs on
+the vblank timing event, and it died in play:
+
+```
+E[MemMap]: Bad memory access detected and ignored: a4c8ba03 at 089be2d8
+E[HLE]:    Corrupt stack on HLE mips call return: 28fefefe
+```
+
+`0xfefefefe` is the fill pattern of a stack nobody had used yet — the call had been planted on a
+thread that was not running the game. So the rule is: **only from inside a syscall, only from one
+that neither blocks nor reschedules, and only on the thread the game runs its main loop on.** The
+hosts are picked out of the game's own import table (`sceDisplayIsVblank`,
+`sceDisplayGetCurrentHcount`, `sceKernelPowerTick` — all pure reads or stubs), and the main thread
+is identified by whoever calls `sceCtrlReadBufferPositive`, since a game reads its pad once per
+frame from its main loop. Three near-misses ruled out along the way, all imported by VCS and all
+wrong: `sceKernelGetSystemTimeLow` and `sceKernelLibcClock` call `hleReSchedule`,
+`sceDisplaySetFrameBuf` can `hleDelayResult`, and `sceCtrlReadBufferPositive` itself blocks.
+
+The cost is that a query is **asynchronous** — ask on one tick, read on the next — and that the
+block is memory the game did not allocate. Both are handled where they arise: the block carries a
+magic word that is re-checked every tick (a savestate can restore PSP memory without restoring this
+fork's idea of where the block was), the program refuses a sample count it does not recognise
+rather than looping inside game code, and a request that is never answered is abandoned after 120
+ticks instead of blocking every request after it.
+
+### The climb-out is two calls, and the game does the rest
+
+The vault needed the animation, and the animation is the swimming climb-out. Getting to it took
+four wrong turns and one backtrace, and the backtrace is what actually answered it.
+
+**What the wrong turns established** (recorded because each looks like the answer):
+
+| tried | result |
+|---|---|
+| `CPed+0x1d9`, the climb *stage* (0, then 1→2→3→4 through the pull-up) | writing it on land sticks and does nothing: it is the climb's status, not its input |
+| `CPed+0x8b4 = 44`, the climb *state* | the game engages, drops the ped 0.57 into a "hang", then aborts within a second - it has nothing to climb |
+| `CPed+0xEC` bit `0x100`, "in water" (from `02E1 is_char_in_water`'s own handler) | cannot be forced: the game recomputes it from the world every frame. Setting it left the ped below collision, and he fell through the map |
+| `0x0892f140`, the anim API behind script command `0220` | never called during play - it is the *script's* path. Zero hits while walking, jumping and climbing, against 270 hits on a control breakpoint in 3 seconds |
+
+**What worked: break on the state word and walk the stack.** A memory breakpoint on
+`ped + 0x8b4` with `change` set stops exactly once per climb - at the 1 → 44 transition - and
+`hle.backtrace` then gives the whole chain:
+
+```
+08908e44  CPed::SetPedState(ped, 44)
+08912c84    <- StartClimb, which also clears three flag bits and hands over the target
+0890e394      <- the caller that searched for something to climb
+0894f00c
+0894b890  the on-foot movement call site this fork already knew
+```
+
+and the searching frame is four instructions of the answer:
+
+```
+0890e374  jal 0x892fca4      ; CanClimb(ped, &result)   - fills a struct on the stack
+0890e37c  lbu a0, (sp)       ; result.found
+0890e380  beqz -> skip
+0890e38c  jal 0x8912be0      ; StartClimb(ped, &result) - animation and motion
+```
+
+| what | address |
+|---|---|
+| `CPed::CanClimb(CPed *, ClimbResult *out)` | `0x0892fca4` |
+| `CPed::StartClimb(CPed *, ClimbResult *)` | `0x08912be0` |
+| `CPed::SetPedState(CPed *, int)` | `0x08908d60` |
+| the call that stores what is being climbed and where to | `0x0890f6ec` |
+| ped state (44 while climbing out, 1 standing) | `CPed + 0x8b4` |
+| climb stage (0, then 1..4) | `CPed + 0x1d9` |
+
+`ClimbResult` is small: **found** at `+0x00`, the **entity** at `+0x08`, the **target** at `+0x10`.
+`StartClimb` passes the last two to `0x0890f6ec`, which takes a reference on the entity, stores it
+at `ped+0x1c0`, and writes the target *relative to that entity* into `ped+0x1b0` - which is exactly
+the float block that showed up in the very first ped-struct diff of a climb, before any of this was
+understood.
+
+**Both calls run in one dispatch** from `Core/VCS/VCSWorld.cpp`'s second program. The second
+consumes what the first found, so a frame between them is a frame the player can move in - the
+ledge found and the ledge climbed could differ.
+
+**Confirmed in play, 2026-08-19: the player pulls up onto a land ledge with the game's own
+animation.** The search is the game's, so it can decline a wall this fork's own probe was happy
+with; the written-position motion is the fallback when it does.
+
 ### The weapon fire path — where the shot is actually resolved
 
 The target for the free-aim work: re3 and reVC do free aim entirely at the fire site, by

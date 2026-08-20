@@ -54,6 +54,77 @@ inline constexpr u32 kVCSWeaponRaycastCall = 0x08A41D74;
 // yet, or this is not the build the address was measured on, we must write nothing at all.
 inline constexpr u32 kVCSWeaponRaycastOp = 0x0E225E1B;
 
+// CWorld's ground probe, and the reason vaulting can ask about geometry at all.
+//
+//     float CWorld::FindGroundZFor3DCoord(float x, float y, float z, bool *found)
+//
+// x/y/z arrive in $f12/$f13/$f14 and the out-parameter in $a0; the height of the first surface
+// BELOW the point comes back in $f0. Internally it drops a vertical line from z to -1000 and calls
+// CWorld::ProcessVerticalLine, which is why it answers "what is under this point" rather than
+// "what is at it".
+//
+// Found from the game's own script table rather than by correlation, the same route that produced
+// get_current_char_weapon: opcode 01BB (get_ground_z_for_3d_coord) resolves through the dispatch
+// table at 0x08b846e0 to a handler at 0x08a9e434, which collects three floats and calls this with
+// them. No searching, no guessing - the game says which function the command is.
+inline constexpr u32 kVCSFindGroundZFor3DCoord = 0x08893460;
+
+// The SECOND and THIRD instructions, `swc1 $f12, 0x10($sp)` and `swc1 $f13, 0x14($sp)`. Checked
+// before the world query installs itself, for the reason kVCSWeaponRaycastOp exists: on another
+// build, or before the module has loaded, this is not that function and the program must not be
+// written.
+//
+// Deliberately not the FIRST instruction, which is `addiu $sp, $sp, -0x50` and would be the
+// obvious thing to check. This address is a function ENTRY, so it is where a JIT block starts, and
+// PPSSPP overwrites the first instruction of every compiled block with a 0x68xxxxxx marker - so
+// once the game has called this function even once, the live word is not the game's code and the
+// check can never pass again. (The fire hook gets away with checking its own site because that one
+// is a `jal` in the middle of a function, which no block starts at.) Nothing branches into the
+// middle of this prologue, so the two words below are never block starts and can be read directly,
+// with no icache invalidation and no recompile.
+inline constexpr u32 kVCSFindGroundZOp2 = 0xE7AC0010;
+inline constexpr u32 kVCSFindGroundZOp3 = 0xE7AD0014;
+
+// THE GAME'S OWN CLIMB, in two calls. Found by breaking on the ped state word as a real
+// swimming climb-out began and walking the backtrace out - see "The climb-out is two calls" in
+// docs/VCS_ADDRESSES.md.
+//
+//     bool CPed::CanClimb(CPed *ped, ClimbResult *out)      0x0892fca4
+//     void CPed::StartClimb(CPed *ped, ClimbResult *result)  0x08912be0
+//
+// The first is the game's own ledge search: it fills a small struct whose first byte is "found",
+// with the entity at +0x08 and the world target at +0x10. The second consumes that struct - it
+// clears three flag bits, sets the ped state to 44, and hands the entity and target to
+// 0x0890f6ec, which takes a reference on the entity and stores the target relative to it.
+//
+// Why this matters more than any address here: it is the ANIMATION. Writing the state by hand
+// engages the climb and then aborts, because the ped has nothing to climb and nowhere to climb to;
+// these two calls are how the game supplies both.
+inline constexpr u32 kVCSPedCanClimb = 0x0892FCA4;
+inline constexpr u32 kVCSPedStartClimb = 0x08912BE0;
+
+// Second instructions, checked before the climb program is written for the same reason
+// kVCSFindGroundZOp2 exists - never the first, which is where a JIT block marker lands. StartClimb's
+// is `sw $s1, 4($sp)`; CanClimb's is `swc1 $f20, 0x394($sp)`, off a 0x3c0-byte frame, which is a
+// function that clearly does a great deal of geometry on our behalf.
+inline constexpr u32 kVCSPedStartClimbOp2 = 0xAFB10004;
+inline constexpr u32 kVCSPedCanClimbOp2 = 0xE7B40394;
+
+// The pieces StartClimb uses, recorded because they are the fallback if the search ever refuses a
+// ledge our own probe is happy with: the state setter, and the call that stores what is being
+// climbed (entity at ped+0x1c0) and where to (target at ped+0x1b0, relative to that entity).
+inline constexpr u32 kVCSPedSetState = 0x08908D60;
+inline constexpr u32 kVCSPedSetClimbTarget = 0x0890F6EC;
+inline constexpr u32 kVCSPedStateOffset = 0x8B4;   // 44 while climbing out, 1 standing
+inline constexpr u32 kVCSPedClimbStageOffset = 0x1D9;   // 0, then 1..4 through the pull-up
+
+// The general form underneath it: ProcessVerticalLine(point1, z2, colPoint, entity, checkBuildings,
+// checkVehicles, checkPeds, checkObjects, checkDummies, ignoreSeeThrough, poly) - point in $a0, the
+// floor height in $f12, and the bools filling $a3 and $t0-$t3. Not called yet. It is the way to
+// learn WHAT was hit rather than only how high it is, which is what a vault would need before it
+// could refuse to climb a moving vehicle.
+inline constexpr u32 kVCSProcessVerticalLine = 0x08891DD4;
+
 // CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70.
 inline constexpr u32 kVCSCam0 = 0x08BC7EA0;
 

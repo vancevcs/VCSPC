@@ -33,6 +33,7 @@
 #include "Core/HLE/scePower.h"
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
+#include "Core/VCS/VCSWorld.h"
 
 struct VolatileWaitingThread {
 	SceUID threadID;
@@ -279,6 +280,9 @@ static int sceKernelPowerUnlock(int lockType) {
 }
 
 static int sceKernelPowerTick(int flag) {
+	// See WorldQueryDispatch: a pure stub is exactly the kind of syscall that can safely carry a
+	// call into game code, and VCS calls this one every frame.
+	VCS::WorldQueryDispatch("powr");
 	return hleLogDebug(Log::HLE, 0, "UNIMPL");
 }
 
