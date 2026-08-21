@@ -528,6 +528,23 @@ static void RenderCascade(Draw::DrawContext *draw) {
 	// PPSSPP hits the same wall and solves it the same way: every matrix it hands its own vertex
 	// shader goes through ConvertMatrix4x3To3x4Transposed first. Uploading this raw scrambles the
 	// basis, which draws as long thin triangles radiating from a point rather than as a scene.
+	// Count what actually falls in the box, before handing the same matrix to the GPU.
+	{
+		const float *m = s_view.lightViewProj;
+		int inside = 0;
+		const size_t count = s_positions.size() / 3;
+		for (size_t i = 0; i < count; i++) {
+			const float *p = s_positions.data() + i * 3;
+			const float x = p[0] * m[0] + p[1] * m[4] + p[2] * m[8] + m[12];
+			const float y = p[0] * m[1] + p[1] * m[5] + p[2] * m[9] + m[13];
+			const float z = p[0] * m[2] + p[1] * m[6] + p[2] * m[10] + m[14];
+			if (x >= -1.0f && x <= 1.0f && y >= -1.0f && y <= 1.0f && z >= 0.0f && z <= 1.0f) {
+				inside++;
+			}
+		}
+		s_capture.verticesInCascade = inside;
+	}
+
 	ShadowUB ub;
 	for (int row = 0; row < 4; row++) {
 		for (int col = 0; col < 4; col++) {

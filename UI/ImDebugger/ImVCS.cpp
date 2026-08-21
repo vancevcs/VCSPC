@@ -1693,6 +1693,11 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::TextColored(cap.rendered ? kGoodColor : kBadColor,
 			"depth pass: %s, %d batch%s", cap.rendered ? "ran" : "did not run",
 			cap.batches, cap.batches == 1 ? "" : "es");
+		if (cap.vertices > 0) {
+			const float pctIn = 100.0f * (float)cap.verticesInCascade / (float)cap.vertices;
+			ImGui::TextColored(cap.verticesInCascade > 0 ? kGoodColor : kBadColor,
+				"in cascade: %d verts (%.1f%% of captured)", cap.verticesInCascade, pctIn);
+		}
 		if (cap.overflowed) {
 			ImGui::TextColored(kBadColor, "capture hit its cap - the map would be missing geometry");
 		}

@@ -219,6 +219,12 @@ struct CaptureStats {
 	bool rendered;     // the depth pass actually ran this frame
 	int batches;       // draws issued - one per 64k vertices, because thin3d indices are 16-bit
 
+	// Captured vertices that land inside the cascade's clip volume, counted on the CPU with the
+	// same matrix the shader uses. A depth map is a poor thing to judge by eye - it is mostly a
+	// smooth gradient whether or not it is right - and this answers the only question that
+	// picture was being asked: is the cascade catching the world, and how much of it.
+	int verticesInCascade;
+
 	// The bounds of the actual vertices, not of their world matrices. This is the honest answer
 	// to "is the cascade radius anywhere near right" - a 28-unit cascade against a caster set
 	// hundreds of units across covers a small fraction of what is on screen, by design, but the
