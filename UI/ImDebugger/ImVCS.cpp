@@ -1599,6 +1599,122 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::TextColored(kGoodColor, "casters if the blend test were dropped: %d", s.castersIfBlendIgnored);
 	}
 
+
+	// --- the shadow projection -------------------------------------------------------------
+	ImGui::Separator();
+
+	VCSShadow::Settings &set = VCSShadow::GetSettings();
+	const VCSShadow::ShadowView &v = VCSShadow::View();
+
+	if (!v.valid) {
+		ImGui::TextColored(kBadColor, "projection: not built - needs a caster and a sun in the same frame");
+	} else {
+		// The camera position is recovered by inverting the game's view matrix. Two things
+		// establish that it is right, and neither is the player position: the round trip below
+		// lands on the origin, and the camera falls inside the bounding box of the caster world
+		// matrices - the geometry the game is actually drawing.
+		//
+		// The player position is shown anyway, but as what it is: a reading from a *different*
+		// coordinate system. The game keeps absolute world coordinates in its own structures and
+		// hands the hardware rebased ones, so the two disagree by a large constant offset while
+		// both being correct. Measured across captures the offset holds steady and the two move
+		// together, which is why nothing here needs to know what it is - the shadow projection
+		// lives entirely in the space the GE is fed.
+		ImGui::Text("camera:  %8.2f %8.2f %8.2f", v.cameraPos[0], v.cameraPos[1], v.cameraPos[2]);
+
+		const std::optional<u32> playerBase = VCS::ReadAddrU32(VCS::VCSAddr::PlayerBase);
+		if (playerBase && *playerBase) {
+			const std::optional<float> px = VCS::ReadFloat(*playerBase + VCS::kVCSEntityPositionOffset + 0);
+			const std::optional<float> py = VCS::ReadFloat(*playerBase + VCS::kVCSEntityPositionOffset + 4);
+			const std::optional<float> pz = VCS::ReadFloat(*playerBase + VCS::kVCSEntityPositionOffset + 8);
+			if (px && py && pz) {
+				ImGui::Text("player:  %8.2f %8.2f %8.2f  (the game's own space, not the GE's)", *px, *py, *pz);
+				ImGui::TextDisabled("   offset %.1f %.1f %.1f - constant, and not something anything here uses",
+					v.cameraPos[0] - *px, v.cameraPos[1] - *py, v.cameraPos[2] - *pz);
+			}
+		}
+
+		// Which space is the GE actually being fed? The caster world matrices answer it. If this
+		// box brackets the player position, the GE sees absolute world coordinates and the camera
+		// recovery is wrong. If it brackets the recovered camera instead, the game is handing the
+		// hardware rebased coordinates, the recovery is fine, and the cross-check above was
+		// comparing two different spaces rather than finding a bug.
+		if (s.casterBoundsValid) {
+			ImGui::Text("casters:  x %8.1f .. %-8.1f", s.casterMin[0], s.casterMax[0]);
+			ImGui::Text("          y %8.1f .. %-8.1f", s.casterMin[1], s.casterMax[1]);
+			ImGui::Text("          z %8.1f .. %-8.1f", s.casterMin[2], s.casterMax[2]);
+
+			bool inside = true;
+			for (int i = 0; i < 3; i++) {
+				if (v.cameraPos[i] < s.casterMin[i] || v.cameraPos[i] > s.casterMax[i]) {
+					inside = false;
+				}
+			}
+			ImGui::TextColored(inside ? kGoodColor : kBadColor, inside
+				? "camera sits inside the caster bounds - same space, as it must be"
+				: "camera is OUTSIDE the caster bounds - the recovery or the space is wrong");
+		}
+
+		// A wrong convention would survive this; an algebra slip would not.
+		const float residual = fabsf(v.viewResidual[0]) + fabsf(v.viewResidual[1]) + fabsf(v.viewResidual[2]);
+		ImGui::TextColored(residual < 0.01f ? kGoodColor : kBadColor,
+			"view round trip: %.4f %.4f %.4f", v.viewResidual[0], v.viewResidual[1], v.viewResidual[2]);
+
+		if (s.viewMatrixChanges > 0) {
+			ImGui::TextColored(kBadColor, "view matrix changed %d times after the first caster - more than one camera in the frame",
+				s.viewMatrixChanges);
+		} else {
+			ImGui::TextColored(kGoodColor, "view matrix: one camera for the whole frame");
+		}
+
+
+		// The captured geometry. This is what will go into the shadow map: one triangle list,
+		// already in the GE's space, ready to be drawn in a single call.
+		const VCSShadow::CaptureStats &cap = VCSShadow::LastCapture();
+		ImGui::Separator();
+		ImGui::Text("captured: %d draws -> %d verts, %d indices (%d tris), %.0f KB",
+			cap.draws, cap.vertices, cap.indices, cap.indices / 3, cap.bytes / 1024.0);
+		if (cap.overflowed) {
+			ImGui::TextColored(kBadColor, "capture hit its cap - the map would be missing geometry");
+		}
+		if (cap.boundsValid) {
+			const float ex = cap.max[0] - cap.min[0];
+			const float ey = cap.max[1] - cap.min[1];
+			const float ez = cap.max[2] - cap.min[2];
+			ImGui::Text("caster extent: %.0f x %.0f x %.0f units", ex, ey, ez);
+			// A cascade far larger than the scene wastes all its resolution; far smaller and it
+			// covers a sliver. Neither is wrong, but the ratio should be a number that makes
+			// sense rather than a surprise.
+			const float largest = ex > ey ? ex : ey;
+			if (largest > 0.0f) {
+				ImGui::TextDisabled("   cascade covers %.0f%% of the horizontal extent",
+					100.0f * (2.0f * set.cascadeRadius) / largest);
+			}
+		}
+
+		ImGui::Text("forward: %8.3f %8.3f %8.3f", v.cameraForward[0], v.cameraForward[1], v.cameraForward[2]);
+		ImGui::Text("light:   %8.3f %8.3f %8.3f  (direction of travel)", v.lightDir[0], v.lightDir[1], v.lightDir[2]);
+		ImGui::Text("centre:  %8.2f %8.2f %8.2f", v.centre[0], v.centre[1], v.centre[2]);
+		ImGui::Text("radius %.1f, texel %.3f world units", v.radius, v.texelWorldSize);
+
+		if (ImGui::TreeNode("world -> light clip matrix")) {
+			for (int row = 0; row < 4; row++) {
+				ImGui::Text("%9.4f %9.4f %9.4f %9.4f",
+					v.lightViewProj[row * 4 + 0], v.lightViewProj[row * 4 + 1],
+					v.lightViewProj[row * 4 + 2], v.lightViewProj[row * 4 + 3]);
+			}
+			ImGui::TreePop();
+		}
+	}
+
+	ImGui::Separator();
+	ImGui::SliderFloat("Cascade radius", &set.cascadeRadius, 8.0f, 128.0f, "%.0f units");
+	ImGui::SliderFloat("Centre ahead", &set.centreDistance, 0.0f, 64.0f, "%.0f units");
+	ImGui::Checkbox("View forward is -Z", &set.forwardIsNegativeZ);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Which view-space axis points into the scene. If the camera/player distance above is sane but the centre sits behind you, this is the wrong way round.");
+	}
+
 	// What to actually do with this tab. The counts are only worth anything as a response to
 	// something you did in the game.
 	ImGui::TextDisabled("Walk around, get in a car, then open a menu. Casters should track the geometry\non screen, skinned casters should follow the pedestrians, and the 2D count\nshould jump the moment the menu opens.");

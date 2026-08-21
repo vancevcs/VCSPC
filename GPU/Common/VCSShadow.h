@@ -109,9 +109,119 @@ struct FrameStats {
 	float sunDiffuse[3];
 	int sunChannel;
 
+
+	// Where the caster world matrices actually put their geometry, as a bounding box over their
+	// translations. "World space" to the GE is whatever space the game feeds the hardware, which
+	// is not obliged to be the absolute world space the game keeps in its own structures - and
+	// the shadow projection has to live in the former. Comparing this box against both the
+	// recovered camera and the player position read from PSP memory says which space is which,
+	// without anyone having to guess.
+	//
+	// Caveat: for a skinned mesh the bones are already applied during decode and the world matrix
+	// is often identity, so those entries sit at the origin and mean nothing. The rigid world
+	// geometry, which is the bulk of the casters, is what makes this box meaningful.
+	bool casterBoundsValid;
+	float casterMin[3];
+	float casterMax[3];
+
+	// How many times the view matrix changed after the frame's first caster. Anything above zero
+	// means the frame holds more than one camera - a render-to-texture pass, the radar - and
+	// "take the matrix from the first caster" is the wrong heuristic.
+	int viewMatrixChanges;
 	int lightingDraws;   // draws with hardware lighting enabled at all
 	int dirLightDraws;   // ...of those, ones with an enabled directional channel
 };
+
+// Where the shadow projection ends up looking, recomputed once a frame. Milestone 2a fills this
+// in and shows it; nothing renders from it yet.
+//
+// Conventions, because getting one of these backwards costs a day: VCS world space is Z-up. That
+// is not inferred from the sun vector - CWorld::ProcessVerticalLine answers "what is the height
+// at this point" by writing z, and the vault code reads ledge heights out of z, both already
+// verified against the running game. Matrices follow PPSSPP's row-vector convention throughout,
+// so a point is transformed as clip = vec4(worldPos, 1.0) * m, and gstate's 4x3 matrices store
+// the translation in the last row.
+struct ShadowView {
+	bool valid;
+
+	// Recovered from gstate.viewMatrix by inverting it. The panel checks this against the
+	// player position read out of PSP memory, which is the cheapest way to catch a transposed
+	// matrix - a wrong convention puts the camera somewhere absurd rather than subtly off.
+	float cameraPos[3];
+	float cameraRight[3];
+	float cameraUp[3];
+	float cameraForward[3];
+
+	float lightDir[3];    // the direction light travels, i.e. the negated sun vector
+	float lightRight[3];
+	float lightUp[3];
+
+	float centre[3];      // cascade centre in world space, after texel snapping
+	float radius;
+	float texelWorldSize;
+
+	float lightViewProj[16];
+
+	// The recovered camera position pushed back through the view matrix the way the vertex
+	// shader would push a vertex. It should land on the origin. This cannot catch a wrong
+	// convention - the round trip uses the same belief twice - but it does catch an algebra
+	// slip, which is the other half of how these go wrong.
+	float viewResidual[3];
+};
+
+// Player-facing knobs. Two of these exist because the answer is not known yet rather than because
+// anyone should want to change them.
+struct Settings {
+	// Cascade 0 is anchored on the camera with a fixed radius rather than fitted to the view
+	// frustum. Frustum fitting is strictly better and belongs in milestone 4; this gets a shadow
+	// map on screen without first having to decompose the game's projection matrix.
+	float cascadeRadius;
+	float centreDistance;
+	int mapSize;
+
+	// Which view-space axis points into the scene. The GL convention is -Z and that is the
+	// default, but the PSP's is worth confirming rather than assuming: with this wrong the
+	// cascade sits behind the camera and shadows land on nothing. One run settles it.
+	bool forwardIsNegativeZ;
+};
+
+// The frame's caster geometry, baked to the space the GE is fed and flattened to one triangle
+// list. Building it this way rather than replaying the game's draw calls into the shadow map is
+// the difference between one draw call a frame and one per caster - 184 of them in a typical
+// frame here - and it costs a vertex transform each, which at ~38k vertices is nothing. It also
+// keeps the whole thing free of any backend's buffer lifetime rules.
+struct CaptureStats {
+	int draws;
+	int vertices;
+	int indices;
+	size_t bytes;
+	bool overflowed;   // hit the cap; the map will be missing geometry rather than corrupt
+
+	// The bounds of the actual vertices, not of their world matrices. This is the honest answer
+	// to "is the cascade radius anywhere near right" - a 28-unit cascade against a caster set
+	// hundreds of units across covers a small fraction of what is on screen, by design, but the
+	// numbers should be in a believable relation to each other.
+	bool boundsValid;
+	float min[3];
+	float max[3];
+};
+
+const CaptureStats &LastCapture();
+
+// Appends one flush's worth of caster geometry, transformed to world space by `world` and
+// expanded from whatever topology it arrived in to a plain triangle list.
+//
+// Safe to call with `indices` null for a non-indexed draw. `numDecodedVerts` is the decoded
+// vertex count for the whole flush, which is what the index buffer indexes into.
+void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12]);
+
+// The accumulated triangle list, valid until the next BeginFrame.
+const float *CapturedPositions();
+const u32 *CapturedIndices();
+
+Settings &GetSettings();
+const ShadowView &View();
 
 // Set once per boot, after the compat flags are known. Read on every draw, so it lives in the
 // header to stay inlineable rather than costing a call per draw call.

@@ -252,7 +252,11 @@ void DrawEngineVulkan::Flush() {
 		uint32_t vbOffset;
 
 		VkBuffer vbuf = VK_NULL_HANDLE;
-		if (lastVType_ & GE_VTYPE_WEIGHT_MASK) {
+		// The skinning path predecodes into decoded_, which is ordinary memory. The shadow
+		// capture needs to read positions back, and the push buffer it would otherwise decode
+		// straight into is write-combined - cheap to write, painfully slow to read - so when
+		// shadows are on, everything takes the predecode path. Gated, so no other game moves.
+		if ((lastVType_ & GE_VTYPE_WEIGHT_MASK) || VCSShadow::IsActive()) {
 			// If skinning, we're predecoding into "decoded". So make sure we're done, then push that content.
 			DecodeVerts(dec_, decoded_);
 			VkDeviceSize size = numDecodedVerts_ * dec_->GetDecVtxFmt().stride;
@@ -277,6 +281,16 @@ void DrawEngineVulkan::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (hasColor || gstate.getMaterialAmbientA() == 255);
 		} else {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
+		}
+
+		// Classify and capture here rather than after the draw: this has to run once
+		// vertexFullAlpha is settled, because the blend test reads it, and once the indices
+		// are decoded, because that is what produces the counts.
+		if (VCSShadow::IsActive() &&
+			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount) == VCSShadow::Reject::None) {
+			const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
+			VCSShadow::AddCaster(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
+				vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
 		}
 
 		bool textureNeedsApply = false;
@@ -369,9 +383,6 @@ void DrawEngineVulkan::Flush() {
 		if (useDepthRaster_) {
 			DepthRasterSubmitRaw(prim, dec_, dec_->VertexType(), vertexCount);
 		}
-		if (VCSShadow::IsActive()) {
-			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
-		}
 	} else {
 		gpuStats.perFrame.numSoftTransformedDraws++;
 
@@ -399,8 +410,11 @@ void DrawEngineVulkan::Flush() {
 		if (useDepthRaster_) {
 			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
 		}
-		if (VCSShadow::IsActive()) {
-			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
+		if (VCSShadow::IsActive() &&
+			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount) == VCSShadow::Reject::None) {
+			const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
+			VCSShadow::AddCaster(decoded_, numDecodedVerts_, decIndex_,
+				vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
 		}
 
 		u16 *inds = decIndex_;
