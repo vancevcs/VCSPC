@@ -147,9 +147,6 @@ void DrawEngineVulkan::DeviceRestore(Draw::DrawContext *draw) {
 void DrawEngineVulkan::BeginFrame() {
 	DrawEngineCommon::BeginFrame();
 
-	// Returns on its first line for every game but VCS with the shadow flag set.
-	VCSShadow::BeginFrame(draw_);
-
 	lastPipeline_ = nullptr;
 
 	// These will be re-bound if needed, let's not let old bindings linger around too long.

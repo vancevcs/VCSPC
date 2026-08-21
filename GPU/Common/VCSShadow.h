@@ -121,6 +121,12 @@ struct FrameStats {
 		float diffuse[3];
 		int draws;
 		bool aboveHorizon;
+
+		// VCS reuses a light channel for different things inside one frame, so a channel index is
+		// not a stable identity for "the sun" and the direction shown here is only the last one
+		// the channel held. The pick is a maximum across the whole frame, which is why the chosen
+		// sun can differ from every row below it.
+		int directionChanges;
 	};
 	SunCandidate sunCandidates[4];
 
@@ -182,6 +188,10 @@ struct ShadowView {
 
 	float lightViewProj[16];
 
+	// World to camera clip, for the mask pass. Built from the same captured view matrix
+	// and the projection matrix beside it, so the mask lines up with what the game drew.
+	float cameraViewProj[16];
+
 	// The recovered camera position pushed back through the view matrix the way the vertex
 	// shader would push a vertex. It should land on the origin. This cannot catch a wrong
 	// convention - the round trip uses the same belief twice - but it does catch an algebra
@@ -203,6 +213,24 @@ struct Settings {
 	// default, but the PSP's is worth confirming rather than assuming: with this wrong the
 	// cascade sits behind the camera and shadows land on nothing. One run settles it.
 	bool forwardIsNegativeZ;
+
+	// The screen-space mask.
+	int maskWidth;
+	int maskHeight;
+	float depthBias;
+
+	// Which way up the shadow map's V axis runs depends on the backend's clip convention. Wrong,
+	// and the shadows track the right shapes in the wrong places - so it is a toggle to be
+	// settled in one run rather than a guess compiled into the shader.
+	bool flipShadowV;
+
+	// 0 shadow term, 1 sampled shadow-map depth, 2 light-space Z, 3 shadow UV as red/green.
+	int debugView;
+
+	// The cascade coverage count runs the light matrix over every captured vertex on the CPU,
+	// a second full pass purely to produce one diagnostic number. It earned its place while the
+	// projection was unproven; it has no business costing frames once it is.
+	bool countCascadeCoverage;
 };
 
 // The frame's caster geometry, baked to the space the GE is fed and flattened to one triangle
@@ -217,6 +245,19 @@ struct CaptureStats {
 	size_t bytes;
 	bool overflowed;   // hit the cap; the map will be missing geometry rather than corrupt
 	bool rendered;     // the depth pass actually ran this frame
+	bool maskRendered; // ...and so did the screen-space mask
+
+	// Which step of the mask setup failed, if it did. "Did not run" on its own says nothing -
+	// four different things can fail there and they need four different fixes.
+	enum class MaskStep : u8 {
+		Ok = 0,
+		NotAttempted,
+		Framebuffer,
+		VertexShader,
+		FragmentShader,
+		Pipeline,
+	};
+	MaskStep maskStep;
 	int batches;       // draws issued - one per 64k vertices, because thin3d indices are 16-bit
 
 	// Captured vertices that land inside the cascade's clip volume, counted on the CPU with the
@@ -256,11 +297,23 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 Settings &GetSettings();
 const ShadowView &View();
 
-// Set once per boot, after the compat flags are known. Read on every draw, so it lives in the
-// header to stay inlineable rather than costing a call per draw call.
+// Read on every draw, so these live in the header to stay inlineable rather than costing a call
+// per draw call.
+//
+// Two flags, not one. g_available is the compat flag, fixed at boot: it says this is a disc the
+// feature knows about at all. g_active is that AND the runtime switch, and it is the one the hot
+// path tests - so turning the feature off costs nothing anywhere, including the capture, rather
+// than quietly continuing to bake 30k vertices a frame for a pass nobody is looking at.
+extern bool g_available;
 extern bool g_active;
 
+inline bool IsAvailable() { return g_available; }
 inline bool IsActive() { return g_active; }
+
+// Runtime on/off. This is an experiment living inside a working emulator, so it needs to be
+// switchable without a rebuild and without touching compat.ini.
+void SetEnabled(bool enabled);
+bool IsEnabled();
 
 void Init();
 void Shutdown();
@@ -276,6 +329,10 @@ void BeginFrame(Draw::DrawContext *draw);
 
 // The depth target, for the debugger to preview. Null until the pass has run once.
 Draw::Framebuffer *ShadowMap();
+
+// The screen-space mask: white where the sun reaches, black where it does not. This is what
+// milestone 3b will multiply the game's colour by.
+Draw::Framebuffer *ShadowMask();
 
 // Called from the draw engine for every draw that reaches the GPU. `vertTypeID` is the decoder's
 // vertex type, not gstate's, because those can differ.

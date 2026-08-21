@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "Common/CommonFuncs.h"
+#include "Common/Log.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/GPU/ShaderWriter.h"
 #include "Core/System.h"
@@ -29,7 +30,11 @@
 
 namespace VCSShadow {
 
+bool g_available = false;
 bool g_active = false;
+// Off until switched on. This is an experiment inside a working emulator: the cost of it
+// being on by default is paid by someone who did not ask for it.
+static bool s_enabled = false;
 
 static FrameStats s_current;
 static FrameStats s_published;
@@ -48,12 +53,18 @@ static Settings s_settings = {
 	16.0f,    // centreDistance ahead of the camera
 	1024,     // mapSize
 	true,     // forwardIsNegativeZ
+	480, 272, // mask size - the PSP's own resolution; the mask is sampled, not looked at
+	0.0025f,  // depthBias
+	false,    // flipShadowV
+	0,        // debugView
+	false,    // countCascadeCoverage
 };
 
 // gstate's view matrix as of the first caster of the frame. Captured rather than read at end of
 // frame because the game leaves whatever matrix the last draw used in place, and the last draw is
 // usually 2D.
 static float s_frameViewMatrix[12];
+static float s_frameProjMatrix[16];
 static bool s_haveViewMatrix;
 
 // The frame's caster geometry. Kept as std::vector so the capacity settles after a few frames
@@ -130,6 +141,19 @@ void DecomposeViewMatrix(const float m[12], ShadowView *view) {
 	view->cameraPos[0] = -(t[0] * m[0] + t[1] * m[1] + t[2] * m[2]);
 	view->cameraPos[1] = -(t[0] * m[3] + t[1] * m[4] + t[2] * m[5]);
 	view->cameraPos[2] = -(t[0] * m[6] + t[1] * m[7] + t[2] * m[8]);
+}
+
+// Row-major, row-vector: C = A * B, so a point transformed by C is the point through A then B.
+void Mul4x4(const float a[16], const float b[16], float out[16]) {
+	for (int row = 0; row < 4; row++) {
+		for (int col = 0; col < 4; col++) {
+			float sum = 0.0f;
+			for (int k = 0; k < 4; k++) {
+				sum += a[row * 4 + k] * b[k * 4 + col];
+			}
+			out[row * 4 + col] = sum;
+		}
+	}
 }
 
 // Builds world-to-light-clip as one row-vector 4x4, so a caster's world position becomes shadow
@@ -232,6 +256,20 @@ static void ComputeShadowView(const FrameStats &stats) {
 	s_view.centre[2] = centre[2];
 
 	BuildLightViewProj(&s_view);
+
+	// World to camera clip. The 4x3 view matrix widens to 4x4 with the translation staying in the
+	// last row, exactly as ConvertMatrix4x3To4x4 does it, and then meets the projection matrix.
+	{
+		const float *v = s_frameViewMatrix;
+		const float view4[16] = {
+			v[0], v[1], v[2],  0.0f,
+			v[3], v[4], v[5],  0.0f,
+			v[6], v[7], v[8],  0.0f,
+			v[9], v[10], v[11], 1.0f,
+		};
+		Mul4x4(view4, s_frameProjMatrix, s_view.cameraViewProj);
+	}
+
 	s_view.valid = true;
 }
 
@@ -390,6 +428,7 @@ static const UniformBufferDesc s_shadowUBDesc{ sizeof(ShadowUB), {
 static Draw::Framebuffer *s_fbo;
 static Draw::Pipeline *s_pipeline;
 static int s_fboSize;
+static bool s_depthSetupFailed;
 
 static void ReleaseResources() {
 	if (s_pipeline) {
@@ -406,6 +445,11 @@ static void ReleaseResources() {
 static bool EnsureResources(Draw::DrawContext *draw) {
 	if (s_fbo && s_pipeline && s_fboSize == s_settings.mapSize) {
 		return true;
+	}
+	// Setup that failed once will fail identically every frame. Retrying it rebuilds shaders at
+	// frame rate, which costs far more than the feature it is trying to enable.
+	if (s_depthSetupFailed) {
+		return false;
 	}
 	ReleaseResources();
 
@@ -497,6 +541,7 @@ static bool EnsureResources(Draw::DrawContext *draw) {
 
 	if (!s_pipeline) {
 		ReleaseResources();
+		s_depthSetupFailed = true;
 		return false;
 	}
 	return true;
@@ -529,7 +574,8 @@ static void RenderCascade(Draw::DrawContext *draw) {
 	// shader goes through ConvertMatrix4x3To3x4Transposed first. Uploading this raw scrambles the
 	// basis, which draws as long thin triangles radiating from a point rather than as a scene.
 	// Count what actually falls in the box, before handing the same matrix to the GPU.
-	{
+	s_capture.verticesInCascade = -1;
+	if (s_settings.countCascadeCoverage) {
 		const float *m = s_view.lightViewProj;
 		int inside = 0;
 		const size_t count = s_positions.size() / 3;
@@ -567,6 +613,269 @@ Draw::Framebuffer *ShadowMap() {
 	return s_fbo;
 }
 
+// --- the shadow mask --------------------------------------------------------------------------
+//
+// A screen-space mask of what the sun reaches, rendered by drawing the captured casters a second
+// time from the camera. The obvious alternative - reconstruct world position from the game's
+// depth buffer - was rejected on inspection: PPSSPP rewrites gl_Position.z through u_minZmaxZ and
+// a further doubling step depending on backend and render state, so reconstruction would mean
+// replicating a moving target and would break in ways that look like shadow bugs. Drawing the
+// geometry again costs one extra pass over ~32k triangles, which is nothing, and hands the
+// fragment shader an exact world position as a varying instead of a reconstructed one.
+
+struct MaskUB {
+	float cameraViewProj[16];
+	float lightViewProj[16];
+	float params[4];   // bias, flipV, unused, unused
+};
+
+static const UniformBufferDesc s_maskUBDesc{ sizeof(MaskUB), {
+	{ "u_cameraViewProj", 0, -1, UniformType::MATRIX4X4, 0 },
+	{ "u_lightViewProj", 1, 0, UniformType::MATRIX4X4, 64 },
+	{ "u_shadowParams", 2, 1, UniformType::FLOAT4, 128 },
+} };
+
+static Draw::Framebuffer *s_maskFbo;
+static Draw::Pipeline *s_maskPipeline;
+static Draw::SamplerState *s_maskSampler;
+static int s_maskWidth;
+static int s_maskHeight;
+static bool s_maskSetupFailed;
+
+static void ReleaseMaskResources() {
+	if (s_maskPipeline) {
+		s_maskPipeline->Release();
+		s_maskPipeline = nullptr;
+	}
+	if (s_maskSampler) {
+		s_maskSampler->Release();
+		s_maskSampler = nullptr;
+	}
+	if (s_maskFbo) {
+		s_maskFbo->Release();
+		s_maskFbo = nullptr;
+	}
+	s_maskWidth = 0;
+	s_maskHeight = 0;
+}
+
+static bool EnsureMaskResources(Draw::DrawContext *draw) {
+	const int width = s_settings.maskWidth;
+	const int height = s_settings.maskHeight;
+	if (s_maskFbo && s_maskPipeline && s_maskWidth == width && s_maskHeight == height) {
+		s_capture.maskStep = CaptureStats::MaskStep::Ok;
+		return true;
+	}
+	if (s_maskSetupFailed) {
+		s_capture.maskStep = CaptureStats::MaskStep::Pipeline;
+		return false;
+	}
+	ReleaseMaskResources();
+
+	using namespace Draw;
+	s_maskFbo = draw->CreateFramebuffer({ width, height, 1, 1, 0, true, "vcs_shadow_mask" });
+	if (!s_maskFbo) {
+		s_capture.maskStep = CaptureStats::MaskStep::Framebuffer;
+		s_maskSetupFailed = true;
+		return false;
+	}
+	s_maskWidth = width;
+	s_maskHeight = height;
+
+	const ShaderLanguageDesc &lang = draw->GetShaderLanguageDesc();
+	static const SamplerDef samplers[] = { { 0, "shadowMap", SamplerFlags(0) } };
+	// The light-space position is computed per vertex, not per fragment. Two reasons, one of them
+	// forced: mul() is a ShaderWriter #define emitted in the vertex and geometry preambles but not
+	// the fragment one, so a matrix multiply in a fragment shader simply will not compile on
+	// Vulkan GLSL. The other is that it is cheaper - once a vertex rather than once a pixel - and
+	// costs nothing in accuracy, because the light projection is orthographic and therefore
+	// affine, so interpolating its output linearly is exact.
+	static const VaryingDef varyings[] = {
+		{ "vec3", "v_lightClip", Draw::SEM_TEXCOORD0, 0, "highp" },
+	};
+
+	// Every uniform is declared in both stages, even though each stage only reads some of them.
+	// On Vulkan the block is a single descriptor shared by the two shaders, so declaring different
+	// subsets generates two different block layouts for one binding and the pipeline will not
+	// build. Unused members cost nothing; a mismatched block costs the whole pass.
+	static const UniformDef uniforms[] = {
+		{ "mat4", "u_cameraViewProj", 0 },
+		{ "mat4", "u_lightViewProj", 1 },
+		{ "vec4", "u_shadowParams", 2 },
+	};
+
+	const size_t kShaderBufferSize = 8192;
+	char *vsCode = new char[kShaderBufferSize];
+	{
+		ShaderWriter writer(vsCode, lang, ShaderStage::Vertex);
+		static const InputDef inputs[] = { { "vec3", "a_position", Draw::SEM_POSITION } };
+		writer.BeginVSMain(inputs, uniforms, varyings);
+		writer.C("  v_lightClip = mul(vec4(a_position, 1.0), u_lightViewProj).xyz;\n");
+		writer.C("  gl_Position = mul(vec4(a_position, 1.0), u_cameraViewProj);\n");
+		writer.EndVSMain(varyings);
+	}
+	ShaderModule *vs = draw->CreateShaderModule(ShaderStage::Vertex, lang.shaderLanguage,
+		(const uint8_t *)vsCode, strlen(vsCode), "vcs_mask_vs");
+	if (!vs) {
+		ERROR_LOG(Log::G3D, "VCS mask VS (%d bytes) failed:\n%s", (int)strlen(vsCode), vsCode);
+	}
+	delete[] vsCode;
+
+	char *fsCode = new char[kShaderBufferSize];
+	{
+		ShaderWriter writer(fsCode, lang, ShaderStage::Fragment);
+		writer.HighPrecisionFloat();
+		writer.DeclareSamplers(samplers);
+		writer.BeginFSMain(uniforms, varyings);
+		writer.C("  vec2 shadowUV = v_lightClip.xy * 0.5 + 0.5;\n");
+		// Which way up the shadow map's V axis runs depends on the backend's clip convention, and
+		// getting it wrong puts the right shapes in the wrong places. Left as a toggle.
+		writer.C("  if (u_shadowParams.y > 0.5) { shadowUV.y = 1.0 - shadowUV.y; }\n");
+		// Sampled unconditionally and clamped, so the debug views below show something even where
+		// the bounds test would have rejected the fragment.
+		writer.C("  vec2 clampedUV = clamp(shadowUV, 0.0, 1.0);\n");
+		writer.C("  float mapDepth = ").SampleTexture2D("shadowMap", "clampedUV").C(".r;\n");
+		writer.C("  float lit = 1.0;\n");
+		writer.C("  if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && shadowUV.y >= 0.0 && shadowUV.y <= 1.0 &&\n");
+		writer.C("      v_lightClip.z >= 0.0 && v_lightClip.z <= 1.0) {\n");
+		writer.C("    if (v_lightClip.z - u_shadowParams.x > mapDepth) { lit = 0.0; }\n");
+		writer.C("  }\n");
+		// The debug views. An all-black mask has at least two causes that look identical from
+		// outside - the sample returning nothing, or the comparison being the wrong way round -
+		// and these separate them in one run rather than one per guess.
+		writer.C("  vec4 outColor = vec4(lit, lit, lit, 1.0);\n");
+		writer.C("  if (u_shadowParams.z > 0.5 && u_shadowParams.z < 1.5) {\n");
+		writer.C("    outColor = vec4(mapDepth, mapDepth, mapDepth, 1.0);\n");
+		writer.C("  } else if (u_shadowParams.z > 1.5 && u_shadowParams.z < 2.5) {\n");
+		writer.C("    outColor = vec4(v_lightClip.z, v_lightClip.z, v_lightClip.z, 1.0);\n");
+		writer.C("  } else if (u_shadowParams.z > 2.5) {\n");
+		writer.C("    outColor = vec4(clampedUV.x, clampedUV.y, 0.0, 1.0);\n");
+		writer.C("  }\n");
+		writer.EndFSMain("outColor");
+	}
+	ShaderModule *fs = draw->CreateShaderModule(ShaderStage::Fragment, lang.shaderLanguage,
+		(const uint8_t *)fsCode, strlen(fsCode), "vcs_mask_fs");
+	if (!fs) {
+		ERROR_LOG(Log::G3D, "VCS mask FS (%d bytes) failed:\n%s", (int)strlen(fsCode), fsCode);
+	}
+	delete[] fsCode;
+
+	if (!vs || !fs) {
+		// Log the source, not just the failure - a shader that will not compile is only
+		// diagnosable if you can see what was handed to the compiler.
+		s_capture.maskStep = vs ? CaptureStats::MaskStep::FragmentShader
+			: CaptureStats::MaskStep::VertexShader;
+		ERROR_LOG(Log::G3D, "VCS shadow mask shader failed to compile (%s)",
+			vs ? "fragment" : "vertex");
+		if (vs) vs->Release();
+		if (fs) fs->Release();
+		ReleaseMaskResources();
+		s_maskSetupFailed = true;
+		return false;
+	}
+
+	static const InputLayoutDesc layoutDesc = {
+		12,
+		{ { SEM_POSITION, DataFormat::R32G32B32_FLOAT, 0 } },
+	};
+	InputLayout *inputLayout = draw->CreateInputLayout(layoutDesc);
+
+	DepthStencilStateDesc dsDesc{};
+	dsDesc.depthTestEnabled = true;
+	dsDesc.depthWriteEnabled = true;
+	dsDesc.depthCompare = Comparison::LESS;
+	DepthStencilState *depthStencil = draw->CreateDepthStencilState(dsDesc);
+	BlendState *blend = draw->CreateBlendState({ false, 0xF });
+	RasterState *raster = draw->CreateRasterState({});
+
+	SamplerStateDesc sampDesc{};
+	sampDesc.magFilter = TextureFilter::NEAREST;
+	sampDesc.minFilter = TextureFilter::NEAREST;
+	sampDesc.mipFilter = TextureFilter::NEAREST;
+	sampDesc.wrapU = TextureAddressMode::CLAMP_TO_EDGE;
+	sampDesc.wrapV = TextureAddressMode::CLAMP_TO_EDGE;
+	sampDesc.wrapW = TextureAddressMode::CLAMP_TO_EDGE;
+	s_maskSampler = draw->CreateSamplerState(sampDesc);
+
+	PipelineDesc desc{
+		Primitive::TRIANGLE_LIST,
+		{ vs, fs },
+		inputLayout,
+		depthStencil,
+		blend,
+		raster,
+		&s_maskUBDesc,
+		samplers,
+	};
+	s_maskPipeline = draw->CreateGraphicsPipeline(desc, "vcs_shadow_mask");
+
+	vs->Release();
+	fs->Release();
+	inputLayout->Release();
+	depthStencil->Release();
+	blend->Release();
+	raster->Release();
+
+	if (!s_maskPipeline) {
+		s_capture.maskStep = CaptureStats::MaskStep::Pipeline;
+		ERROR_LOG(Log::G3D, "VCS shadow mask pipeline failed to create");
+		ReleaseMaskResources();
+		s_maskSetupFailed = true;
+		return false;
+	}
+	s_capture.maskStep = CaptureStats::MaskStep::Ok;
+	return true;
+}
+
+static void RenderMask(Draw::DrawContext *draw) {
+	s_capture.maskRendered = false;
+	s_capture.maskStep = CaptureStats::MaskStep::NotAttempted;
+	if (!s_capture.rendered || !s_fbo || s_batches.empty()) {
+		return;
+	}
+	if (!EnsureMaskResources(draw)) {
+		return;
+	}
+
+	using namespace Draw;
+	draw->BindFramebufferAsRenderTarget(s_maskFbo,
+		{ RPAction::CLEAR, RPAction::CLEAR, RPAction::DONT_CARE, 0xFFFFFFFF, 1.0f, 0, "vcs_mask" },
+		"vcs_mask");
+	draw->BindFramebufferAsTexture(s_fbo, 0, Aspect::DEPTH_BIT, 0);
+	draw->BindSamplerStates(0, 1, &s_maskSampler);
+
+	Viewport viewport{ 0.0f, 0.0f, (float)s_maskWidth, (float)s_maskHeight, 0.0f, 1.0f };
+	draw->SetViewport(viewport);
+	draw->SetScissorRect(0, 0, s_maskWidth, s_maskHeight);
+	draw->BindPipeline(s_maskPipeline);
+
+	MaskUB ub;
+	for (int row = 0; row < 4; row++) {
+		for (int col = 0; col < 4; col++) {
+			ub.cameraViewProj[col * 4 + row] = s_view.cameraViewProj[row * 4 + col];
+			ub.lightViewProj[col * 4 + row] = s_view.lightViewProj[row * 4 + col];
+		}
+	}
+	ub.params[0] = s_settings.depthBias;
+	ub.params[1] = s_settings.flipShadowV ? 1.0f : 0.0f;
+	ub.params[2] = (float)s_settings.debugView;
+	ub.params[3] = 0.0f;
+	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+
+	for (const Batch &batch : s_batches) {
+		if (batch.indexCount < 3) {
+			continue;
+		}
+		draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3, batch.vertexCount,
+			s_indices.data() + batch.firstIndex, batch.indexCount);
+	}
+	s_capture.maskRendered = true;
+}
+
+Draw::Framebuffer *ShadowMask() {
+	return s_maskFbo;
+}
+
 void Init() {
 	memset(&s_current, 0, sizeof(s_current));
 	memset(&s_published, 0, sizeof(s_published));
@@ -575,11 +884,40 @@ void Init() {
 	s_haveViewMatrix = false;
 
 	// The flag is only set for ULUS10160 in compat.ini, so this is the disc-ID check as well.
-	g_active = PSP_CoreParameter().compat.flags().VCSDynamicShadows;
+	g_available = PSP_CoreParameter().compat.flags().VCSDynamicShadows;
+	g_active = g_available && s_enabled;
+}
+
+void SetEnabled(bool enabled) {
+	s_enabled = enabled;
+	g_active = g_available && s_enabled;
+	if (enabled) {
+		// Switching it back on is the one place a fresh attempt makes sense - the alternative is
+		// a latched failure that can only be cleared by restarting the emulator.
+		s_depthSetupFailed = false;
+		s_maskSetupFailed = false;
+	}
+	if (!g_active) {
+		// Drop the frame's work immediately rather than leaving a stale map on screen in the
+		// debugger and a buffer full of geometry nobody will draw.
+		s_positions.clear();
+		s_indices.clear();
+		s_batches.clear();
+		memset(&s_capture, 0, sizeof(s_capture));
+		memset(&s_capturePublished, 0, sizeof(s_capturePublished));
+	}
+}
+
+bool IsEnabled() {
+	return s_enabled;
 }
 
 void Shutdown() {
 	ReleaseResources();
+	ReleaseMaskResources();
+	s_depthSetupFailed = false;
+	s_maskSetupFailed = false;
+	g_available = false;
 	g_active = false;
 	memset(&s_current, 0, sizeof(s_current));
 	memset(&s_published, 0, sizeof(s_published));
@@ -597,7 +935,14 @@ void BeginFrame(Draw::DrawContext *draw) {
 
 	// Project and render before anything is cleared, so the matrix, the sun and the geometry all
 	// belong to the same frame.
+	//
+	// This deliberately does NOT run from the draw engine's BeginFrame. GPU_Vulkan::BeginHostFrame
+	// calls that before framebufferManager_->BeginFrame, so binding a render target there happens
+	// before the framebuffer manager has started its frame - behind its back and too early. The
+	// call site is now immediately after that, and immediately before the Dirty(DIRTY_ALL) that
+	// makes the game re-establish all of its own state, so nothing this binds can leak into it.
 	RenderCascade(draw);
+	RenderMask(draw);
 
 	s_capturePublished = s_capture;
 	memset(&s_capture, 0, sizeof(s_capture));
@@ -656,7 +1001,11 @@ static void NoteLights() {
 			candidate.valid = true;
 			candidate.draws++;
 			for (int c = 0; c < 3; c++) {
-				candidate.dir[c] = dir[c] * invLength;
+				const float normalized = dir[c] * invLength;
+				if (candidate.draws > 1 && fabsf(normalized - candidate.dir[c]) > 0.01f) {
+					candidate.directionChanges++;
+				}
+				candidate.dir[c] = normalized;
 			}
 			candidate.diffuse[0] = r;
 			candidate.diffuse[1] = g;
@@ -823,6 +1172,7 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 	// game has usually moved on to 2D and left a matrix behind that means nothing here.
 	if (!s_haveViewMatrix) {
 		memcpy(s_frameViewMatrix, gstate.viewMatrix, sizeof(s_frameViewMatrix));
+		memcpy(s_frameProjMatrix, gstate.projMatrix, sizeof(s_frameProjMatrix));
 		s_haveViewMatrix = true;
 	} else if (memcmp(s_frameViewMatrix, gstate.viewMatrix, sizeof(s_frameViewMatrix)) != 0) {
 		s_current.viewMatrixChanges++;

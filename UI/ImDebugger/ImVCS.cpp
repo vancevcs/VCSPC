@@ -1495,8 +1495,20 @@ void ImVCSWindow::DrawDrawDistance() {
 }
 
 void ImVCSWindow::DrawShadows() {
-	if (!VCSShadow::IsActive()) {
+	if (!VCSShadow::IsAvailable()) {
 		ImGui::TextColored(kUnsetColor, "inactive - VCSDynamicShadows is not set for this disc");
+		return;
+	}
+
+	bool enabled = VCSShadow::IsEnabled();
+	if (ImGui::Checkbox("Dynamic shadows (experimental)", &enabled)) {
+		VCSShadow::SetEnabled(enabled);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Off costs nothing: no capture, no passes, no per-draw work at all.");
+	}
+	if (!VCSShadow::IsActive()) {
+		ImGui::TextDisabled("Off. The game renders exactly as it would without this fork's shadow code.");
 		return;
 	}
 
@@ -1523,12 +1535,13 @@ void ImVCSWindow::DrawShadows() {
 		if (!c.valid) {
 			continue;
 		}
-		const bool chosen = s.sunValid && s.sunChannel == i;
-		ImGui::TextColored(chosen ? kGoodColor : (c.aboveHorizon ? kUnsetColor : kBadColor),
-			"   light %d: %6.3f %6.3f %6.3f  rgb %.2f %.2f %.2f  %s%s",
+		// Deliberately not marked "chosen": the sun is picked across the whole frame while this
+		// row is only the channel's last state, and labelling it that way produced a panel that
+		// claimed a below-horizon light had been chosen when it had not.
+		ImGui::TextColored(c.aboveHorizon ? kUnsetColor : kBadColor,
+			"   light %d last: %6.3f %6.3f %6.3f  rgb %.2f %.2f %.2f  %s, %d draws, %d changes",
 			i, c.dir[0], c.dir[1], c.dir[2], c.diffuse[0], c.diffuse[1], c.diffuse[2],
-			c.aboveHorizon ? "above horizon" : "AT OR BELOW HORIZON - not the sun",
-			chosen ? ", chosen" : "");
+			c.aboveHorizon ? "above horizon" : "below horizon", c.draws, c.directionChanges);
 	}
 
 	ImGui::Text("draws lit by hardware: %d, of those with a directional light: %d",
@@ -1660,9 +1673,15 @@ void ImVCSWindow::DrawShadows() {
 			ImGui::Text("          y %8.1f .. %-8.1f", s.casterMin[1], s.casterMax[1]);
 			ImGui::Text("          z %8.1f .. %-8.1f", s.casterMin[2], s.casterMax[2]);
 
+			// A few units of slack: the camera routinely sits exactly on this boundary, because
+			// the player's own draws are part of what defines it, and an exact test flickers red
+			// on a frame that is completely healthy. What this is actually checking is that the
+			// camera is in the same coordinate space as the geometry - a wrong space misses by
+			// more than a thousand units, not by a rounding error.
+			const float slack = 8.0f;
 			bool inside = true;
 			for (int i = 0; i < 3; i++) {
-				if (v.cameraPos[i] < s.casterMin[i] || v.cameraPos[i] > s.casterMax[i]) {
+				if (v.cameraPos[i] < s.casterMin[i] - slack || v.cameraPos[i] > s.casterMax[i] + slack) {
 					inside = false;
 				}
 			}
@@ -1693,7 +1712,18 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::TextColored(cap.rendered ? kGoodColor : kBadColor,
 			"depth pass: %s, %d batch%s", cap.rendered ? "ran" : "did not run",
 			cap.batches, cap.batches == 1 ? "" : "es");
-		if (cap.vertices > 0) {
+		const char *maskStepName = "?";
+		switch (cap.maskStep) {
+		case VCSShadow::CaptureStats::MaskStep::Ok: maskStepName = "ok"; break;
+		case VCSShadow::CaptureStats::MaskStep::NotAttempted: maskStepName = "not attempted - no depth map or no geometry"; break;
+		case VCSShadow::CaptureStats::MaskStep::Framebuffer: maskStepName = "framebuffer creation failed"; break;
+		case VCSShadow::CaptureStats::MaskStep::VertexShader: maskStepName = "vertex shader would not compile"; break;
+		case VCSShadow::CaptureStats::MaskStep::FragmentShader: maskStepName = "fragment shader would not compile"; break;
+		case VCSShadow::CaptureStats::MaskStep::Pipeline: maskStepName = "pipeline creation failed"; break;
+		}
+		ImGui::TextColored(cap.maskRendered ? kGoodColor : kBadColor,
+			"mask pass: %s (%s)", cap.maskRendered ? "ran" : "did not run", maskStepName);
+		if (cap.vertices > 0 && cap.verticesInCascade >= 0) {
 			const float pctIn = 100.0f * (float)cap.verticesInCascade / (float)cap.vertices;
 			ImGui::TextColored(cap.verticesInCascade > 0 ? kGoodColor : kBadColor,
 				"in cascade: %d verts (%.1f%% of captured)", cap.verticesInCascade, pctIn);
@@ -1743,6 +1773,20 @@ void ImVCSWindow::DrawShadows() {
 	ImGui::Separator();
 	ImGui::SliderFloat("Cascade radius", &set.cascadeRadius, 8.0f, 128.0f, "%.0f units");
 	ImGui::SliderFloat("Centre ahead", &set.centreDistance, 0.0f, 64.0f, "%.0f units");
+	ImGui::SliderFloat("Depth bias", &set.depthBias, 0.0f, 0.02f, "%.4f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Too little and flat ground self-shadows into stripes. Too much and shadows detach from what casts them.");
+	}
+	ImGui::Checkbox("Count cascade coverage (costs a full CPU pass)", &set.countCascadeCoverage);
+	const char *debugViewNames[] = { "shadow term", "sampled map depth", "light-space Z", "shadow UV (r,g)" };
+	ImGui::Combo("Mask shows", &set.debugView, debugViewNames, 4);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("An all-black mask can mean the sample returns nothing or the comparison is inverted. These tell those apart.");
+	}
+	ImGui::Checkbox("Flip shadow V", &set.flipShadowV);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("If the mask shows shadows of the right shape in the wrong place, mirrored vertically, this is it.");
+	}
 	ImGui::Checkbox("View forward is -Z", &set.forwardIsNegativeZ);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Which view-space axis points into the scene. If the camera/player distance above is sane but the centre sits behind you, this is the wrong way round.");
@@ -1756,6 +1800,15 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::Image(texId, ImVec2(256.0f, 256.0f));
 		ImGui::TextDisabled("A depth map is mostly near-white. Look for the shape of the buildings");
 		ImGui::TextDisabled("around you, seen from where the sun is - not for a picture.");
+	}
+
+	if (Draw::Framebuffer *maskFbo = VCSShadow::ShadowMask()) {
+		ImGui::Separator();
+		ImGui::Text("shadow mask (white = sunlit):");
+		ImTextureID maskId = ImGui_ImplThin3d_AddFBAsTextureTemp(maskFbo, Draw::Aspect::COLOR_BIT,
+			ImGuiPipeline::TexturedOpaque);
+		ImGui::Image(maskId, ImVec2(384.0f, 218.0f));
+		ImGui::TextDisabled("This one is meant to be recognisable: it is your view, in black and white.");
 	}
 
 	// What to actually do with this tab. The counts are only worth anything as a response to
