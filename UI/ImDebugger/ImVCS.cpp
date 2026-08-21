@@ -1355,16 +1355,23 @@ void ImVCSWindow::DrawVault() {
 		ImGui::TextColored(kBadColor, "none");
 	}
 
-	static const char *kSampleNames[4] = {"near", "mid", "far", "landing"};
-	for (int i = 0; i < 4; i++) {
-		ImGui::Text("%-8s", kSampleNames[i]);
+	// The wall lines near to far, then the landing. Numbered rather than named near/mid/far: there
+	// are six of them now - see the note in VCSVault.h on why a fence needs that many - and there
+	// are not six words for it.
+	for (int i = 0; i <= VCS::kVaultWallSamples; i++) {
+		const bool landing = i == VCS::kVaultWallSamples;
+		if (landing) {
+			ImGui::Text("%-8s", "landing");
+		} else {
+			ImGui::Text("wall %-3d", i + 1);
+		}
 		ImGui::SameLine();
 		if (!d.found[i]) {
 			ImGui::TextColored(kUnsetColor, "nothing below");
 			continue;
 		}
 		const bool inBand = d.heights[i] >= s.minHeight && d.heights[i] <= s.maxHeight;
-		ImGui::TextColored(i < 3 && inBand ? kGoodColor : kUnsetColor, "%+.2f", d.heights[i]);
+		ImGui::TextColored(!landing && inBand ? kGoodColor : kUnsetColor, "%+.2f", d.heights[i]);
 	}
 
 	ImGui::Separator();
@@ -1372,8 +1379,10 @@ void ImVCSWindow::DrawVault() {
 	ImGui::Text("Ledge:");
 	ImGui::SameLine();
 	if (d.armed) {
-		ImGui::TextColored(kGoodColor, "armed - %+.2f at %.2f ahead", d.targetHeight,
-			d.targetDistance);
+		// Which move it is matters as much as the fact that one armed: "over" and "onto" fail in
+		// completely different ways, and only one of the two can be animated by the game.
+		ImGui::TextColored(kGoodColor, "armed - %s %+.2f at %.2f ahead",
+			d.kind == VCS::VaultKind::Over ? "over" : "onto", d.targetHeight, d.targetDistance);
 	} else {
 		ImGui::TextColored(kUnsetColor, "%s", d.reject ? d.reject : "no answer yet");
 	}
@@ -1398,10 +1407,34 @@ void ImVCSWindow::DrawVault() {
 		break;
 	}
 	ImGui::SameLine();
-	// The split that matters: how many the GAME animated, against how many this had to move by
-	// hand. A native count stuck at zero with attempts climbing means the game keeps declining.
-	ImGui::TextDisabled("%llu vaulted, %llu animated by the game",
-		(unsigned long long)d.vaults, (unsigned long long)d.nativeClimbs);
+	ImGui::TextDisabled("%llu vaulted", (unsigned long long)d.vaults);
+
+	// Where the animation went, broken out rather than left as "vaulted against animated". That
+	// pair could not tell the two failures apart - a vault that never asked the game (a hop over a
+	// fence, or preferNative off) and one it asked and was refused both read as an unanimated
+	// vault, and they need opposite fixes. Asked-but-never-animated says the band is arming walls
+	// the game's own search won't take; never-asked says nothing is even reaching it.
+	const unsigned long long asked = (unsigned long long)d.nativeAttempts;
+	const unsigned long long animated = (unsigned long long)d.nativeClimbs;
+	const unsigned long long declined = (unsigned long long)d.nativeDeclines;
+	const unsigned long long silent = (unsigned long long)d.nativeSilent;
+	const unsigned long long never =
+		d.vaults > d.nativeAttempts ? (unsigned long long)(d.vaults - d.nativeAttempts) : 0;
+
+	ImGui::Text("Animation:");
+	ImGui::SameLine();
+	ImGui::TextColored(animated > 0 ? kGoodColor : (asked > 0 ? kBadColor : kUnsetColor),
+		"%llu of %llu asked", animated, asked);
+	ImGui::SameLine();
+	ImGui::TextDisabled("(%llu declined, %llu unanswered, %llu never asked)", declined, silent,
+		never);
+
+	// And why the LAST one went the way it did. Sticky, unlike the reject line above - that one is
+	// rewritten by the next probe a frame after the vault ends, which used to put this answer out
+	// of reach at exactly the moment it was wanted.
+	ImGui::Text("Last vault:");
+	ImGui::SameLine();
+	ImGui::TextColored(kUnsetColor, "%s", d.lastNative ? d.lastNative : "none yet");
 
 	ImGui::Separator();
 
@@ -1427,11 +1460,24 @@ void ImVCSWindow::DrawVault() {
 	ImGui::Checkbox("Require somewhere to land", &s.requireLanding);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
-			"Refuse ledges with nothing behind them - a fence rail, or a parapet with a drop on "
-			"the far side. Turning this off allows narrow ledges and the landings that go with "
-			"them.");
+			"Refuse ledges with nothing behind them, and parapets with a real drop on the far "
+			"side. Turning this off allows narrow ledges and the landings that go with them - and "
+			"everything it lets through is treated as a pull-up onto the top.");
 	}
 	ImGui::SliderFloat("Landing tolerance", &s.landingTolerance, 0.05f, 1.00f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"How close the far side has to be to the ledge top to count as the same surface - "
+			"that is, as a pull-up ONTO it rather than a hop OVER it.");
+	}
+	ImGui::SliderFloat("Landing drop", &s.landingDrop, 0.00f, 4.00f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"How far below the player's own footing the far side may be and still be hopped down "
+			"onto. This is what separates a fence from a parapet: behind a fence is the ground you "
+			"were already on, behind a roof edge is the street. Zero refuses every hop over and "
+			"leaves only pull-ups.");
+	}
 
 	ImGui::SliderInt("Rise ticks", &s.riseTicks, 4, 60);
 	ImGui::SliderInt("Step ticks", &s.stepTicks, 2, 40);
@@ -1446,6 +1492,7 @@ void ImVCSWindow::DrawVault() {
 			"It runs the game's own ledge search first, so it can decline a wall this probe was "
 			"happy with; the written motion is the fallback when it does.");
 	}
+
 }
 
 void ImVCSWindow::DrawDrawDistance() {

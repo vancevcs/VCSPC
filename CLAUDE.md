@@ -2068,8 +2068,8 @@ fallback path.
 **Measured constants, since they anchor every setting here.** World units are metres: a waist wall
 reads **+0.908** above the player's footing, a head-height wall **+2.008**. The ped origin sits
 **1.040** above the surface it stands on - the number this design deliberately avoids needing, now
-known anyway. The default band (1.10 .. 2.30) therefore excludes the waist wall by design and
-catches the head-height one, which is the scope this was asked for.
+known anyway. The default band (**1.50 .. 3.10**) therefore excludes the waist wall by design and
+catches the head-height one, with room above it for a tall fence.
 
 The design decisions, in the order they were made:
 
@@ -2094,10 +2094,21 @@ above the surface it was standing on)`.
 reports surfaces *below* the point you ask from, so a wall taller than `probeCeiling` above the
 footing simply does not register — no check, no arbitrary rejection rule.
 
-**Five lines, once every one or two frames:** one through the player (footing), three at the wall
-(near/mid/far, nearest match wins), one past it (somewhere to stand). The last one is what
-distinguishes a ledge from a fence rail, and refusing a ledge with nothing behind it is the
-difference between climbing onto a roof and being placed inside it.
+**Eight lines, once every one or two frames:** one through the player (footing), six at the wall
+(near to far, nearest match wins), one past it (somewhere to go). Six at the wall rather than three
+because **a vertical line only reports what it is dropped through**, and a fence rail a hand's
+breadth deep falls between lines spaced 0.40 apart far more often than it falls on one - and a
+fence that is missed reads as *nothing in front of the player*, not as a fence that was refused.
+Six across the same reach puts them 0.16 apart. That is the whole of the "narrow models" fix; the
+rest of the probe never cared how wide anything was.
+
+**The last line picks between two moves rather than only permitting one.** A far side level with
+the ledge is a surface to stand on - a pull-up **onto** it, which is the case the game can animate.
+A far side *below* the ledge but no more than `landingDrop` (1.50) below the player's own footing is
+a fence: go **over**, clear the top, and come down on the other side. Deeper than that is a parapet
+with the street underneath, and higher than the ledge is a second wall with no room between them;
+neither arms. A going-over vault never asks the game to climb, whatever `preferNative` says - its
+climb-out finishes standing on top of what it found, and on top of a fence is a rail.
 
 **How the query works at all** is the genuinely new capability here, and it is written up in
 "Asking the world a question" in [docs/VCS_ADDRESSES.md](docs/VCS_ADDRESSES.md): a ~40 instruction

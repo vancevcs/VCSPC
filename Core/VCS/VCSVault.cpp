@@ -22,13 +22,14 @@
 
 namespace VCS {
 
-// The probe fires five lines: one through the player for the footing, three at the wall, and one
-// past it for somewhere to stand. Sample 0 is the footing; 1..3 are the wall, near to far; 4 is
-// the landing.
+// The probe fires eight lines: one through the player for the footing, six at the wall, and one
+// past it for somewhere to go. Sample 0 is the footing; 1..kWallSamples are the wall, near to far;
+// the last is the landing. The wall count lives in the header - see the note there on why it is
+// six and not three.
 static constexpr int kSelfSample = 0;
-static constexpr int kWallSamples = 3;
-static constexpr int kLandSample = 4;
-static constexpr int kProbeSamples = 5;
+static constexpr int kWallSamples = kVaultWallSamples;
+static constexpr int kLandSample = kWallSamples + 1;
+static constexpr int kProbeSamples = kVaultProbeSamples;
 
 static_assert(kProbeSamples <= kMaxGroundSamples, "the probe asks for more than the block holds");
 
@@ -59,9 +60,12 @@ static bool g_probeInFlight = false;
 static bool g_armed = false;
 static Vec2 g_ledgeOrigin;      // where the player was when this was solved
 static Vec2 g_ledgeForward;
-static float g_ledgeZ = 0.0f;   // world Z of the surface to climb onto
-static float g_footingZ = 0.0f; // and of the one being left
+static float g_ledgeZ = 0.0f;   // world Z of the edge to get over
+static float g_landingZ = 0.0f; // and of the surface to finish standing on, which for a pull-up
+                                // IS the ledge and for a hop over a fence is the ground behind it
+static float g_footingZ = 0.0f; // the one being left
 static float g_ledgeDistance = 0.0f;
+static VaultKind g_ledgeKind = VaultKind::None;
 
 // The motion.
 static VaultPhase g_phase = VaultPhase::Idle;
@@ -70,8 +74,8 @@ static Vec2 g_startXY;
 static float g_startZ = 0.0f;
 static Vec2 g_riseEndXY;
 static Vec2 g_landXY;
-static float g_topZ = 0.0f;      // where the rise finishes: the ledge plus clearance
-static float g_settleZ = 0.0f;   // where the step finishes: standing on the ledge
+static float g_topZ = 0.0f;      // where the rise finishes: clear of the ledge, whichever move
+static float g_settleZ = 0.0f;   // where the step finishes: standing on the landing surface
 static float g_vaultHeading = 0.0f;
 
 // The jump key has to be RELEASED between vaults. Without this, holding it through a vault starts
@@ -81,6 +85,17 @@ static bool g_triggerLatched = false;
 static u64 g_vaults = 0;
 static u64 g_nativeAttempts = 0;
 static u64 g_nativeClimbs = 0;
+static u64 g_nativeDeclines = 0;
+static u64 g_nativeSilent = 0;
+
+// Why the last vault did or didn't get the game's animation. A string rather than a flag, for the
+// same reason `reject` is one: these are not degrees of one thing, they are unrelated failures, and
+// the difference between "never asked" and "asked and refused" is the whole diagnosis.
+//
+// It has to outlive the vault. `reject` does not - the probe restarts the instant the phase goes
+// back to Idle and overwrites it within a frame, so the reason a vault had no animation was gone
+// by the time anyone could read it.
+static const char *g_lastNative = nullptr;
 
 // How long to wait for the game to answer whether it will climb. The query turns around in a frame
 // or two; this is the point at which waiting longer is worse than falling back.
@@ -115,11 +130,15 @@ void VaultReset() {
 	g_phase = VaultPhase::Idle;
 	g_phaseTicks = 0;
 	g_armed = false;
+	g_ledgeKind = VaultKind::None;
 	g_probeInFlight = false;
 	g_debug = VCSVaultDebug();
 	g_debug.vaults = g_vaults;
 	g_debug.nativeAttempts = g_nativeAttempts;
 	g_debug.nativeClimbs = g_nativeClimbs;
+	g_debug.nativeDeclines = g_nativeDeclines;
+	g_debug.nativeSilent = g_nativeSilent;
+	g_debug.lastNative = g_lastNative;
 }
 
 static float SmoothStep(float t) {
@@ -178,7 +197,7 @@ static bool PlayerForward(Vec2 *out, float *heading) {
 	return true;
 }
 
-// Fire the five lines. Nothing here decides anything - it only asks.
+// Fire the lines. Nothing here decides anything - it only asks.
 static void RequestProbe(const Vec2 &at, const Vec2 &forward, float playerZ, float footingZ,
                          bool haveFooting) {
 	// The lines start above the player's FOOTING when we know it, and above the ped's own origin
@@ -193,10 +212,14 @@ static void RequestProbe(const Vec2 &at, const Vec2 &forward, float playerZ, flo
 	const float reachNear = g_settings.reachNear;
 	const float reachFar = g_settings.reachFar;
 
+	// The wall lines are spread evenly across the reach, both ends included. Evenly rather than
+	// clustered anywhere, because a thin obstacle is equally likely at any distance in it - and the
+	// gap between two neighbours is exactly the thickness this can still miss.
 	g_probeDistances[kSelfSample] = 0.0f;
-	g_probeDistances[1] = reachNear;
-	g_probeDistances[2] = (reachNear + reachFar) * 0.5f;
-	g_probeDistances[3] = reachFar;
+	for (int i = 0; i < kWallSamples; i++) {
+		const float t = kWallSamples > 1 ? (float)i / (float)(kWallSamples - 1) : 0.0f;
+		g_probeDistances[1 + i] = Lerp(reachNear, reachFar, t);
+	}
 	g_probeDistances[kLandSample] = reachFar + g_settings.landingDepth;
 
 	VCSGroundSample samples[kProbeSamples];
@@ -227,13 +250,17 @@ static void SolveProbe() {
 
 	g_debug.haveFooting = r[kSelfSample].found;
 	g_debug.footingZ = r[kSelfSample].z;
-	for (int i = 0; i < 4; i++) {
+	// One row per line, wall samples then the landing - which is r[kLandSample], and therefore the
+	// last iteration of the same loop.
+	for (int i = 0; i <= kWallSamples; i++) {
 		g_debug.found[i] = r[i + 1].found;
 		g_debug.heights[i] = r[i + 1].z - r[kSelfSample].z;
 	}
 
 	g_armed = false;
 	g_debug.armed = false;
+	g_debug.kind = VaultKind::None;
+	g_ledgeKind = VaultKind::None;
 	g_debug.targetHeight = 0.0f;
 	g_debug.targetDistance = 0.0f;
 
@@ -263,28 +290,51 @@ static void SolveProbe() {
 	}
 
 	const float ledgeZ = r[hit].z;
-	if (g_settings.requireLanding) {
-		if (!r[kLandSample].found) {
-			g_debug.reject = "no landing surface";
+
+	// What is behind the edge picks the move. Level with it and there is a surface to stand on, so
+	// this is a pull-up ONTO it. Below it, but not far below the footing, and the thing in front is
+	// a fence: go OVER, and come down on the far side. Far below is a parapet at a roof edge and
+	// the street underneath, and HIGHER is a second wall with no room between the two.
+	VaultKind kind = VaultKind::Onto;
+	float landingZ = ledgeZ;
+	const char *landingReject = nullptr;
+	if (!r[kLandSample].found) {
+		landingReject = "nothing on the far side";
+	} else {
+		const float landZ = r[kLandSample].z;
+		if (std::fabs(landZ - ledgeZ) <= g_settings.landingTolerance) {
+			kind = VaultKind::Onto;
+		} else if (landZ > ledgeZ) {
+			landingReject = "the far side is higher than the ledge";
+		} else if (footing - landZ <= g_settings.landingDrop) {
+			kind = VaultKind::Over;
+			landingZ = landZ;
+		} else {
+			landingReject = "the far side is a drop, not a landing";
+		}
+	}
+	if (landingReject) {
+		if (g_settings.requireLanding) {
+			g_debug.reject = landingReject;
 			return;
 		}
-		if (std::fabs(r[kLandSample].z - ledgeZ) > g_settings.landingTolerance) {
-			// The far side is not the same surface: a fence rail, a parapet with a drop behind it,
-			// or a roof edge with the next building further down. Climbing it would land the
-			// player inside or above nothing.
-			g_debug.reject = "landing is not the same surface";
-			return;
-		}
+		// Allowed anyway, which is the whole point of the setting. It stays a pull-up: with no
+		// landing to speak of there is nothing to come down onto, so the top is the only target.
+		kind = VaultKind::Onto;
+		landingZ = ledgeZ;
 	}
 
 	g_armed = true;
 	g_ledgeOrigin = g_probeOrigin;
 	g_ledgeForward = g_probeForward;
 	g_ledgeZ = ledgeZ;
+	g_landingZ = landingZ;
 	g_footingZ = footing;
 	g_ledgeDistance = g_probeDistances[hit];
+	g_ledgeKind = kind;
 
 	g_debug.armed = true;
+	g_debug.kind = kind;
 	g_debug.reject = nullptr;
 	g_debug.targetHeight = ledgeZ - footing;
 	g_debug.targetDistance = g_ledgeDistance;
@@ -306,10 +356,18 @@ static void SolveProbe() {
 // the in-water flag cannot be forced, because the game recomputes it from the world every frame.
 static bool TryStartNativeClimb(u32 ped) {
 	if (!g_settings.preferNative) {
+		g_lastNative = "not asked - the game's own climb is switched off";
+		return false;
+	}
+	// Counted only once the question is actually on its way. A request that never went out is not
+	// the game refusing anything - it means the query layer is unavailable, which is a fault on
+	// this side rather than a judgement on the game's, and lumping the two together hides it.
+	if (!RequestNativeClimb(ped)) {
+		g_lastNative = "could not ask - the world query is not available";
 		return false;
 	}
 	g_nativeAttempts++;
-	return RequestNativeClimb(ped);
+	return true;
 }
 
 static void StartVault(u32 ped, const Vec2 &pos, float z) {
@@ -329,10 +387,14 @@ static void StartVault(u32 ped, const Vec2 &pos, float z) {
 	g_riseEndXY.y = pos.y + g_ledgeForward.y * riseDistance;
 
 	// The ped's origin is not at its feet, and this is where that matters: the height it has to
-	// finish at is the ledge plus however far the origin sat above the surface it was standing on
-	// a moment ago. Same cancellation the whole file is built on.
-	g_settleZ = g_ledgeZ + standOffset;
-	g_topZ = g_settleZ + g_settings.clearance;
+	// finish at is the surface it lands on plus however far the origin sat above the surface it was
+	// standing on a moment ago. Same cancellation the whole file is built on.
+	//
+	// The rise always clears the LEDGE, whichever move this is - going over a fence means getting
+	// above the rail first, and only where it comes DOWN differs. For a pull-up the landing is the
+	// ledge, so the two heights collapse back into the one this used to compute.
+	g_settleZ = g_landingZ + standOffset;
+	g_topZ = g_ledgeZ + standOffset + g_settings.clearance;
 
 	g_vaultHeading = atan2f(-g_ledgeForward.x, g_ledgeForward.y);
 
@@ -342,7 +404,13 @@ static void StartVault(u32 ped, const Vec2 &pos, float z) {
 
 	// Ask the game first, and do nothing at all while it decides. Writing a position on the frames
 	// its climb is starting would be two things moving one ped.
-	if (TryStartNativeClimb(ped)) {
+	//
+	// Only for a pull-up, though. The game's climb-out finishes standing on top of whatever its own
+	// search found, and on top of a fence is a rail - the one place a hop over it is meant not to
+	// end. So going over always runs the written motion, whatever preferNative says.
+	if (g_ledgeKind == VaultKind::Over) {
+		g_lastNative = "not asked - going over it, not onto it";
+	} else if (TryStartNativeClimb(ped)) {
 		g_phase = VaultPhase::AskingGame;
 		return;
 	}
@@ -398,6 +466,9 @@ void VaultTick(VCSInputContext context) {
 	g_debug.vaults = g_vaults;
 	g_debug.nativeAttempts = g_nativeAttempts;
 	g_debug.nativeClimbs = g_nativeClimbs;
+	g_debug.nativeDeclines = g_nativeDeclines;
+	g_debug.nativeSilent = g_nativeSilent;
+	g_debug.lastNative = g_lastNative;
 	g_debug.probing = g_probeInFlight;
 
 	if (!g_settings.enabled) {
@@ -425,17 +496,22 @@ void VaultTick(VCSInputContext context) {
 				g_phase = VaultPhase::Climbing;
 				g_phaseTicks = 0;
 				g_nativeClimbs++;
+				g_lastNative = "the game animated it";
 				g_debug.reject = nullptr;
 			} else {
 				// Its ledge search declined - our probe is happy with this wall and the game is not.
 				// Fall back to moving the player ourselves, which is what used to happen always.
 				g_phase = VaultPhase::Rising;
 				g_phaseTicks = 0;
+				g_nativeDeclines++;
+				g_lastNative = "the game's own search declined it";
 				g_debug.reject = "the game declined to climb it";
 			}
 		} else if (g_phaseTicks > kNativeAnswerTicks) {
 			g_phase = VaultPhase::Rising;
 			g_phaseTicks = 0;
+			g_nativeSilent++;
+			g_lastNative = "the game never answered";
 			g_debug.reject = "no answer from the game";
 		}
 		g_debug.phase = g_phase;

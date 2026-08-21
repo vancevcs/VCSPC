@@ -26,10 +26,29 @@
 // code; what it lacks is any way to reach it on land, because nothing on foot ever asks "is there
 // a ledge in front of me".
 //
-// So this asks. Every other frame it drops four vertical lines through the game's own collision -
+// So this asks. Every other frame it drops eight vertical lines through the game's own collision -
 // see VCSWorld for how a host-side caller gets to call CWorld::FindGroundZFor3DCoord at all - and
 // compares what they hit against where the player is standing. A surface between chest and
-// head height, with somewhere to stand behind it, is a ledge.
+// head height, with somewhere to go behind it, is a ledge.
+//
+// Six of those eight are aimed at the wall, and the count is set by the THINNEST thing worth
+// climbing rather than by the widest. A vertical line reports only what it is dropped through: a
+// fence rail a hand's breadth deep falls BETWEEN two lines spaced 0.40 apart far more often than
+// it falls on one, and a fence that is missed does not read as a fence that was refused - it reads
+// as nothing being in front of the player at all. Six lines across the same reach put them 0.16
+// apart, which is thinner than anything in this game that a person could climb.
+//
+// ---------------------------------------------------------------------------------------------
+// TWO WAYS OVER, and the far side is what tells them apart.
+//
+// Climb ONTO a wall and the surface behind its edge is the one you end up standing on: a roof, a
+// balcony, the top of a container. Go OVER a fence and there is no top worth standing on - the
+// ground behind it is back down at the height you started from.
+//
+// The landing line decides which of the two it is. Level with the ledge, within a tolerance, and
+// this is a pull-up onto it. Below the ledge but not far below your own footing, and it is a
+// fence: clear the top and come down the other side. Far below - a parapet at a roof edge with the
+// street underneath - and it is neither, and nothing arms.
 //
 // ---------------------------------------------------------------------------------------------
 // EVERYTHING IS MEASURED RELATIVE TO THE PLAYER'S OWN FOOTING, and that is not a detail.
@@ -51,7 +70,9 @@
 //
 //   1. The GAME climbs it. CanClimb and StartClimb - the two functions the swimming climb-out goes
 //      through - are called on the game's own thread, and it plays the pull-up, moves the ped and
-//      puts him down on top. The animation, the collision and the landing are all its own.
+//      puts him down on top. The animation, the collision and the landing are all its own. Only a
+//      pull-up is ever asked of it: "on top of what it found" is the wrong place to finish a hop
+//      over a fence, because on top of a fence is a rail.
 //   2. When its search declines a ledge this probe was happy with, this writes the ped's world
 //      position along a curve for about half a second instead. Which works because of something
 //      the free-aim work already established: unlike velocity, nothing in the game recomputes the
@@ -62,6 +83,20 @@
 // is a fallback rather than a mode. The Vault tab counts the two separately.
 
 namespace VCS {
+
+// The probe's shape. Out here rather than in the .cpp because the debugger draws a row per line and
+// has to agree about how many there are. One through the player for the footing, six at the wall,
+// one past it for the landing - eight, which is every slot the query block holds
+// (kMaxGroundSamples), and therefore why the wall count is six and not more.
+inline constexpr int kVaultWallSamples = 6;
+inline constexpr int kVaultProbeSamples = kVaultWallSamples + 2;
+
+// Which of the two moves an armed ledge would run - see "TWO WAYS OVER" above.
+enum class VaultKind {
+	None,
+	Onto,  // a pull-up onto the surface, which the game itself can animate
+	Over,  // a hop across a fence, landing on the far side - always the written motion
+};
 
 struct VCSVaultSettings {
 	// On. It was off while the motion was still the written-position fallback - handing someone a
@@ -74,17 +109,29 @@ struct VCSVaultSettings {
 	float reachNear = 0.50f;
 	float reachFar = 1.30f;
 
-	// How far PAST the far sample to check for somewhere to stand. A ledge with nothing behind it
-	// is a fence rail, and pulling up onto one lands the player inside the geometry beyond it.
+	// How far PAST the far sample to look for somewhere to go. What is found there is what picks
+	// between the two moves; a ledge with NOTHING behind it is refused either way, because it is
+	// geometry with no far side and pulling up onto it lands the player inside whatever is beyond.
 	float landingDepth = 0.90f;
 
 	// Whether that landing check is required. Turning it off allows narrow ledges, at the price of
-	// the failure it exists to prevent.
+	// the failure it exists to prevent - and everything allowed that way is treated as a pull-up,
+	// since with no landing there is nothing to come down onto.
 	bool requireLanding = true;
 
 	// How far the landing surface may differ from the ledge top and still count as the same
-	// surface to stand on.
+	// surface to stand on - that is, as a pull-up ONTO the ledge rather than a hop OVER it.
 	float landingTolerance = 0.40f;
+
+	// And how far below the player's own FOOTING the far side may be before a hop over is refused.
+	// This is the number that separates a fence from a parapet: behind a fence is the ground you
+	// were already standing on, give or take a kerb or a verge, while behind a roof edge is the
+	// street. A drop deeper than this is a fall, and a fall is not a vault.
+	//
+	// Measured against the footing rather than against the ledge on purpose. Against the ledge it
+	// would scale with the height of the thing being climbed, so a taller fence would licence a
+	// longer fall - which is backwards.
+	float landingDrop = 1.50f;
 
 	// How high above the player's footing the probe lines START. This doubles as the ceiling on
 	// what can be climbed, and it does so for a structural reason rather than by a check: the
@@ -102,8 +149,9 @@ struct VCSVaultSettings {
 	//
 	// Measured references, in the same units: a waist wall reads +0.91, a head-height wall +2.01,
 	// and the ped's own origin sits 1.04 above what it stands on.
+	//
 	float minHeight = 1.50f;
-	float maxHeight = 2.90f;
+	float maxHeight = 3.10f;
 
 	// The motion, in 60 Hz ticks. Rise first, then step forward onto the surface, which is the
 	// shape of the swimming climb-out: hang, pull up, plant a foot.
@@ -155,17 +203,26 @@ struct VCSVaultDebug {
 	bool haveFooting = false;     // the sample under the player found a surface
 	float footingZ = 0.0f;        // and what it hit
 	float playerZ = 0.0f;         // the ped's stored Z, for comparison - see the note on origins
-	float heights[4] = {};        // wall samples 1..3 then the landing sample, above the footing
-	bool found[4] = {};
+	// The wall samples near to far, then the landing sample, all as heights above the footing.
+	float heights[kVaultWallSamples + 1] = {};
+	bool found[kVaultWallSamples + 1] = {};
 	bool armed = false;
+	VaultKind kind = VaultKind::None;  // and which of the two moves it would be
 	float targetHeight = 0.0f;    // the ledge the trigger would use
 	float targetDistance = 0.0f;  // how far in front it is
 	const char *reject = nullptr; // why the last probe produced no ledge, when it produced none
 	VaultPhase phase = VaultPhase::Idle;
 	int phaseTicks = 0;
 	u64 vaults = 0;               // how many have actually run
-	u64 nativeAttempts = 0;       // how many of those asked the game to do it
-	u64 nativeClimbs = 0;         // and how many the game accepted and animated
+	u64 nativeAttempts = 0;       // how many of those got as far as asking the game
+	u64 nativeClimbs = 0;         // how many it accepted and animated
+	u64 nativeDeclines = 0;       // how many its own search refused
+	u64 nativeSilent = 0;         // and how many it never answered at all
+
+	// Why the last vault did or didn't get the game's animation, in words. Sticky, unlike `reject`
+	// above it: that one is rewritten by the next probe within a frame of the vault ending, which
+	// put the answer out of reach at exactly the moment it was wanted.
+	const char *lastNative = nullptr;
 };
 const VCSVaultDebug &VaultDebugState();
 

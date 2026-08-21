@@ -54,7 +54,8 @@
 //     passes eight integer arguments in $a0-$a3 and $t0-$t3 (see the ProcessLineOfSight note in
 //     docs/VCS_ADDRESSES.md), which is not the convention a host-side caller would guess.
 //   - One enqueued call answers SEVERAL sample points, because the program loops. A ledge probe
-//     wants four or five samples per frame and one call per frame is the whole budget.
+//     wants every slot this block has - eight - per frame, and one call per frame is the whole
+//     budget.
 //   - Nothing has to be read back at a particular moment. The program writes its answers into the
 //     block and stamps a sequence number; the host reads them whenever it next looks.
 //
