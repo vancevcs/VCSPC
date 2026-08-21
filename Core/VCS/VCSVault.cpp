@@ -87,6 +87,15 @@ static u64 g_nativeAttempts = 0;
 static u64 g_nativeClimbs = 0;
 static u64 g_nativeDeclines = 0;
 static u64 g_nativeSilent = 0;
+static u64 g_nativeForced = 0;
+static u64 g_nativeStillborn = 0;
+
+// Whether the climb we are watching is one we forced, and whether the ped ever actually entered
+// the climb state. Both exist for the same case: a forced struct the game accepts at the call and
+// then does nothing with. Without them that reads as a vault which simply never happened, and the
+// player is left standing at the wall having pressed jump.
+static bool g_climbWasForced = false;
+static bool g_sawClimbState = false;
 
 // Why the last vault did or didn't get the game's animation. A string rather than a flag, for the
 // same reason `reject` is one: these are not degrees of one thing, they are unrelated failures, and
@@ -105,6 +114,12 @@ static constexpr int kNativeAnswerTicks = 20;
 // state would hold the player's controls for the rest of the session. The real climb takes about
 // two seconds.
 static constexpr int kNativeClimbMaxTicks = 300;
+
+// How long to let the ped state stay at something other than "climbing" at the START of a climb
+// before concluding the climb is not going to happen. The game's own climb is already in state 44
+// by the time we hear back, so this only ever fires on a forced one that StartClimb accepted and
+// then quietly dropped - the exact failure the hand-written state 44 produced.
+static constexpr int kClimbEngageTicks = 8;
 
 // What the ped state reads while the game is running its climb-out. Measured, not guessed - see
 // kVCSPedStateOffset in VCSAddresses.h.
@@ -138,6 +153,8 @@ void VaultReset() {
 	g_debug.nativeClimbs = g_nativeClimbs;
 	g_debug.nativeDeclines = g_nativeDeclines;
 	g_debug.nativeSilent = g_nativeSilent;
+	g_debug.nativeForced = g_nativeForced;
+	g_debug.nativeStillborn = g_nativeStillborn;
 	g_debug.lastNative = g_lastNative;
 }
 
@@ -354,15 +371,24 @@ static void SolveProbe() {
 // Two dead ends behind this, both recorded in CLAUDE.md so nobody re-walks them: writing the ped
 // state (44) by hand engages the climb and then aborts, because nothing told it WHAT to climb; and
 // the in-water flag cannot be forced, because the game recomputes it from the world every frame.
-static bool TryStartNativeClimb(u32 ped) {
+static bool TryStartNativeClimb(u32 ped, const Vec2 &landXY) {
 	if (!g_settings.preferNative) {
 		g_lastNative = "not asked - the game's own climb is switched off";
 		return false;
 	}
+
+	// Where we want him to finish, as a point on the surface rather than as a ped origin - the
+	// game moves its own ped and knows its own offsets. A guess at the convention, and the first
+	// thing to calibrate if a forced climb runs but lands somewhere wrong.
+	VCSClimbForce force;
+	force.entity = 0;
+	force.target[0] = landXY.x;
+	force.target[1] = landXY.y;
+	force.target[2] = g_landingZ;
 	// Counted only once the question is actually on its way. A request that never went out is not
 	// the game refusing anything - it means the query layer is unavailable, which is a fault on
 	// this side rather than a judgement on the game's, and lumping the two together hides it.
-	if (!RequestNativeClimb(ped)) {
+	if (!RequestNativeClimb(ped, g_settings.forceNativeClimb ? &force : nullptr)) {
 		g_lastNative = "could not ask - the world query is not available";
 		return false;
 	}
@@ -408,9 +434,12 @@ static void StartVault(u32 ped, const Vec2 &pos, float z) {
 	// Only for a pull-up, though. The game's climb-out finishes standing on top of whatever its own
 	// search found, and on top of a fence is a rail - the one place a hop over it is meant not to
 	// end. So going over always runs the written motion, whatever preferNative says.
-	if (g_ledgeKind == VaultKind::Over) {
+	// Going over is only excluded while the game picks its own destination. Once we are filling the
+	// struct in we choose the target too, so a fence can be asked for as readily as a wall - it is
+	// the far side we hand it rather than the rail.
+	if (g_ledgeKind == VaultKind::Over && !g_settings.forceNativeClimb) {
 		g_lastNative = "not asked - going over it, not onto it";
-	} else if (TryStartNativeClimb(ped)) {
+	} else if (TryStartNativeClimb(ped, g_landXY)) {
 		g_phase = VaultPhase::AskingGame;
 		return;
 	}
@@ -468,6 +497,8 @@ void VaultTick(VCSInputContext context) {
 	g_debug.nativeClimbs = g_nativeClimbs;
 	g_debug.nativeDeclines = g_nativeDeclines;
 	g_debug.nativeSilent = g_nativeSilent;
+	g_debug.nativeForced = g_nativeForced;
+	g_debug.nativeStillborn = g_nativeStillborn;
 	g_debug.lastNative = g_lastNative;
 	g_debug.probing = g_probeInFlight;
 
@@ -490,20 +521,32 @@ void VaultTick(VCSInputContext context) {
 		g_phaseTicks++;
 		bool found = false;
 		if (NativeClimbAnswered(&found)) {
-			if (found) {
-				// The game took it. It owns the ped now, animation and all; all this has left to do
-				// is stay out of the way until its state goes back to normal.
+			// Forced is not a kind of found. The game declined either way, and `found` keeps
+			// meaning what it has always meant: whether its own search agreed.
+			const bool forced = NativeClimbForced();
+			if (!found) {
+				g_nativeDeclines++;
+			}
+			if (found || forced) {
+				// The climb is running. It owns the ped now, animation and all; all this has left
+				// to do is stay out of the way until its state goes back to normal.
 				g_phase = VaultPhase::Climbing;
 				g_phaseTicks = 0;
-				g_nativeClimbs++;
-				g_lastNative = "the game animated it";
+				g_climbWasForced = forced;
+				g_sawClimbState = false;
+				if (forced) {
+					g_nativeForced++;
+					g_lastNative = "the game declined - forced onto our own target";
+				} else {
+					g_nativeClimbs++;
+					g_lastNative = "the game animated it";
+				}
 				g_debug.reject = nullptr;
 			} else {
-				// Its ledge search declined - our probe is happy with this wall and the game is not.
-				// Fall back to moving the player ourselves, which is what used to happen always.
+				// Its ledge search declined and nothing overrode it - our probe is happy with this
+				// wall and the game is not. Fall back to moving the player ourselves.
 				g_phase = VaultPhase::Rising;
 				g_phaseTicks = 0;
-				g_nativeDeclines++;
 				g_lastNative = "the game's own search declined it";
 				g_debug.reject = "the game declined to climb it";
 			}
@@ -526,6 +569,34 @@ void VaultTick(VCSInputContext context) {
 		g_phaseTicks++;
 		const std::optional<u32> state = ReadU32(ped + kVCSPedStateOffset);
 		const bool stillClimbing = state.value_or(0) == kVCSPedStateClimbing;
+		if (stillClimbing) {
+			g_sawClimbState = true;
+		}
+		if (!g_sawClimbState) {
+			// It has not started yet. The game's own climb is already in state 44 by the time we
+			// hear about it, so this is a forced one that StartClimb took and then did nothing
+			// with - the hand-written state 44 all over again, and the reason a fallback still
+			// has to exist under a climb we asked for.
+			if (g_phaseTicks > kClimbEngageTicks) {
+				g_nativeStillborn++;
+				g_lastNative = g_climbWasForced ? "forced, and the climb never engaged"
+				                               : "the game accepted it, then never started";
+				// Start the written motion from where the abandoned climb LEFT him, not from
+				// where he was at the press. The state-44 experiment dropped the ped 0.57 into a
+				// hang before giving up, and lerping from the stale start would snap that back.
+				Vec2 now;
+				float nowZ = 0.0f;
+				if (ReadPlayerPos(ped, &now, &nowZ)) {
+					g_startXY = now;
+					g_startZ = nowZ;
+				}
+				g_phase = VaultPhase::Rising;
+				g_phaseTicks = 0;
+			}
+			g_debug.phase = g_phase;
+			g_debug.phaseTicks = g_phaseTicks;
+			return;
+		}
 		if (!stillClimbing || g_phaseTicks > kNativeClimbMaxTicks) {
 			g_phase = VaultPhase::Idle;
 			g_phaseTicks = 0;

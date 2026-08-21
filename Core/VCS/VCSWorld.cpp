@@ -50,6 +50,10 @@ namespace VCS {
 //   +0x1b8 climbPed       host-written: which ped to climb with
 //   +0x1bc climbFound     program-written: whether the game found anything to climb
 //   +0x1c0 climbResult    the game's own ClimbResult, filled by CanClimb and consumed by StartClimb
+//   +0x200 force          host-written: climb anyway when CanClimb declines
+//   +0x204 forced         program-written: whether it did
+//   +0x208 forceEntity    host-written: the entity to name as the thing being climbed
+//   +0x20c forceTarget    host-written: where to climb to, three floats
 //   +0x240 climb code     the second program
 //
 // Those three are diagnostics rather than mechanism, and they are in PSP MEMORY on purpose: the
@@ -78,7 +82,18 @@ static constexpr u32 kBlockClimbDoneOff = 0x1b4;
 static constexpr u32 kBlockClimbPedOff = 0x1b8;
 static constexpr u32 kBlockClimbFoundOff = 0x1bc;
 static constexpr u32 kBlockClimbResultOff = 0x1c0;   // 0x40 bytes: found at +0, entity +8, target +0x10
+// Forcing the climb: the same struct, filled by us instead of by the game's own search.
+static constexpr u32 kBlockForceOff = 0x200;
+static constexpr u32 kBlockForcedOff = 0x204;
+static constexpr u32 kBlockForceEntityOff = 0x208;
+static constexpr u32 kBlockForceTargetOff = 0x20c;   // three floats
 static constexpr u32 kBlockClimbCodeOff = 0x240;
+
+// The three offsets inside the game's ClimbResult that matter. Named rather than spelled inline,
+// because the whole forcing path is these three fields and nothing else.
+static constexpr u32 kClimbResultFoundOff = 0x00;
+static constexpr u32 kClimbResultEntityOff = 0x08;
+static constexpr u32 kClimbResultTargetOff = 0x10;
 // Past the program, which is about 40 instructions. Diagnostics only.
 static constexpr u32 kBlockRefusedThreadOff = 0x1a0;
 static constexpr u32 kBlockRefusedWhyOff = 0x1a4;
@@ -119,6 +134,7 @@ static u32 g_climbSeq = 0;
 static bool g_climbPending = false;
 static bool g_climbAnswered = false;
 static bool g_climbFound = false;
+static bool g_climbForced = false;
 static u64 g_climbRequests = 0;
 static u64 g_prepareTick = 0;
 static u64 g_dispatches = 0;
@@ -271,6 +287,28 @@ static std::vector<u32> BuildProgram() {
 //
 // The result struct is the game's, not ours: its first byte is the found flag, the entity sits at
 // +0x08 and the target at +0x10. We only read the flag; StartClimb reads the rest.
+//
+// ---------------------------------------------------------------------------------------------
+// FORCING IT, when the game's own search says no.
+//
+// StartClimb never asks where its struct came from. CanClimb only FILLS one - found, entity,
+// target - and the two are separate functions with a plain pointer between them. So when the
+// search declines a ledge our own probe was happy with, this fills the struct itself and calls
+// StartClimb on it anyway. The animation, the ped motion and the landing are still the game's.
+//
+// This is the "fallback if the search ever refuses a ledge our own probe is happy with" that
+// kVCSPedSetClimbTarget was written down for.
+//
+// The ENTITY is the honest weak point. StartClimb hands entity and target to 0x0890f6ec, which
+// takes a reference on the entity and stores the target RELATIVE TO IT - so a real entity is what
+// the game expects, and getting one means calling ProcessVerticalLine (which reports what it hit,
+// not just how high) rather than the FindGroundZFor3DCoord wrapper the probe uses. That call takes
+// eleven arguments, three of them past the eight this build passes in registers, and its stack
+// layout is not something to guess at - see the corrupt-stack crash in docs/VCS_ADDRESSES.md.
+//
+// So the entity is a HOST-SUPPLIED field. Today the host passes 0, which tests the thing actually
+// worth testing first - whether a forced StartClimb animates at all - and costs nothing to change
+// later: when a real entity can be fetched, only the host changes and this program does not.
 static std::vector<u32> BuildClimbProgram() {
 	std::vector<u32> code;
 	const auto emit = [&code](u32 word) { code.push_back(word); };
@@ -291,13 +329,45 @@ static std::vector<u32> BuildClimbProgram() {
 	emit(Sw(kRegT0, kRegS0, kBlockClimbFoundOff));
 
 	const size_t skipIndex = code.size();
-	emit(Beq(kRegT0, kRegZero, 0));   // patched below
+	emit(Beq(kRegT0, kRegZero, 0));   // patched below, to the forcing block
 	emit(Nop());
 
-	// StartClimb(ped, &result)
+	// StartClimb(ped, &result) - the game found it, so the struct is entirely its own.
 	emit(Lw(kRegA0, kRegS0, kBlockClimbPedOff));
 	emit(Jal(kVCSPedStartClimb));
 	emit(Addiu(kRegA1, kRegS0, kBlockClimbResultOff));   // delay slot: computed before the jump
+
+	const size_t overIndex = code.size();
+	emit(B(0));   // patched below: over the forcing block, which is not for this path
+	emit(Nop());
+
+	// --- forcing ------------------------------------------------------------------------------
+	// Reached only when CanClimb declined. Everything above has already reported that it did, so
+	// the host still learns the game's own answer whether or not this then overrides it.
+	const size_t forceIndex = code.size();
+	emit(Lw(kRegT1, kRegS0, kBlockForceOff));
+	const size_t noForceIndex = code.size();
+	emit(Beq(kRegT1, kRegZero, 0));   // patched below
+	emit(Nop());
+
+	// Fill the struct the game would have filled: found, then the entity and the target. Only
+	// these three are touched - whatever CanClimb left in the rest of it is left alone, since it
+	// is the shape the game itself hands to StartClimb.
+	emit(Addiu(kRegT2, kRegZero, 1));
+	emit(Sb(kRegT2, kRegS0, kBlockClimbResultOff + kClimbResultFoundOff));
+	emit(Sw(kRegT2, kRegS0, kBlockForcedOff));
+	emit(Lw(kRegT2, kRegS0, kBlockForceEntityOff));
+	emit(Sw(kRegT2, kRegS0, kBlockClimbResultOff + kClimbResultEntityOff));
+	emit(Lw(kRegT2, kRegS0, kBlockForceTargetOff + 0));
+	emit(Sw(kRegT2, kRegS0, kBlockClimbResultOff + kClimbResultTargetOff + 0));
+	emit(Lw(kRegT2, kRegS0, kBlockForceTargetOff + 4));
+	emit(Sw(kRegT2, kRegS0, kBlockClimbResultOff + kClimbResultTargetOff + 4));
+	emit(Lw(kRegT2, kRegS0, kBlockForceTargetOff + 8));
+	emit(Sw(kRegT2, kRegS0, kBlockClimbResultOff + kClimbResultTargetOff + 8));
+
+	emit(Lw(kRegA0, kRegS0, kBlockClimbPedOff));
+	emit(Jal(kVCSPedStartClimb));
+	emit(Addiu(kRegA1, kRegS0, kBlockClimbResultOff));   // delay slot
 
 	const size_t doneIndex = code.size();
 	emit(Lw(kRegT0, kRegS0, kBlockClimbSeqOff));
@@ -307,7 +377,9 @@ static std::vector<u32> BuildClimbProgram() {
 	emit(Jr(kRegRA));
 	emit(Addiu(kRegSP, kRegSP, 32));
 
-	code[skipIndex] = Beq(kRegT0, kRegZero, (int)(doneIndex - (skipIndex + 1)));
+	code[skipIndex] = Beq(kRegT0, kRegZero, (int)(forceIndex - (skipIndex + 1)));
+	code[overIndex] = B((int)(doneIndex - (overIndex + 1)));
+	code[noForceIndex] = Beq(kRegT1, kRegZero, (int)(doneIndex - (noForceIndex + 1)));
 	return code;
 }
 
@@ -387,6 +459,15 @@ void InstallWorldQuery() {
 	}
 	ok = ok && WriteU32(block + kBlockClimbSeqOff, 0) && WriteU32(block + kBlockClimbDoneOff, 0) &&
 	     WriteU32(block + kBlockClimbPedOff, 0) && WriteU32(block + kBlockClimbFoundOff, 0);
+	// The forcing terms too. Every request writes all of them before it bumps the sequence number,
+	// so this is belt and braces - but a block whose program could run against terms nobody set is
+	// exactly the state the magic word exists to make impossible, and half-initialising it here
+	// would leave the other half to chance.
+	ok = ok && WriteU32(block + kBlockForceOff, 0) && WriteU32(block + kBlockForcedOff, 0) &&
+	     WriteU32(block + kBlockForceEntityOff, 0) &&
+	     WriteFloat(block + kBlockForceTargetOff + 0, 0.0f) &&
+	     WriteFloat(block + kBlockForceTargetOff + 4, 0.0f) &&
+	     WriteFloat(block + kBlockForceTargetOff + 8, 0.0f);
 	for (size_t i = 0; ok && i < climbCode.size(); i++) {
 		ok = WriteU32(block + kBlockClimbCodeOff + (u32)i * 4, climbCode[i]);
 	}
@@ -412,6 +493,7 @@ void InstallWorldQuery() {
 	g_climbPending = false;
 	g_climbAnswered = false;
 	g_climbFound = false;
+	g_climbForced = false;
 	INFO_LOG(Log::HLE, "VCS: world query installed at %08x (%d + %d instructions)", block,
 	         (int)code.size(), (int)climbCode.size());
 }
@@ -563,7 +645,7 @@ void WorldQueryDispatch(const char *host) {
 	WriteU32(g_block + kBlockHostOff, Tag(host));
 }
 
-bool RequestNativeClimb(u32 ped) {
+bool RequestNativeClimb(u32 ped, const VCSClimbForce *force) {
 	if (!g_block || !ped || g_climbPending) {
 		return false;
 	}
@@ -573,6 +655,18 @@ bool RequestNativeClimb(u32 ped) {
 		g_pending = 0;
 		g_resultCount = 0;
 	}
+	// What to do if the game's own search declines. Written before the sequence number, like every
+	// other input here, so the program can never see a request whose terms are half in place.
+	const bool wantForce = force != nullptr;
+	if (!WriteU32(g_block + kBlockForceOff, wantForce ? 1 : 0) ||
+	    !WriteU32(g_block + kBlockForcedOff, 0) ||
+	    !WriteU32(g_block + kBlockForceEntityOff, wantForce ? force->entity : 0) ||
+	    !WriteFloat(g_block + kBlockForceTargetOff + 0, wantForce ? force->target[0] : 0.0f) ||
+	    !WriteFloat(g_block + kBlockForceTargetOff + 4, wantForce ? force->target[1] : 0.0f) ||
+	    !WriteFloat(g_block + kBlockForceTargetOff + 8, wantForce ? force->target[2] : 0.0f)) {
+		return false;
+	}
+
 	const u32 seq = g_climbSeq + 1;
 	if (!WriteU32(g_block + kBlockClimbPedOff, ped) ||
 	    !WriteU32(g_block + kBlockClimbFoundOff, 0) ||
@@ -583,6 +677,7 @@ bool RequestNativeClimb(u32 ped) {
 	g_climbPending = true;
 	g_climbAnswered = false;
 	g_climbFound = false;
+	g_climbForced = false;
 	g_climbRequests++;
 	g_wantDispatch = true;
 	g_dispatchCodeOff = kBlockClimbCodeOff;
@@ -593,6 +688,10 @@ bool RequestNativeClimb(u32 ped) {
 
 bool NativeClimbPending() {
 	return g_climbPending;
+}
+
+bool NativeClimbForced() {
+	return g_climbForced;
 }
 
 bool NativeClimbAnswered(bool *found) {
@@ -612,12 +711,17 @@ void WorldQueryTick() {
 	if (g_block && g_climbPending) {
 		if (ReadU32(g_block + kBlockClimbDoneOff).value_or(0) == g_climbSeq) {
 			g_climbFound = ReadU32(g_block + kBlockClimbFoundOff).value_or(0) != 0;
+			// Reported separately from `found`: the game still said no, and this records that we
+			// went ahead regardless. Collapsing the two would lose the only evidence of which
+			// climbs were the game's own choice.
+			g_climbForced = ReadU32(g_block + kBlockForcedOff).value_or(0) != 0;
 			g_climbPending = false;
 			g_climbAnswered = true;
 		} else if (GetTickCount() - g_requestTick > kRequestTimeoutTicks) {
 			g_climbPending = false;
 			g_climbAnswered = true;
 			g_climbFound = false;
+			g_climbForced = false;
 			g_abandoned++;
 		}
 	}

@@ -135,7 +135,25 @@ bool GroundZReady();
 // This is the animated climb - the game plays its own pull-up and moves the ped itself. It is the
 // swimming climb-out, reached by the two functions that swimming reaches it through, rather than
 // by faking the state (which engages the climb and then aborts, having nothing to climb).
-bool RequestNativeClimb(u32 ped);
+//
+// Pass `force` to climb ANYWAY when the game's own search declines - see "FORCING IT" on
+// BuildClimbProgram. CanClimb still runs and its answer is still reported; this only says what to
+// do with a no. Pass nullptr to take the game's answer as final, which is the original behaviour.
+struct VCSClimbForce {
+	// What to name as the thing being climbed. StartClimb takes a reference on it and stores the
+	// target RELATIVE to it, so the game expects a real entity here - but fetching one needs
+	// ProcessVerticalLine rather than the wrapper the probe uses, so 0 is what goes in today and
+	// whether the game tolerates that is the first thing worth finding out.
+	u32 entity = 0;
+
+	// Where to end up, in world coordinates.
+	float target[3] = {};
+};
+bool RequestNativeClimb(u32 ped, const VCSClimbForce *force);
+
+// Whether the last answered climb was one we forced - that is, the game declined and it ran
+// anyway. Always false when the game accepted on its own.
+bool NativeClimbForced();
 
 // Whether that request is still outstanding.
 bool NativeClimbPending();

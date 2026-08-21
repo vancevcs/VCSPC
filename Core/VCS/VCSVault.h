@@ -150,8 +150,15 @@ struct VCSVaultSettings {
 	// Measured references, in the same units: a waist wall reads +0.91, a head-height wall +2.01,
 	// and the ped's own origin sits 1.04 above what it stands on.
 	//
+	// 3.03 is not a guess at the top end and not a round number by accident - it is the boundary,
+	// found by walking the band up in play until the climb stopped carrying (2026-08-21). Don't
+	// tidy it up to 3.1: that was tried and it is past the edge.
+	//
+	// It is the ceiling on what the FORCED climb will carry, which is a different and much higher
+	// number than what the game's own search would accept - CanClimb declined roughly four of every
+	// five walls inside this band before forcing existed.
 	float minHeight = 1.50f;
-	float maxHeight = 3.10f;
+	float maxHeight = 3.03f;
 
 	// The motion, in 60 Hz ticks. Rise first, then step forward onto the surface, which is the
 	// shape of the swimming climb-out: hang, pull up, plant a foot.
@@ -169,6 +176,18 @@ struct VCSVaultSettings {
 	// Prefer the game's own climb when it exists. Does nothing yet - kept so that finding the
 	// native state is a change in one function rather than a change in the design.
 	bool preferNative = true;
+
+	// Climb ANYWAY when the game's own search declines - filling the struct CanClimb would have
+	// filled and calling StartClimb on it ourselves. See "FORCING IT" in VCSWorld.cpp.
+	//
+	// ON. It was off while nobody knew whether the game would tolerate the null entity this hands
+	// it, and the possible answers included crashing. Confirmed in play 2026-08-21: it animates,
+	// and the animation now runs on very nearly every vault instead of one in ten. So 0x0890f6ec
+	// null-checks the entity, and a target given with no entity to be relative to is taken as
+	// world-absolute - which is exactly what this wants.
+	//
+	// The written motion stays underneath regardless, for a climb that starts and never engages.
+	bool forceNativeClimb = true;
 };
 
 VCSVaultSettings &VaultSettings();
@@ -217,7 +236,9 @@ struct VCSVaultDebug {
 	u64 nativeAttempts = 0;       // how many of those got as far as asking the game
 	u64 nativeClimbs = 0;         // how many it accepted and animated
 	u64 nativeDeclines = 0;       // how many its own search refused
-	u64 nativeSilent = 0;         // and how many it never answered at all
+	u64 nativeSilent = 0;         // how many it never answered at all
+	u64 nativeForced = 0;         // how many ran on a struct we filled in after it refused
+	u64 nativeStillborn = 0;      // and how many of those never engaged the climb at all
 
 	// Why the last vault did or didn't get the game's animation, in words. Sticky, unlike `reject`
 	// above it: that one is rewritten by the next probe within a frame of the vault ending, which

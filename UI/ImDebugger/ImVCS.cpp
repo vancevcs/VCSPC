@@ -1309,9 +1309,10 @@ void ImVCSWindow::DrawVault() {
 	ImGui::Checkbox("Vaulting", &s.enabled);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
-			"Pull up onto a ledge with the jump key when there is one in front of the player.\n\n"
-			"Off by default while the motion is still a written position rather than the game's "
-			"own climb-out: it moves the character without an animation to match.");
+			"Pull up onto a ledge, or hop over a fence, with the jump key when there is something "
+			"in front of the player to get over.\n\n"
+			"The motion is the game's own climb-out, animation and all. A written position is the "
+			"fallback for the cases the climb cannot take.");
 	}
 
 	// The query first, because everything below it is meaningless if this is not running.
@@ -1414,8 +1415,15 @@ void ImVCSWindow::DrawVault() {
 	// fence, or preferNative off) and one it asked and was refused both read as an unanimated
 	// vault, and they need opposite fixes. Asked-but-never-animated says the band is arming walls
 	// the game's own search won't take; never-asked says nothing is even reaching it.
-	const unsigned long long asked = (unsigned long long)d.nativeAttempts;
-	const unsigned long long animated = (unsigned long long)d.nativeClimbs;
+	const unsigned long long vaults = (unsigned long long)d.vaults;
+	const unsigned long long own = (unsigned long long)d.nativeClimbs;
+	const unsigned long long ran = (unsigned long long)d.nativeForced;
+	const unsigned long long stillborn = (unsigned long long)d.nativeStillborn;
+	// A forced climb that engaged is every bit as animated as one the game chose - the animation is
+	// the game's own either way, only the decision differs. One that never engaged is not, and is
+	// counted below with the other fallbacks rather than here.
+	const unsigned long long forced = ran > stillborn ? ran - stillborn : 0;
+	const unsigned long long animated = own + forced;
 	const unsigned long long declined = (unsigned long long)d.nativeDeclines;
 	const unsigned long long silent = (unsigned long long)d.nativeSilent;
 	const unsigned long long never =
@@ -1423,11 +1431,20 @@ void ImVCSWindow::DrawVault() {
 
 	ImGui::Text("Animation:");
 	ImGui::SameLine();
-	ImGui::TextColored(animated > 0 ? kGoodColor : (asked > 0 ? kBadColor : kUnsetColor),
-		"%llu of %llu asked", animated, asked);
+	ImGui::TextColored(vaults > 0 && animated == vaults ? kGoodColor
+		: (animated > 0 ? kUnsetColor : kBadColor), "%llu of %llu vaults", animated, vaults);
 	ImGui::SameLine();
-	ImGui::TextDisabled("(%llu declined, %llu unanswered, %llu never asked)", declined, silent,
-		never);
+	ImGui::TextDisabled("(%llu the game's own, %llu forced past a decline)", own, forced);
+
+	// Where the rest went. Every one of these fell back to the written motion, and each wants a
+	// different fix, which is why they are four numbers rather than one.
+	if (animated < vaults) {
+		const unsigned long long refused = declined > ran ? declined - ran : 0;
+		ImGui::Text("Fell back:");
+		ImGui::SameLine();
+		ImGui::TextDisabled("%llu refused, %llu never asked, %llu unanswered, %llu never engaged",
+			refused, never, silent, stillborn);
+	}
 
 	// And why the LAST one went the way it did. Sticky, unlike the reject line above - that one is
 	// rewritten by the next probe a frame after the vault ends, which used to put this answer out
@@ -1493,6 +1510,18 @@ void ImVCSWindow::DrawVault() {
 			"happy with; the written motion is the fallback when it does.");
 	}
 
+	ImGui::Checkbox("Force the climb when the game declines", &s.forceNativeClimb);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"CanClimb only fills a struct - found, entity, target - and StartClimb never asks "
+			"where that struct came from. This fills it in when the game's own search says no, "
+			"and calls the climb anyway. The animation is still entirely the game's; only the "
+			"decision is taken away from it.\n\n"
+			"Without this the game refuses roughly four walls in five and they slide up with no "
+			"animation. Turn it off to see the game's own judgement on its own.\n\n"
+			"With it on, fences are asked for too - we choose the target, so it points at the "
+			"far side instead of the rail.");
+	}
 }
 
 void ImVCSWindow::DrawDrawDistance() {

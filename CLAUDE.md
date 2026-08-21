@@ -2047,9 +2047,11 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
 
 ### Vaulting — pulling up onto a ledge, and calling game code to find one
 
-**Status: working in play, without an animation.** Off by default (`VaultSettings().enabled`, or
-the Vault tab in the debugger window). Confirmed 2026-08-19 against a head-height wall: the probe
-armed, the jump key vaulted instead of jumping, and the player ended up standing on top.
+**Status: working in play, with the game's own animation on very nearly every vault.** On by
+default (`VaultSettings().enabled`, or the Vault tab in the debugger window). Confirmed 2026-08-19
+against a head-height wall: the probe armed, the jump key vaulted instead of jumping, and the
+player ended up standing on top. The animation came later, in two steps - asking the game to climb
+(2026-08-19), then forcing it when the game's own search declines (2026-08-21). Both are below.
 
 The motion, recorded from memory at 20Hz as it happened:
 
@@ -2068,7 +2070,7 @@ fallback path.
 **Measured constants, since they anchor every setting here.** World units are metres: a waist wall
 reads **+0.908** above the player's footing, a head-height wall **+2.008**. The ped origin sits
 **1.040** above the surface it stands on - the number this design deliberately avoids needing, now
-known anyway. The default band (**1.50 .. 3.10**) therefore excludes the waist wall by design and
+known anyway. The default band (**1.50 .. 3.03**) therefore excludes the waist wall by design and
 catches the head-height one, with room above it for a tall fence.
 
 The design decisions, in the order they were made:
@@ -2157,6 +2159,56 @@ a wall this fork's probe was happy with, and the written-position curve is what 
 The Vault tab counts them separately for exactly that reason - a native count stuck at zero while
 attempts climb means the game is refusing every ledge, which is a different problem from the vault
 not triggering.
+
+#### Forcing it, when the game's own search says no
+
+**Status: working in play, ON by default (2026-08-21).** `VaultSettings().forceNativeClimb`, or the
+last checkbox in the Vault tab. **The animation now runs on very nearly every vault**, against
+roughly one in ten before this.
+
+Measured first, which is what prompted it: **8 of 10 asks were declined**, 0 unanswered, 2
+animated, across 22 vaults. The query path is healthy; the game's own search simply refuses most of
+what this fork's probe arms. Widening the band made that worse, not better - our band and
+`CanClimb`'s are different searches and only the game's one gates the animation.
+
+**The lever is that `StartClimb` never asks where its struct came from.** `CanClimb` only *fills*
+one - `found` at +0x00, entity at +0x08, target at +0x10 - and the two are separate functions with
+a plain pointer between them. So the climb program now fills that struct itself when the search
+declines and calls `StartClimb` on it anyway. The animation, the ped motion and the landing are
+still entirely the game's; only the *decision* is taken away from it. This is the fallback
+`kVCSPedSetClimbTarget` was written down for.
+
+**The entity turned out not to matter, and that is the finding here.** `StartClimb` hands entity and
+target to `0x0890f6ec`, which takes a *reference* on the entity and stores the target *relative to
+it*, so the expectation going in was that a real entity would be needed - and getting one means
+calling `ProcessVerticalLine` rather than the `FindGroundZFor3DCoord` wrapper the probe uses, an
+eleven-argument call with three arguments past the eight this build passes in registers, whose
+stack layout is not something to guess at (see the corrupt-stack crash above).
+
+So the entity was made a **host-supplied field in the block** and the host passed `0`, to test the
+cheap question first: *does a forced `StartClimb` animate at all?* **It does.** `0x0890f6ec`
+null-checks the entity, and a target handed over with no entity to be relative to is taken as
+world-absolute - which is exactly what a vault wants. `ProcessVerticalLine` is therefore not needed
+for this, and the field stays host-supplied in case something later does want a real entity (a
+climb onto a *moving* object would: with a null entity the target cannot track it).
+
+**A climb that never engages is recoverable**, and the guard stays even though it has not needed to
+fire. `VaultPhase::Climbing` waits `kClimbEngageTicks` (8) for the ped state to actually reach 44,
+and drops back to the written motion if it never does - re-anchored to where the abandoned climb
+left the ped, since the state-44 experiment dropped him 0.57 into a hang before giving up. Without
+it, a forced climb the game accepts and then ignores would leave the player standing at the wall
+having pressed jump for nothing. The Vault tab counts it as `never engaged`.
+
+**The band was then walked up with the animation running, and the edge is 3.03** - not a round
+number, and 3.10 is past it: the climb stops carrying. Worth keeping straight that this is still a
+much higher ceiling than the game's own search would ever have allowed - `CanClimb` was refusing
+about four walls in five inside this same band before forcing existed.
+
+**With forcing on, fences are asked for too.** The reason they were excluded is that the game's
+climb-out finishes on top of whatever *it* found, and on top of a fence is a rail - but once we are
+supplying the target, it can be pointed at the far side instead. The target convention is a guess
+(the landing surface point, not the ped origin) and is the first thing to calibrate if a forced
+climb runs but lands somewhere wrong.
 
 **Four things were tried before the two calls, and each one looked like the answer.** They are
 written up in the addresses doc rather than repeated here, but the shape is worth carrying:
