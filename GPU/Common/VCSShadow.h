@@ -20,6 +20,11 @@
 #include "Common/CommonTypes.h"
 #include "GPU/ge_constants.h"
 
+namespace Draw {
+class DrawContext;
+class Framebuffer;
+}
+
 // Dynamic sun shadows for GTA: Vice City Stories.
 //
 // Gated on the VCSDynamicShadows compat flag, which assets/compat.ini sets for ULUS10160 and
@@ -104,6 +109,21 @@ struct FrameStats {
 	// treats lpos as a world-space vector pointing *towards* the light - VertexShaderGenerator
 	// feeds it straight into `toLight` - so this is a sun direction, for free, already tracking
 	// the time of day.
+	// Every enabled directional light seen this frame, not just the one that won. VCS turns more
+	// than one on and they are not all the sun: a capture came back with channel 0 pointing at
+	// exactly (1, 0, 0) at full white - axis-aligned, dead level with the horizon, and the sort of
+	// value a channel has when nobody has set it rather than one a solar position produces.
+	// Brightness alone cannot separate that from the real thing when both are full white, so the
+	// candidates are listed and the pick is explained rather than asserted.
+	struct SunCandidate {
+		bool valid;
+		float dir[3];
+		float diffuse[3];
+		int draws;
+		bool aboveHorizon;
+	};
+	SunCandidate sunCandidates[4];
+
 	bool sunValid;
 	float sunDir[3];
 	float sunDiffuse[3];
@@ -196,6 +216,8 @@ struct CaptureStats {
 	int indices;
 	size_t bytes;
 	bool overflowed;   // hit the cap; the map will be missing geometry rather than corrupt
+	bool rendered;     // the depth pass actually ran this frame
+	int batches;       // draws issued - one per 64k vertices, because thin3d indices are 16-bit
 
 	// The bounds of the actual vertices, not of their world matrices. This is the honest answer
 	// to "is the cascade radius anywhere near right" - a 28-unit cascade against a caster set
@@ -204,6 +226,14 @@ struct CaptureStats {
 	bool boundsValid;
 	float min[3];
 	float max[3];
+
+	// How many captured draws are themselves enormous. The bounds above came back 2048 units
+	// square, which is either the map-spanning ground or water quad - one draw, harmless, and
+	// flat - or a sign that positions are being read at the wrong stride and the numbers are
+	// noise. Those two look identical in a bounding box and completely different in this count:
+	// a handful means the former, most of them means the latter.
+	int largeDraws;
+	int largestDrawVerts;
 };
 
 const CaptureStats &LastCapture();
@@ -217,9 +247,6 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 	int stride, int posOffset, GEPrimitiveType prim, const float world[12]);
 
 // The accumulated triangle list, valid until the next BeginFrame.
-const float *CapturedPositions();
-const u32 *CapturedIndices();
-
 Settings &GetSettings();
 const ShadowView &View();
 
@@ -232,9 +259,17 @@ inline bool IsActive() { return g_active; }
 void Init();
 void Shutdown();
 
-// Per-frame reset. Publishes the frame that just ended so the debugger has a whole frame to
-// read rather than a half-built one.
-void BeginFrame();
+// Per-frame reset, and the one place the depth pass runs.
+//
+// Publishing, projecting and rendering all happen here, in that order, against the frame that
+// just ended - so the view matrix, the sun and the geometry all come from the same frame rather
+// than from three different ones. The shadow map is therefore one frame behind what is on screen,
+// which at these frame rates nobody can see, and in exchange the pass never has to interleave
+// itself with the game's own render passes.
+void BeginFrame(Draw::DrawContext *draw);
+
+// The depth target, for the debugger to preview. Null until the pass has run once.
+Draw::Framebuffer *ShadowMap();
 
 // Called from the draw engine for every draw that reaches the GPU. `vertTypeID` is the decoder's
 // vertex type, not gstate's, because those can differ.

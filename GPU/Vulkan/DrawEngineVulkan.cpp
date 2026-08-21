@@ -148,7 +148,7 @@ void DrawEngineVulkan::BeginFrame() {
 	DrawEngineCommon::BeginFrame();
 
 	// Returns on its first line for every game but VCS with the shadow flag set.
-	VCSShadow::BeginFrame();
+	VCSShadow::BeginFrame(draw_);
 
 	lastPipeline_ = nullptr;
 

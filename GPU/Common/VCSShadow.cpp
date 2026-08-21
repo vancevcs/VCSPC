@@ -20,6 +20,8 @@
 #include <vector>
 
 #include "Common/CommonFuncs.h"
+#include "Common/GPU/thin3d.h"
+#include "Common/GPU/ShaderWriter.h"
 #include "Core/System.h"
 #include "GPU/GPU.h"
 #include "GPU/GPUState.h"
@@ -35,6 +37,9 @@ static FrameStats s_published;
 // Luminance of the brightest directional light seen so far this frame. Kept out of FrameStats
 // because it is scratch for picking the sun, not something worth showing.
 static float s_sunLuminance;
+
+// Roughly three degrees. Below this there is no useful sun and no useful shadow.
+static const float kMinSunElevation = 0.05f;
 
 static ShadowView s_view;
 static Settings s_settings = {
@@ -54,7 +59,19 @@ static bool s_haveViewMatrix;
 // The frame's caster geometry. Kept as std::vector so the capacity settles after a few frames
 // and then stops allocating - clear() keeps the storage.
 static std::vector<float> s_positions;
-static std::vector<u32> s_indices;
+
+// thin3d's DrawIndexed is 16-bit only, so the triangle list is cut into batches of under 64k
+// vertices with indices relative to each batch's first vertex. A typical frame here captures
+// ~30k vertices and so produces exactly one batch; a busy one produces two.
+struct Batch {
+	u32 firstVertex;
+	int vertexCount;
+	u32 firstIndex;
+	int indexCount;
+};
+static const int kMaxBatchVertices = 65535;
+static std::vector<u16> s_indices;
+static std::vector<Batch> s_batches;
 static CaptureStats s_capture;
 static CaptureStats s_capturePublished;
 
@@ -228,14 +245,34 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		return;
 	}
 
-	const u32 base = (u32)(s_positions.size() / 3);
+	// A single caster never approaches 64k vertices - the largest measured here is about a
+	// thousand - so starting a fresh batch whenever this one would overflow is always enough.
+	if (s_batches.empty() || s_batches.back().vertexCount + numDecodedVerts > kMaxBatchVertices) {
+		Batch fresh;
+		fresh.firstVertex = (u32)(s_positions.size() / 3);
+		fresh.vertexCount = 0;
+		fresh.firstIndex = (u32)s_indices.size();
+		fresh.indexCount = 0;
+		s_batches.push_back(fresh);
+	}
+	Batch &batch = s_batches.back();
+
+	// Two different bases, and mixing them up costs a frame of confusion: indices are relative to
+	// the batch because they are 16-bit, while the position write goes to the end of the shared
+	// buffer. They coincide while there is only one batch, which is most frames - so this only
+	// ever breaks once a scene gets busy enough to need a second one.
+	const u32 base = (u32)batch.vertexCount;
+	const size_t writeOffset = s_positions.size();
 	s_positions.resize(s_positions.size() + (size_t)numDecodedVerts * 3);
-	float *out = s_positions.data() + (size_t)base * 3;
+	float *out = s_positions.data() + writeOffset;
 
 	// Row-vector, matching the vertex shader: world = vec4(pos, 1.0) * m, with the 4x3 matrix
 	// holding its translation in the last row. The decoded position is always three floats -
 	// the decoder guarantees that regardless of how the game encoded it - and for a skinned mesh
 	// the bones have already been folded in here, which is what gets peds into pose for free.
+	float drawMin[3] = { 1e30f, 1e30f, 1e30f };
+	float drawMax[3] = { -1e30f, -1e30f, -1e30f };
+
 	for (int i = 0; i < numDecodedVerts; i++) {
 		const float *p = (const float *)(decoded + (size_t)i * stride + posOffset);
 		const float x = p[0] * world[0] + p[1] * world[3] + p[2] * world[6] + world[9];
@@ -258,13 +295,27 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 				if (v[c] > s_capture.max[c]) s_capture.max[c] = v[c];
 			}
 		}
+		for (int c = 0; c < 3; c++) {
+			if (v[c] < drawMin[c]) drawMin[c] = v[c];
+			if (v[c] > drawMax[c]) drawMax[c] = v[c];
+		}
+	}
+
+	// 500 units is far larger than any building here and far smaller than the map, so this
+	// separates "one map-spanning ground or water quad" from "positions are being read at the
+	// wrong stride". A bounding box cannot tell those apart; this count can.
+	if (drawMax[0] - drawMin[0] > 500.0f || drawMax[1] - drawMin[1] > 500.0f) {
+		s_capture.largeDraws++;
+		if (numDecodedVerts > s_capture.largestDrawVerts) {
+			s_capture.largestDrawVerts = numDecodedVerts;
+		}
 	}
 
 	// Everything becomes a triangle list, because the whole cascade is going out as a single
 	// draw and one draw cannot carry three topologies. Strips and fans are cheap to expand and
 	// the alternative is a draw call per caster.
-	const auto index = [&](int i) -> u32 {
-		return base + (indices ? (u32)indices[i] : (u32)i);
+	const auto index = [&](int i) -> u16 {
+		return (u16)(base + (indices ? (u32)indices[i] : (u32)i));
 	};
 	switch (prim) {
 	case GE_PRIM_TRIANGLES:
@@ -299,22 +350,18 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		break;
 	}
 
+	batch.vertexCount += numDecodedVerts;
+	batch.indexCount = (int)(s_indices.size() - batch.firstIndex);
+
 	s_capture.draws++;
+	s_capture.batches = (int)s_batches.size();
 	s_capture.vertices = (int)(s_positions.size() / 3);
 	s_capture.indices = (int)s_indices.size();
-	s_capture.bytes = s_positions.size() * sizeof(float) + s_indices.size() * sizeof(u32);
+	s_capture.bytes = s_positions.size() * sizeof(float) + s_indices.size() * sizeof(u16);
 }
 
 const CaptureStats &LastCapture() {
 	return s_capturePublished;
-}
-
-const float *CapturedPositions() {
-	return s_positions.empty() ? nullptr : s_positions.data();
-}
-
-const u32 *CapturedIndices() {
-	return s_indices.empty() ? nullptr : s_indices.data();
 }
 
 Settings &GetSettings() {
@@ -323,6 +370,184 @@ Settings &GetSettings() {
 
 const ShadowView &View() {
 	return s_view;
+}
+
+// --- the depth pass ---------------------------------------------------------------------------
+//
+// One render pass, one pipeline, and one draw per 64k vertices. All of the complexity that a
+// shadow pass normally carries - a pipeline per vertex format, per-draw world matrices, buffer
+// lifetimes - was spent up front in the capture instead, which bakes everything to world space
+// and flattens it to a single triangle list.
+
+struct ShadowUB {
+	float lightViewProj[16];
+};
+
+static const UniformBufferDesc s_shadowUBDesc{ sizeof(ShadowUB), {
+	{ "u_lightViewProj", 0, -1, UniformType::MATRIX4X4, 0 },
+} };
+
+static Draw::Framebuffer *s_fbo;
+static Draw::Pipeline *s_pipeline;
+static int s_fboSize;
+
+static void ReleaseResources() {
+	if (s_pipeline) {
+		s_pipeline->Release();
+		s_pipeline = nullptr;
+	}
+	if (s_fbo) {
+		s_fbo->Release();
+		s_fbo = nullptr;
+	}
+	s_fboSize = 0;
+}
+
+static bool EnsureResources(Draw::DrawContext *draw) {
+	if (s_fbo && s_pipeline && s_fboSize == s_settings.mapSize) {
+		return true;
+	}
+	ReleaseResources();
+
+	using namespace Draw;
+	const int size = s_settings.mapSize;
+
+	// thin3d always gives a colour attachment alongside the depth one. We never write to it -
+	// the blend state masks every channel off - so it costs memory and nothing else.
+	s_fbo = draw->CreateFramebuffer({ size, size, 1, 1, 0, true, "vcs_shadow" });
+	if (!s_fbo) {
+		return false;
+	}
+	s_fboSize = size;
+
+	const ShaderLanguageDesc &lang = draw->GetShaderLanguageDesc();
+
+	char *vsCode = new char[4096];
+	{
+		ShaderWriter writer(vsCode, lang, ShaderStage::Vertex);
+		static const InputDef inputs[] = { { "vec3", "a_position", Draw::SEM_POSITION } };
+		static const UniformDef uniforms[] = { { "mat4", "u_lightViewProj", 0 } };
+		writer.BeginVSMain(inputs, uniforms, Slice<VaryingDef>::empty());
+		// Row-vector, same as every other matrix in this file and the same as the game's own
+		// vertex path. ShaderWriter's mul() is defined as (x * y), which in GLSL is exactly that.
+		writer.C("  gl_Position = mul(vec4(a_position, 1.0), u_lightViewProj);\n");
+		writer.EndVSMain(Slice<VaryingDef>::empty());
+	}
+	ShaderModule *vs = draw->CreateShaderModule(ShaderStage::Vertex, lang.shaderLanguage,
+		(const uint8_t *)vsCode, strlen(vsCode), "vcs_shadow_vs");
+	delete[] vsCode;
+
+	char *fsCode = new char[4096];
+	{
+		ShaderWriter writer(fsCode, lang, ShaderStage::Fragment);
+		writer.BeginFSMain(Slice<UniformDef>::empty(), Slice<VaryingDef>::empty());
+		// Nothing is written here. The pass exists for the depth it leaves behind, but a pipeline
+		// still needs a fragment stage.
+		writer.C("  vec4 outColor = vec4(1.0, 1.0, 1.0, 1.0);\n");
+		writer.EndFSMain("outColor");
+	}
+	ShaderModule *fs = draw->CreateShaderModule(ShaderStage::Fragment, lang.shaderLanguage,
+		(const uint8_t *)fsCode, strlen(fsCode), "vcs_shadow_fs");
+	delete[] fsCode;
+
+	if (!vs || !fs) {
+		if (vs) vs->Release();
+		if (fs) fs->Release();
+		ReleaseResources();
+		return false;
+	}
+
+	static const InputLayoutDesc layoutDesc = {
+		12,
+		{ { SEM_POSITION, DataFormat::R32G32B32_FLOAT, 0 } },
+	};
+	InputLayout *inputLayout = draw->CreateInputLayout(layoutDesc);
+
+	DepthStencilStateDesc dsDesc{};
+	dsDesc.depthTestEnabled = true;
+	dsDesc.depthWriteEnabled = true;
+	dsDesc.depthCompare = Comparison::LESS;
+	DepthStencilState *depthStencil = draw->CreateDepthStencilState(dsDesc);
+
+	// No colour writes at all.
+	BlendState *blend = draw->CreateBlendState({ false, 0x0 });
+
+	// Deliberately no face culling for now. Culling back faces is the usual first move against
+	// shadow acne, but it depends on the PSP's winding matching the host's front-face convention,
+	// and that is worth confirming against a working map rather than assuming into a broken one.
+	RasterState *raster = draw->CreateRasterState({});
+
+	PipelineDesc desc{
+		Primitive::TRIANGLE_LIST,
+		{ vs, fs },
+		inputLayout,
+		depthStencil,
+		blend,
+		raster,
+		&s_shadowUBDesc,
+	};
+	s_pipeline = draw->CreateGraphicsPipeline(desc, "vcs_shadow");
+
+	vs->Release();
+	fs->Release();
+	inputLayout->Release();
+	depthStencil->Release();
+	blend->Release();
+	raster->Release();
+
+	if (!s_pipeline) {
+		ReleaseResources();
+		return false;
+	}
+	return true;
+}
+
+static void RenderCascade(Draw::DrawContext *draw) {
+	s_capture.rendered = false;
+	if (!draw || !s_view.valid || s_batches.empty()) {
+		return;
+	}
+	if (!EnsureResources(draw)) {
+		return;
+	}
+
+	using namespace Draw;
+	draw->BindFramebufferAsRenderTarget(s_fbo,
+		{ RPAction::CLEAR, RPAction::CLEAR, RPAction::DONT_CARE, 0, 1.0f, 0, "vcs_shadow" },
+		"vcs_shadow");
+
+	const float size = (float)s_fboSize;
+	Viewport viewport{ 0.0f, 0.0f, size, size, 0.0f, 1.0f };
+	draw->SetViewport(viewport);
+	draw->SetScissorRect(0, 0, s_fboSize, s_fboSize);
+	draw->BindPipeline(s_pipeline);
+
+	// Transpose on the way into the uniform. lightViewProj is row-major, because that is the
+	// convention everything else in this file reasons in and what the panel prints - but GLSL
+	// reads a mat4 uniform column-major, so mul(v, M) there is really v times the transpose.
+	// PPSSPP hits the same wall and solves it the same way: every matrix it hands its own vertex
+	// shader goes through ConvertMatrix4x3To3x4Transposed first. Uploading this raw scrambles the
+	// basis, which draws as long thin triangles radiating from a point rather than as a scene.
+	ShadowUB ub;
+	for (int row = 0; row < 4; row++) {
+		for (int col = 0; col < 4; col++) {
+			ub.lightViewProj[col * 4 + row] = s_view.lightViewProj[row * 4 + col];
+		}
+	}
+	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+
+	for (const Batch &batch : s_batches) {
+		if (batch.indexCount < 3) {
+			continue;
+		}
+		draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3, batch.vertexCount,
+			s_indices.data() + batch.firstIndex, batch.indexCount);
+	}
+	s_capture.rendered = true;
+}
+
+Draw::Framebuffer *ShadowMap() {
+	return s_fbo;
 }
 
 void Init() {
@@ -337,6 +562,7 @@ void Init() {
 }
 
 void Shutdown() {
+	ReleaseResources();
 	g_active = false;
 	memset(&s_current, 0, sizeof(s_current));
 	memset(&s_published, 0, sizeof(s_published));
@@ -345,16 +571,22 @@ void Shutdown() {
 	s_haveViewMatrix = false;
 }
 
-void BeginFrame() {
+void BeginFrame(Draw::DrawContext *draw) {
 	if (!g_active) {
 		return;
 	}
 	s_published = s_current;
 	ComputeShadowView(s_published);
+
+	// Project and render before anything is cleared, so the matrix, the sun and the geometry all
+	// belong to the same frame.
+	RenderCascade(draw);
+
 	s_capturePublished = s_capture;
 	memset(&s_capture, 0, sizeof(s_capture));
 	s_positions.clear();
 	s_indices.clear();
+	s_batches.clear();
 
 	memset(&s_current, 0, sizeof(s_current));
 	s_sunLuminance = 0.0f;
@@ -399,6 +631,29 @@ static void NoteLights() {
 			continue;
 		}
 		const float invLength = 1.0f / sqrtf(lengthSq);
+
+		// Record every candidate, whether or not it wins, so the panel can show what the game
+		// actually offered rather than only what got chosen.
+		{
+			FrameStats::SunCandidate &candidate = s_current.sunCandidates[i];
+			candidate.valid = true;
+			candidate.draws++;
+			for (int c = 0; c < 3; c++) {
+				candidate.dir[c] = dir[c] * invLength;
+			}
+			candidate.diffuse[0] = r;
+			candidate.diffuse[1] = g;
+			candidate.diffuse[2] = b;
+			candidate.aboveHorizon = candidate.dir[2] > kMinSunElevation;
+		}
+
+		// The sun is above the horizon. Z is up here, so a light pointing level or below is not
+		// the sun whatever its colour, and taking one produces a shadow map that reads as an
+		// elevation of the city rather than a view of it from the sky. Every genuine sun this has
+		// measured sat between 0.17 and 0.54 in Z; the impostor sat at exactly 0.
+		if (dir[2] * invLength <= kMinSunElevation) {
+			continue;
+		}
 
 		s_sunLuminance = luminance;
 		s_current.sunValid = true;

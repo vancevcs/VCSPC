@@ -24,6 +24,7 @@
 
 #include "UI/ImDebugger/ImVCS.h"
 #include "UI/ImDebugger/ImDebugger.h"
+#include "ext/imgui/imgui_impl_thin3d.h"
 
 #include "Core/HLE/sceCtrl.h"
 #include "Core/System.h"
@@ -1515,6 +1516,21 @@ void ImVCSWindow::DrawShadows() {
 	} else {
 		ImGui::TextColored(kBadColor, "sun: no enabled directional light this frame");
 	}
+	// Every directional light the frame offered, so a bad pick is visible as a bad pick rather
+	// than as a strange-looking shadow map.
+	for (int i = 0; i < 4; i++) {
+		const VCSShadow::FrameStats::SunCandidate &c = s.sunCandidates[i];
+		if (!c.valid) {
+			continue;
+		}
+		const bool chosen = s.sunValid && s.sunChannel == i;
+		ImGui::TextColored(chosen ? kGoodColor : (c.aboveHorizon ? kUnsetColor : kBadColor),
+			"   light %d: %6.3f %6.3f %6.3f  rgb %.2f %.2f %.2f  %s%s",
+			i, c.dir[0], c.dir[1], c.dir[2], c.diffuse[0], c.diffuse[1], c.diffuse[2],
+			c.aboveHorizon ? "above horizon" : "AT OR BELOW HORIZON - not the sun",
+			chosen ? ", chosen" : "");
+	}
+
 	ImGui::Text("draws lit by hardware: %d, of those with a directional light: %d",
 		s.lightingDraws, s.dirLightDraws);
 
@@ -1557,9 +1573,9 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::TableNextColumn(); ImGui::TextDisabled("can use normal-offset bias");
 
 		ImGui::TableNextRow();
-		ImGui::TableNextColumn(); ImGui::Text("   vertices");
+		ImGui::TableNextColumn(); ImGui::Text("   elements");
 		ImGui::TableNextColumn(); ImGui::Text("%d", s.casterVerts);
-		ImGui::TableNextColumn(); ImGui::TextDisabled("per shadow cascade, per frame");
+		ImGui::TableNextColumn(); ImGui::TextDisabled("indices in, before strip expansion");
 
 		for (int i = 1; i < (int)VCSShadow::Reject::Count; i++) {
 			ImGui::TableNextRow();
@@ -1674,6 +1690,9 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::Separator();
 		ImGui::Text("captured: %d draws -> %d verts, %d indices (%d tris), %.0f KB",
 			cap.draws, cap.vertices, cap.indices, cap.indices / 3, cap.bytes / 1024.0);
+		ImGui::TextColored(cap.rendered ? kGoodColor : kBadColor,
+			"depth pass: %s, %d batch%s", cap.rendered ? "ran" : "did not run",
+			cap.batches, cap.batches == 1 ? "" : "es");
 		if (cap.overflowed) {
 			ImGui::TextColored(kBadColor, "capture hit its cap - the map would be missing geometry");
 		}
@@ -1682,6 +1701,15 @@ void ImVCSWindow::DrawShadows() {
 			const float ey = cap.max[1] - cap.min[1];
 			const float ez = cap.max[2] - cap.min[2];
 			ImGui::Text("caster extent: %.0f x %.0f x %.0f units", ex, ey, ez);
+			if (cap.largeDraws > 0) {
+				const bool few = cap.largeDraws <= 4;
+				ImGui::TextColored(few ? kGoodColor : kBadColor,
+					"   %d draw%s span over 500 units (largest %d verts)%s",
+					cap.largeDraws, cap.largeDraws == 1 ? "" : "s", cap.largestDrawVerts,
+					few ? " - ground or water, as expected" : " - positions are probably being misread");
+			} else {
+				ImGui::TextColored(kGoodColor, "   no map-spanning draws");
+			}
 			// A cascade far larger than the scene wastes all its resolution; far smaller and it
 			// covers a sliver. Neither is wrong, but the ratio should be a number that makes
 			// sense rather than a surprise.
@@ -1713,6 +1741,16 @@ void ImVCSWindow::DrawShadows() {
 	ImGui::Checkbox("View forward is -Z", &set.forwardIsNegativeZ);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Which view-space axis points into the scene. If the camera/player distance above is sane but the centre sits behind you, this is the wrong way round.");
+	}
+
+	if (Draw::Framebuffer *shadowFbo = VCSShadow::ShadowMap()) {
+		ImGui::Separator();
+		ImGui::Text("cascade 0 depth:");
+		ImTextureID texId = ImGui_ImplThin3d_AddFBAsTextureTemp(shadowFbo, Draw::Aspect::DEPTH_BIT,
+			ImGuiPipeline::TexturedOpaque);
+		ImGui::Image(texId, ImVec2(256.0f, 256.0f));
+		ImGui::TextDisabled("A depth map is mostly near-white. Look for the shape of the buildings");
+		ImGui::TextDisabled("around you, seen from where the sun is - not for a picture.");
 	}
 
 	// What to actually do with this tab. The counts are only worth anything as a response to
