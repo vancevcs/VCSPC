@@ -654,9 +654,31 @@ void ImVCSWindow::DrawCamera() {
 			if (ImGui::IsItemHovered()) {
 				ImGui::SetTooltip("Drops the deadband lead once, on the first still frame after aiming. Without it the hold window expires with the camera angle parked a deadband past where you stopped, the game adopts that as its own, and the view snaps. If aiming misbehaves at the END of a movement, turn this off first - it is the only thing that touches that moment.");
 			}
-			ImGui::SliderFloat("Aim yaw deadband (rad)", &s.aimYawDeadband, 0.0f, 0.4f, "%.3f");
+			ImGui::SliderFloat("Aim yaw deadband (rad, SUPERSEDED, keep 0)", &s.aimYawDeadband, 0.0f, 0.4f, "%.3f");
 			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("The horizontal twin of the pitch deadband, reported at the same 9.4 deg. Solved in differences against Front's yaw, so the unknown constant between Front's space and CameraYaw's cancels. 0 drives CameraYaw directly.");
+				ImGui::SetTooltip("The closed-loop yaw lead: desired = liveYaw + error + bias, error measured against Front's yaw. The lead itself was right - yaw's deadband is measured at 0.166, the same as pitch - but this route flips its bias at the zero crossing and moves the lever 2D in one frame, which is the 0.340 rad snap. Superseded by Aim yaw kick, which carries the same number open loop. Keep 0.");
+			}
+			ImGui::SliderFloat("Aim yaw kick (rad)", &s.aimYawKick, 0.0f, 0.4f, "%.3f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("The lead that gets yaw MOVING, applied in the direction of the stroke without reading Front. Measured 2026-08-21 at 9.56 deg (0.166 rad), symmetric both ways and releasing the moment the view breaks loose - which is stiction, not the constant between the two spaces. Open loop, so there is no error to cross zero and the snap the deadband above produced cannot occur. 0 restores the plain accumulator.");
+			}
+			ImGui::SliderFloat("Yaw kick reversal threshold (rad)", &s.aimYawKickHysteresis, 0.0f, 0.2f, "%.3f");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("How far the mouse must travel AGAINST the current lead before it moves to the other side. Mouse deltas flip sign constantly inside a stroke, and flipping the lead on each would inject 2*kick every time - the limit cycle again with a different trigger. Too low and a steady stroke chatters; too high and a genuine reversal feels sticky.");
+			}
+			ImGui::Checkbox("Retract the yaw kick when a stroke ends", &s.aimYawKickRetract);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("OFF, and it CAUSES a snap - it shipped on for one build and was reported at once. Moving the lever back by a full deadband is exactly the step that breaks the aim loose again, because the deadband gates the ONSET of movement rather than being a gap Front rests inside. Leaving the lead parked past the aim costs nothing, which is why pitch has always done the same. On is for reproducing the snap, not for fixing anything.");
+			}
+			{
+				float kickSign = 0.0f, kickAgainst = 0.0f;
+				VCS::YawKickState(&kickSign, &kickAgainst);
+				// The two numbers that say whether the kick is behaving. Sign should sit at +1 or -1
+				// for the whole of a one-way stroke and return to 0 when you stop; if it oscillates
+				// while you hold a steady sweep, the reversal threshold is too low and that is the
+				// chatter to catch before it is felt.
+				ImGui::TextDisabled("   yaw kick: side %+.0f   travelled against it %.4f / %.3f",
+					kickSign, kickAgainst, s.aimYawKickHysteresis);
 			}
 			ImGui::SliderFloat("Aim pitch deadband (rad)", &s.aimPitchDeadband, 0.0f, 0.4f, "%.3f");
 			if (ImGui::IsItemHovered()) {
@@ -807,6 +829,34 @@ void ImVCSWindow::DrawCamera() {
 			"disabling both mouse look and mouse aiming.");
 	}
 	ImGui::SliderFloat("Sensitivity", &s.sensitivity, 0.0005f, 0.02f, "%.4f rad/count");
+	ImGui::SliderFloat("Vertical gain", &s.verticalGain, 0.25f, 4.0f, "%.2fx");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Vertical sensitivity as a multiple of horizontal, for ordinary look.\n"
+			"1.90 is GTA III and Vice City's own ratio: they run vertical at 0.012\n"
+			"rad/count against horizontal's 0.00625, behind a single slider.\n"
+			"Aiming ignores this and uses Aim pitch gain instead.");
+	}
+	ImGui::Checkbox("Scale with FOV", &s.scaleByFOV);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"Scales the look by FOV/70, so a count covers a constant distance on SCREEN\n"
+			"rather than a constant angle. Zooming a scope then slows the mouse instead of\n"
+			"multiplying it. re3/reVC do this as FOV/80; 70 is used here because that is what\n"
+			"VCS actually runs at, so the sensitivity above keeps its tuned meaning.\n"
+			"Direct angle writes only - the reticle path already carries the game's own FOV term.");
+	}
+	if (s.scaleByFOV) {
+		ImGui::SameLine();
+		// The scale comes from the camera rather than being recomputed here, so this cannot
+		// disagree with what the mouse is actually getting - clamps and fallbacks included.
+		const std::optional<float> fov = VCS::ReadAddrFloat(VCS::VCSAddr::CamFOV);
+		if (fov) {
+			ImGui::TextDisabled("(FOV %.1f -> %.2fx)", *fov, VCS::FOVLookScale());
+		} else {
+			ImGui::TextDisabled("(FOV unreadable -> %.2fx)", VCS::FOVLookScale());
+		}
+	}
 	ImGui::Checkbox("Invert X", &s.invertX);
 	ImGui::SameLine();
 	ImGui::Checkbox("Invert Y", &s.invertY);

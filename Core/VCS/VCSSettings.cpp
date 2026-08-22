@@ -134,6 +134,14 @@ const std::vector<Option> &Options() {
 			"", &cam.invertX);
 		addBool(OptionPage::Mouse, "InvertLookY", "Invert look vertically",
 			"", &cam.invertY);
+		addFloat(OptionPage::Mouse, "VerticalLookSpeed", "Vertical look speed",
+			"Up and down, as a multiple of left and right. 1.9x is what GTA III and Vice City "
+			"use on PC.",
+			&cam.verticalGain, 0.25f, 4.0f, "%.2fx");
+		addBool(OptionPage::Mouse, "ScaleSensitivityByFOV", "Scale sensitivity with zoom",
+			"Slows the mouse as the game narrows the view, so a movement covers the same "
+			"distance on screen however far it is zoomed in.",
+			&cam.scaleByFOV);
 		addBool(OptionPage::Mouse, "PitchInVehicle", "Vertical look in vehicles",
 			"Look up and down while driving, not only left and right.",
 			&cam.pitchInVehicle);

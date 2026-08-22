@@ -142,6 +142,17 @@ static bool g_haveLastFront = false;
 // frame of ordinary aiming, well over float noise.
 static const float kFrontMovedEps = 0.0008f;
 static bool g_aimLeadApplied = false;
+// Which side of the aim the open-loop yaw kick is currently parked on: -1, 0 or +1. Zero means no
+// kick is applied, which is both the resting state and what a fresh stroke starts from.
+static float g_yawKickSign = 0.0f;
+// Intent travelled against that side since the last flip, for the hysteresis. Reset on every flip
+// and on every stroke, so it only ever measures the CURRENT attempt to reverse.
+static float g_yawKickAgainst = 0.0f;
+// The radians actually folded into g_desiredYaw right now, rather than what the setting currently
+// reads. Those differ the moment the slider is moved mid-stroke, and giving back a different amount
+// than was added would leave the difference in the lever permanently - a slow drift that would look
+// like the kick being wrong rather than like the bookkeeping being wrong.
+static float g_yawKickLead = 0.0f;
 static float g_intentYaw = 0.0f;
 static bool g_haveIntentYaw = false;
 static const float kIntentEpsilon = 0.002f;
@@ -160,6 +171,26 @@ static const float kIntentEpsilon = 0.002f;
 //
 // Nothing is lost: the useful direction in a vehicle is upward, i.e. more negative than this.
 static const float kVehiclePitchCeiling = -0.12f;
+
+// The FOV the look sensitivity is tuned AT, in degrees.
+//
+// re3 and reVC divide by 80 here, and 80 is NOT a measurement of anything - III's own gameplay FOV
+// is 70 too. It is just the constant their sensitivity defaults were tuned against, so their 0.0025
+// already has the resulting 0.875 folded into it. Copying the 80 would therefore make every
+// sensitivity in this fork 0.875x slower on a value that was settled in play, which is a retune
+// wearing a feature's clothes.
+//
+// Dividing by what the game actually runs at makes the scale exactly 1.0 in ordinary play and only
+// moves when something moves the FOV - which is the entire point of the setting.
+static const float kBaseFOV = 70.0f;
+// Bounds on a believable FOV read, for the same reason kMaxPlausiblePitch exists: a transient, a
+// menu, or a frame caught mid-transition must cost one frame of unscaled input rather than a mouse
+// that stops working.
+static const float kMinPlausibleFOV = 5.0f;
+static const float kMaxPlausibleFOV = 150.0f;
+// ...and on the scale itself, so even an FOV inside those bounds cannot take the mouse away.
+static const float kFOVScaleMin = 0.15f;
+static const float kFOVScaleMax = 2.0f;
 
 VCSCameraSettings &CameraSettings() {
 	return g_settings;
@@ -1036,6 +1067,32 @@ void PeekMouseDelta(float *dx, float *dy) {
 	*dy = g_lastTakenDy;
 }
 
+// What to scale a mouse count by, given how far the game currently has the view zoomed.
+//
+// FOR THE DIRECT-WRITE PATHS ONLY - mouse look, camera-driven aim, and free aim's AimYaw. Those
+// write an angle into memory, so nothing else scales them and this is the only FOV term in play.
+//
+// The RETICLE path must never call this, and the reason is worth stating rather than trusting a
+// naming convention to convey. There, the mouse becomes a stick deflection and the GAME turns that
+// into a rotation with a rate that already carries FOV/80 (the f26 at 0x089a3528). AimAxisStep
+// deliberately keeps that term instead of cancelling it - `want *= resp.fovScale` - precisely so a
+// count moves the crosshair a constant distance on screen. Calling this there too would square the
+// factor and halve the sniper's sensitivity again on top of the halving the game already did, which
+// is the sniper/RPG bug that note was written about, arrived at from the other direction.
+float FOVLookScale() {
+	if (!g_settings.scaleByFOV) {
+		return 1.0f;
+	}
+	const std::optional<float> fov = ReadAddrFloat(VCSAddr::CamFOV);
+	if (!fov || *fov < kMinPlausibleFOV || *fov > kMaxPlausibleFOV) {
+		return 1.0f;
+	}
+	float scale = *fov / kBaseFOV;
+	if (scale < kFOVScaleMin) scale = kFOVScaleMin;
+	if (scale > kFOVScaleMax) scale = kFOVScaleMax;
+	return scale;
+}
+
 // Drives the gun direction directly in free aim, instead of nudging the nub.
 //
 // The nub is a rate control with the game's acceleration on it, so aiming through it feels like
@@ -1073,9 +1130,68 @@ void AimTick(VCSInputContext context) {
 
 	// Same sign convention as the camera: the game's angles grow counter-clockwise, so moving
 	// the mouse right has to decrease this for the gun to follow the mouse.
-	g_desiredAim += dx * g_settings.sensitivity * (g_settings.invertX ? 1.0f : -1.0f);
+	g_desiredAim += dx * g_settings.sensitivity * FOVLookScale() *
+		(g_settings.invertX ? 1.0f : -1.0f);
 
 	WriteAddrFloat(VCSAddr::AimYaw, g_desiredAim);
+}
+
+// How much to add to the yaw lever on top of the mouse, to get the aim MOVING.
+//
+// The open-loop half of the deadband story - see aimYawKick for the measurement and for why this is
+// shaped nothing like aimYawDeadband despite carrying the same number. Returns the CHANGE to apply
+// this frame, which is zero on all but the two frames that matter: the first push of a stroke, and a
+// deliberate reversal inside one.
+//
+// Nothing here reads the game. That is the entire safety argument: with no measured error there is
+// no sign to flip on its own, so the limit cycle that the closed-loop version produced is not merely
+// tuned away, it is unrepresentable.
+static float YawKickStep(VCSInputContext context, float yawStep) {
+	if (context != VCSInputContext::Aiming || g_settings.aimYawKick <= 0.0f) {
+		// Ordinary mouse look writes CameraYaw into a camera with no integrator in front of it -
+		// mode 15 never reads the look axis at all - so there is no stiction to break and a lead
+		// would be a plain 9.5 degree error.
+		return 0.0f;
+	}
+	// Not for the scoped weapons, for the same reason pitch's lead is not: modes 7 and 8 drive the
+	// reticle directly and linearly, so there is nothing to break loose and a lead is just an
+	// offset. Feeding one to a camera that has none is how sniper and RPG got the twitch.
+	if (ScopedWeaponActive()) {
+		return 0.0f;
+	}
+	if (yawStep == 0.0f) {
+		return 0.0f;
+	}
+
+	const float dir = yawStep > 0.0f ? 1.0f : -1.0f;
+	if (dir == g_yawKickSign) {
+		// Already leading the right way. Hold it, and forget any partial attempt to reverse - the
+		// hysteresis measures ONE sustained push against the lead, not the net of a wobble.
+		g_yawKickAgainst = 0.0f;
+		return 0.0f;
+	}
+
+	if (g_yawKickSign != 0.0f) {
+		// Pushing against the lead. Spend the travel first, and only move the lead once the player
+		// has genuinely committed to the other direction - see aimYawKickHysteresis.
+		g_yawKickAgainst += yawStep > 0.0f ? yawStep : -yawStep;
+		if (g_yawKickAgainst < g_settings.aimYawKickHysteresis) {
+			return 0.0f;
+		}
+	}
+
+	// Move the lead to this side. From rest that is one kick; from the other side it is two, which
+	// is the real cost of a reversal and is paid on a frame the player is already moving.
+	//
+	// Expressed as "what it should be, minus what is already in there" rather than as a multiple of
+	// the kick, so a slider moved mid-stroke lands correctly on the next push instead of stacking a
+	// stale lead under a fresh one.
+	const float want = dir * g_settings.aimYawKick;
+	const float step = want - g_yawKickLead;
+	g_yawKickLead = want;
+	g_yawKickSign = dir;
+	g_yawKickAgainst = 0.0f;
+	return step;
 }
 
 void CameraTick(VCSInputContext context) {
@@ -1109,6 +1225,12 @@ void CameraTick(VCSInputContext context) {
 		g_lastContext = context;
 		// A new camera means a new baseline, and it is the only thing that may move the anchor.
 		g_haveAnchorPitch = false;
+		// The kick belongs to the weapon camera's stiction, so it does not cross into another
+		// camera. Dropping the SIGN rather than retracting is deliberate: whatever is folded into
+		// Beta is the old camera's business, and the new context re-anchors to live below anyway.
+		g_yawKickSign = 0.0f;
+		g_yawKickAgainst = 0.0f;
+		g_yawKickLead = 0.0f;
 	}
 
 	// The game runs its own camera smoothing: it eases yaw back toward wherever its follow logic
@@ -1177,6 +1299,12 @@ void CameraTick(VCSInputContext context) {
 			g_haveIntentPitch = false;
 			g_haveIntentYaw = false;
 			g_haveLastFront = false;
+			// The kick belongs to a stroke, not to the camera. A fresh stroke re-anchors desired to
+			// live above, so any kick still folded into the old value is gone with it - carrying the
+			// SIGN across would apply the next one relative to a lead that no longer exists.
+			g_yawKickSign = 0.0f;
+			g_yawKickAgainst = 0.0f;
+			g_yawKickLead = 0.0f;
 
 			// Desired always re-syncs to live, so a stroke never snaps from a stale value. The
 			// ANCHOR does not: it is the fixed origin of the clamp window for as long as we stay in
@@ -1228,14 +1356,24 @@ void CameraTick(VCSInputContext context) {
 		// GAME LOGIC FRAME instead of once per vblank - the same fix, for the same reason, that settled
 		// the vehicle pitch runaway - rather than reading the game's value back.
 
+		// Read ONCE per tick and shared by both axes, so a frame in which the game happens to move
+		// the FOV mid-tick cannot scale yaw and pitch by different amounts and skew a diagonal.
+		const float fovScale = FOVLookScale();
+
 		// No believable anchor means no clamp window, and without the window the vehicle ceiling
 		// does not exist - so pitch stays undriven rather than driven unbounded.
 		if (havePitch && g_haveAnchorPitch) {
 			// Stored negated relative to the camera matrix: raising this value tilts the view UP.
 			// Default is INVERTED pitch by preference - mouse up looks down, flight-sim style.
 			// invertY switches to the conventional mouse-up-looks-up mapping.
-			const float pitchGain = (context == VCSInputContext::Aiming) ? g_settings.aimPitchGain : 1.0f;
-			const float pitchStep = dy * g_settings.sensitivity * pitchGain * (g_settings.invertY ? -1.0f : 1.0f);
+			//
+			// The two vertical multipliers are EXCLUSIVE, not composed: aiming is a measured channel
+			// whose gain was settled in play at 1.0 with the deadband solve in place, and ordinary
+			// look now carries re3's 1.9. Multiplying them would hand aiming a 1.9x nobody asked for.
+			const float pitchGain = (context == VCSInputContext::Aiming) ?
+				g_settings.aimPitchGain : g_settings.verticalGain;
+			const float pitchStep = dy * g_settings.sensitivity * pitchGain * fovScale *
+				(g_settings.invertY ? -1.0f : 1.0f);
 
 			// SOLVE FOR THE LEAD instead of scaling the input, which is the whole difference between
 			// this and the hypersensitive version it replaces.
@@ -1384,7 +1522,8 @@ void CameraTick(VCSInputContext context) {
 		// The game's yaw grows counter-clockwise (measured: mouse right raised the value, which
 		// turned the view LEFT), so the natural mapping needs a negative sign. invertX flips
 		// away from that correct default, it isn't the default itself.
-		const float yawStep = dx * g_settings.sensitivity * (g_settings.invertX ? 1.0f : -1.0f);
+		const float yawStep = dx * g_settings.sensitivity * fovScale *
+			(g_settings.invertX ? 1.0f : -1.0f);
 
 		// Yaw carries the SAME deadband as pitch - reported at the same 9.4 degrees - so it gets the
 		// same treatment: integrate the intent in Front's space at 1:1, then solve for the Beta that
@@ -1437,8 +1576,12 @@ void CameraTick(VCSInputContext context) {
 				g_desiredYaw += yawStep;
 			}
 		} else {
+			// The plain accumulator, which is what the default configuration runs: aimYawDeadband is
+			// 0, so frontYaw above is never populated and yaw always lands here. The kick rides on
+			// THIS branch only - if the closed-loop deadband is ever turned back on it owns yaw
+			// outright, and two leads on one lever would be the snap plus a constant.
 			g_haveIntentYaw = false;
-			g_desiredYaw += yawStep;
+			g_desiredYaw += yawStep + YawKickStep(context, yawStep);
 		}
 		g_holdFrames = kHoldFrames;
 	}
@@ -1474,6 +1617,24 @@ void CameraTick(VCSInputContext context) {
 			}
 		}
 		g_aimLeadApplied = false;
+	}
+
+	// The open-loop kick's own one-shot retract. Separate from the block above on purpose: that one
+	// belongs to the Front-space solve and only runs when an intent exists, and the kick deliberately
+	// has no intent to key on. Same shape, same guarantee - it fires once, because applying it clears
+	// the sign that armed it.
+	//
+	// GATED ON THE AIMING CONTEXT, and that was missing for one build. Without it, releasing aim
+	// mid-stroke and then stopping retracted a lead that belongs to the weapon camera out of the
+	// ON-FOOT one - 9.5 degrees, arriving a moment after the player stopped moving, in a camera that
+	// never had the stiction the lead exists for. The block above has always carried this test; the
+	// omission was in the copy, not in the reasoning.
+	if (g_yawKickSign != 0.0f && dx == 0.0f && dy == 0.0f && g_holdFrames > 0 &&
+		context == VCSInputContext::Aiming && g_settings.aimYawKickRetract) {
+		g_desiredYaw -= g_yawKickLead;
+		g_yawKickSign = 0.0f;
+		g_yawKickAgainst = 0.0f;
+		g_yawKickLead = 0.0f;
 	}
 
 	if (g_holdFrames <= 0) {
@@ -1548,6 +1709,11 @@ void PedAimStats(bool *driving, float *desiredHeading, u64 *writes) {
 	if (driving) *driving = g_pedAimDriving;
 	if (desiredHeading) *desiredHeading = g_pedAimDesired;
 	if (writes) *writes = g_pedAimWrites;
+}
+
+void YawKickState(float *side, float *againstIt) {
+	if (side) *side = g_yawKickSign;
+	if (againstIt) *againstIt = g_yawKickAgainst;
 }
 
 void AimAxisStats(float *desiredYaw, float *liveYaw, float *desiredPitch, float *livePitch) {
@@ -1773,6 +1939,9 @@ void CameraReset() {
 	g_holdFrames = 0;
 	g_desiredYaw = 0.0f;
 	g_desiredPitch = 0.0f;
+	g_yawKickSign = 0.0f;
+	g_yawKickAgainst = 0.0f;
+	g_yawKickLead = 0.0f;
 	g_anchorPitch = 0.0f;
 	g_haveAnchorPitch = false;
 	g_lastContext = VCSInputContext::Unknown;

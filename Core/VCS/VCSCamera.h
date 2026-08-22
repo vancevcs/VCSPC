@@ -49,6 +49,53 @@ struct VCSCameraSettings {
 	bool invertX = false;
 	bool invertY = false;
 
+	// Vertical sensitivity as a MULTIPLE of horizontal, for ordinary mouse look.
+	//
+	// 1.9 is not taste, it is what GTA III and Vice City do on PC. Both compute their offsets as
+	//
+	//     BetaOffset  = -2.5f*MouseX * m_fMouseAccelHorzntl(0.0025) * FOV/80
+	//     AlphaOffset = +4.0f*MouseY * m_fMouseAccelVertical(0.003) * FOV/80
+	//
+	// so vertical runs at 0.012 against horizontal's 0.00625 - a ratio of 1.92 - even though both
+	// axes are exposed to the player as one sensitivity slider. Rockstar shipped the asymmetry
+	// deliberately, and the reason is geometric rather than arbitrary: the vertical range is about
+	// 135 degrees of the game's own clamp against 360 of yaw, and the screen is wider than it is
+	// tall, so an equal-gain vertical axis feels slower than the horizontal one it is matched to.
+	//
+	// ORDINARY LOOK ONLY. While aiming, aimPitchGain is the vertical multiplier and this one stands
+	// aside - see the note there. That is a deliberate split rather than an oversight: aiming here
+	// is a separate, measured channel with a deadband solve on it, and aimPitchGain was settled in
+	// play at 1.0 with that solve in place. Silently multiplying it by 1.9 would retune an answer
+	// somebody already worked for. Set aimPitchGain to 1.9 by hand if parity is wanted.
+	float verticalGain = 1.9f;
+
+	// Scale sensitivity with the camera's FOV, so a mouse count moves the view the same distance ON
+	// SCREEN whatever the game has zoomed to.
+	//
+	// Also from re3/reVC, where it is the FOV/80 term above, and it is the one part of their mouse
+	// path that has no equivalent anywhere in this file. Without it, scoping in narrows the view
+	// while the mouse keeps turning the camera at the same ANGULAR rate, so the sensitivity
+	// effectively multiplies by however far the scope zoomed - which is the wrong direction for the
+	// one situation that needs precision most.
+	//
+	// This applies to the paths that write an angle DIRECTLY - mouse look, camera-driven aim, free
+	// aim's AimYaw. It must never be applied to the reticle path: the game's own aim rate already
+	// carries a FOV/80 term, and AimAxisStep keeps rather than cancels it. See FOVLookScale.
+	//
+	// What it does is MEASURED; where it fires is only partly so. Known FOV values, from the arsenal
+	// sweep and the sniper zoom trace in CLAUDE.md:
+	//
+	//     ordinary play              70.00   ->  1.00x, i.e. nothing happens
+	//     assault rifle raised       50.00   ->  0.71x
+	//     sniper, zoomed out         64.40   ->  0.92x
+	//     sniper, zoom level 2       33.07   ->  0.47x
+	//
+	// UNMEASURED, and stated as the expectation it is: the GTA vehicle cameras generally widen the
+	// FOV with speed, which would make the look slightly faster the faster you drive. Whether VCS
+	// does that, and by how much, has not been checked here - the Camera tab prints the live FOV and
+	// the scale it produces, so watch it at speed rather than trusting this sentence.
+	bool scaleByFOV = true;
+
 	// Vertical look while driving. ON by default as of 2026-08-17, confirmed usable in play.
 	//
 	// It was off for a long time because asserting pitch against the vehicle camera ran the view away
@@ -430,7 +477,8 @@ struct VCSCameraSettings {
 	// safe one in a way the last two attempts were not: it only ever scales input UP, so it cannot
 	// swallow movement the way the leash and the adopt both did.
 	//
-	// Only applied in the Aiming context, so ordinary mouse look is untouched.
+	// Only applied in the Aiming context, so ordinary mouse look is untouched - that half is
+	// verticalGain's, and the two never compose. One vertical multiplier per channel.
 	float aimPitchGain = 1.0f;
 
 	// The lead, in radians, that CameraPitch must hold over the aim's real pitch before the game
@@ -464,6 +512,78 @@ struct VCSCameraSettings {
 	// whose offset is picked from four quadrants by ped+0x780 - so there is no reason to expect one
 	// number to describe both. The 9.4 degrees they appeared to share was measured on pitch.
 	float aimYawDeadband = 0.0f;
+
+	// The SAME lead as pitch, in the direction of the stroke, applied WITHOUT reading Front.
+	//
+	// Measured 2026-08-21, in free aim, off the LIVE Front yaw row: Beta leads Front's yaw by
+	// 9.56 deg (0.166 rad) and Front does not move at all, symmetrically - push right and the offset
+	// is +9.56, push left and it is -9.56 - and it releases the instant the view breaks loose. A
+	// constant between the two spaces would hold ONE signed value both ways rather than mirroring, so
+	// this is stiction, and it is within noise of pitch's 0.165.
+	//
+	// THAT FALSIFIES THE HEADING ABOVE aimYawDeadband, and the correction is worth stating plainly:
+	// "yaw does not need the lead" was never measured. It was inferred from the lead making things
+	// worse, which it did. Both halves were true and the conclusion joining them was not - yaw needs
+	// the same lead pitch does, and what failed was the MECHANISM that delivered it.
+	//
+	// So the lead is the same and the structure is different, which is the whole design:
+	//
+	//   aimYawDeadband  desired = liveYaw + error + bias, error measured against Front's yaw.
+	//                   A closed loop through a read-modify-write, on a lever written directly. The
+	//                   bias flips when the error crosses zero and the lever moves 2D in one frame -
+	//                   the measured 0.340 rad snap against 0.328 predicted.
+	//
+	//   aimYawKick      desired = accumulator + kick * strokeDirection.
+	//                   Nothing is read back, so there is no error, no crossing, and nothing to
+	//                   re-solve. The lever cannot move further than the mouse asked for plus one
+	//                   kick, ever. That is why this can carry the full 0.166 where the other could
+	//                   not carry a fifth of it.
+	//
+	// The direction comes from the MOUSE, not from an error term, and only reverses once the player
+	// has genuinely pushed the other way - see aimYawKickHysteresis. A reversal costs 2*kick in one
+	// frame, which is the same arithmetic as the snap; the difference is that it happens only when
+	// the player asks for it, on a frame they are already moving, rather than spontaneously at a zero
+	// crossing in the middle of a steady stroke.
+	//
+	// Set to 0 to go back to driving CameraYaw with the plain accumulator.
+	float aimYawKick = 0.166f;
+
+	// How far, in radians of intent, the mouse must travel AGAINST the current lead before it moves
+	// to the other side.
+	//
+	// This is the one thing standing between the kick and the snap it replaces. Mouse deltas flip
+	// sign between frames constantly inside an ordinary stroke - a hand is not a stepper motor - and
+	// flipping the lead on each of those would inject 2*kick every time, which is the limit cycle
+	// again with a different trigger. Requiring sustained travel the other way means only a
+	// deliberate reversal pays it.
+	//
+	// A quarter of the kick, so a reversal is recognised well before the player has spent a whole
+	// deadband wondering why the view stopped following.
+	float aimYawKickHysteresis = 0.04f;
+
+	// Drop the kick once, on the first still frame after a yaw stroke.
+	//
+	// OFF, and it shipped ON for exactly one build. Reported immediately: the aim snapped somewhere a
+	// moment after each stroke ended, and unchecking this made it perfect. So the bookkeeping argument
+	// below was wrong, and the way it was wrong is the interesting part.
+	//
+	// The argument was: the hold window expires 45 ticks after the last movement and the game inherits
+	// whatever is in Beta, so leaving the lever parked a deadband past the aim hands the game a value
+	// the player never asked for. Every clause of that is true. What it assumed without saying so is
+	// that moving the lever back by D is INVISIBLE - that the deadband is a standing gap Front sits
+	// inside, so a step of one deadband stays within it.
+	//
+	// It is not a standing gap. THE DEADBAND IS STATIC FRICTION: it gates the ONSET of movement and
+	// does not persist once the aim is at rest. A full-deadband step applied to a resting lever is
+	// therefore exactly the step that breaks it loose again, and the view follows - which is the snap,
+	// and it is the retract working as designed rather than misfiring.
+	//
+	// That also explains, from a second direction, why pitch has run with its lead held constantly and
+	// aimLeadRetract off since the beginning: there is nothing to retract, because a lead that is
+	// never moved never moves anything.
+	//
+	// Kept switchable rather than deleted. The mechanism it exposes is worth more than the setting.
+	bool aimYawKickRetract = false;
 
 	// Drop the deadband lead once, on the first still frame after an aim stroke.
 	//
@@ -630,6 +750,16 @@ void AimLastDeflection(float *x, float *y);
 // sceCtrl clamps it, and aimRangeBoost on the d-pad channel. The model must solve against this
 // rather than against the setting, or its mirror records rotation that never happened.
 float AimChannelLimit();
+
+// Which side the open-loop yaw kick is parked on (-1, 0, +1) and how far the mouse has travelled
+// against it since the last flip. Exported so the debugger can show the chatter the reversal
+// threshold exists to prevent, rather than leaving it to be felt in play.
+void YawKickState(float *side, float *againstIt);
+
+// The factor scaleByFOV is currently applying to the direct angle writes, clamps included, or 1.0
+// when it is off or the FOV does not read as a believable one. Exported so the debugger can show
+// what is actually being applied rather than recompute the formula and drift from it.
+float FOVLookScale();
 
 // Ticks that were a real game frame, and ticks that were not. The ratio should sit near 1:1 on
 // this game; anything else means the frame counter isn't what we think it is.

@@ -111,6 +111,14 @@ outpaces the smoothing while the player is looking around, then releases so the 
 follow-camera returns. Don't "simplify" this back into a read-modify-write; it will silently stop
 working.
 
+**Two FOV reference constants, on purpose.** `AimAxisStep` scales by `FOV / 80` and `FOVLookScale`
+scales by `FOV / 70`, and the difference is not an oversight to be tidied away. The 80 is *the
+game's* constant, matched so the term cancels in the solve. The 70 is the FOV VCS actually runs at,
+picked so the look path's scale is exactly 1.0 in ordinary play and `sensitivity` keeps the meaning
+it was tuned with — re3's own 80 is likewise just what *its* defaults were tuned against. They also
+apply to different paths and must never both apply to one: direct angle writes get `FOVLookScale`,
+the reticle gets the game's term via `AimAxisStep`. Applying both is the sniper bug, twice over.
+
 **`VCSGame`** is the only thing the rest of PPSSPP knows about — three call sites, all no-ops for
 other games.
 
@@ -497,10 +505,12 @@ written again. The buttonless check is what keeps it from firing mid-drag on a v
   | vertical | a deadband lead on pitch, because the aim camera will not move until the angle leads it |
 
   **The settled configuration**, which is now the default: crosshair 0.5/0.5, yaw trim 0,
-  camera-origin ray on, weapon range on, `aimPitchDeadband` **0.165**, `aimYawDeadband` **0**,
-  everything else off. `pedFollowAim` off - the game turns the character itself.
+  camera-origin ray on, weapon range on, `aimPitchDeadband` **0.165**, `aimYawKick` **0.166**,
+  `aimYawDeadband` **0**, everything else off. `pedFollowAim` off - the game turns the character
+  itself. The `vertical` row above is now only half the story: both axes stall, and each gets its
+  lead by a different route - see the section below for why the difference is structural.
 
-### Pitch needs a deadband lead. Yaw does not. That asymmetry is the whole story
+### Both axes need a deadband lead. Only one of them survives being given it closed-loop
 
 The aim camera will not move vertically until `CameraPitch` leads the real aim by about **9.4
 degrees**, measured directly:
@@ -546,6 +556,53 @@ Why the axes differ is not mysterious once the camera code is read: they reach `
 routes in mode 45 - pitch through `SetRotateX(Alpha)`, yaw through a Z-rotate whose offset is picked
 from four quadrants by `ped + 0x780`. There was never a reason to expect one number to describe
 both. The 9.4 degrees they appeared to share was only ever measured on pitch.
+
+**Then it was measured on yaw, and the number is the same.** 2026-08-21, off the `LIVE Front yaw`
+row while free-aiming: `Beta` leads `Front`'s yaw by **9.56 deg (0.166 rad)** and `Front` does not
+move at all, **symmetrically** - push right and the offset reads +9.56, push left and it reads -9.56
+- releasing the instant the view breaks loose. A constant between the two spaces would hold one
+*signed* value both ways instead of mirroring, so this is stiction, and it is within noise of
+pitch's 0.165.
+
+So the paragraph above is wrong where it counts, and the way it went wrong is the useful part.
+**"Yaw does not need the lead" was never measured; it was inferred from the lead making things
+worse** - which it genuinely did. Both halves were true and the conclusion joining them was not. The
+symptom was about the *mechanism that delivered* the lead, and it got read as being about the lead.
+That is the same error this file has now recorded four times, and this time it was made while
+writing down the rule against it: the section immediately above says a symptom appearing with a
+change is evidence *about that change*, and the change was the closed-loop solve, not the constant.
+
+`aimYawKick` carries the same 0.166 open loop - `desired = accumulator + kick * strokeDirection`,
+nothing read back. With no measured error there is no sign to flip on its own, so the limit cycle is
+not tuned away, it is **unrepresentable**. The one place a reversal still costs `2*kick` is when the
+player genuinely reverses, gated behind a hysteresis threshold so a wobble inside a stroke cannot
+trigger it. `aimYawDeadband` stays at 0 and stays visible, because the distinction between the two
+is the whole lesson and deleting the loser hides it.
+
+**The general form, which is worth more than the aiming fix:** when a correction makes things worse,
+separate the *quantity* from the *delivery*. A closed loop and an open loop carrying the identical
+constant are not the same experiment, and only one of them can produce a limit cycle. Four attempts
+went into curing that cycle and a fifth into abandoning the constant, and none of them tried simply
+handing the same number over by a route that has no feedback in it.
+
+**Settled in play the same day, and it corrected the model.** The kick shipped with
+`aimYawKickRetract` ON - drop the lead once, on the first still frame - on the reasoning that the
+hold window expires 45 ticks later and the game inherits whatever is in `Beta`, so a lever parked a
+deadband past the aim is a value the player never asked for. Reported at once: the aim snapped
+somewhere just after each stroke ended. Unchecking it made free aim, in the player's words, perfect.
+
+Every clause of that reasoning is true. The unstated assumption is what failed: that moving the
+lever back by `D` is *invisible*, i.e. that the deadband is a standing gap `Front` sits inside. It
+is not. **The deadband is static friction - it gates the ONSET of movement and does not persist once
+the aim is at rest.** So a full-deadband step applied to a resting lever is precisely the step that
+breaks it loose again, and the view follows it. The retract was working exactly as designed.
+
+Two things fall out. The lead can be held indefinitely at no cost, because a lead that never moves
+never moves anything - which is independent confirmation of why pitch has run with `aimLeadRetract`
+off since the beginning, arrived at from the opposite end. And the "does `Front` converge onto the
+lever or settle short of it" question that `aimLeadOnStallOnly` was built to answer is the wrong
+question: at rest there is no offset to hold either way, and the whole quantity only exists while
+something is moving.
 
 **Addresses found so far**, all verified stable across a fresh boot (the four `Pad*` entries are
 documented in "VCS has a second analog stick" below rather than repeated here):
