@@ -1663,6 +1663,7 @@ static const ReplacementTableEntry entries[] = {
 	// GTA: Vice City Stories free aim. Installed by ADDRESS from VCS::Init rather than
 	// matched by hash - see Core/VCS/VCSFireHook.cpp. Inert for every other game.
 	{ "vcs_weapon_raycast", &VCS::Hook_vcs_weapon_raycast, 0, REPFLAG_HOOKENTER },
+	{ "vcs_weapon_raycast_done", &VCS::Hook_vcs_weapon_raycast_done, 0, REPFLAG_HOOKENTER },
 	// GTA: VCS draw distance. Both installed by address from VCS::Tick - see
 	// Core/VCS/VCSDrawDistance.cpp. Inert for every other game.
 	//

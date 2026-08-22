@@ -186,4 +186,8 @@ VCSFireHookSettings &FireHookSettings();
 // is the only reason it is not static.
 int Hook_vcs_weapon_raycast();
 
+// Runs on the instruction after the raycast returns, and does exactly one thing: puts the game's
+// own shot source back if the hook above moved it. See kVCSWeaponRaycastDone.
+int Hook_vcs_weapon_raycast_done();
+
 }  // namespace VCS

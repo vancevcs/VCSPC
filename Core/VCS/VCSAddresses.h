@@ -54,6 +54,23 @@ inline constexpr u32 kVCSWeaponRaycastCall = 0x08A41D74;
 // yet, or this is not the build the address was measured on, we must write nothing at all.
 inline constexpr u32 kVCSWeaponRaycastOp = 0x0E225E1B;
 
+// Where to put the shot's own source BACK, once the raycast has read it.
+//
+// The hooked call sits in a wrapper that returns immediately after it:
+//
+//     08a41d74  jal   0x889786c        <- kVCSWeaponRaycastCall, the hook
+//     08a41d78  sw    $t4, 0x10($sp)   <- delay slot
+//     08a41d7c  lw    $ra, 0x20($sp)   <- this, exactly once, after the raycast
+//     08a41d80  jr    $ra
+//     08a41d84  addiu $sp, $sp, 0x30
+//
+// So this instruction runs after ProcessLineOfSight has consumed point1 and before the CALLER -
+// CWeapon::FireInstantHit, which is what draws the gunflash - gets control back. That makes it the
+// one point where the source can be a camera-ray origin for the raycast and the muzzle for
+// everything after it. See the note on useCameraOrigin.
+inline constexpr u32 kVCSWeaponRaycastDone = 0x08A41D7C;
+inline constexpr u32 kVCSWeaponRaycastDoneOp = 0x8FBF0020;   // lw $ra, 0x20($sp)
+
 // CWorld's ground probe, and the reason vaulting can ask about geometry at all.
 //
 //     float CWorld::FindGroundZFor3DCoord(float x, float y, float z, bool *found)

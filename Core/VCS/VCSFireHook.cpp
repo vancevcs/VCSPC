@@ -37,6 +37,7 @@ static constexpr float kPi = 3.14159265358979323846f;
 static constexpr float kScreenAspect = 480.0f / 272.0f;
 
 static bool g_installed = false;
+static bool g_doneInstalled = false;
 static u64 g_seen = 0;
 static u64 g_redirected = 0;
 static VCSFireHookTrace g_trace;
@@ -255,6 +256,34 @@ static Vec3 Deflected(const Vec3 &source, const Vec3 &target, float degrees) {
 	return Vec3{source.x + dx * ca - dy * sa, source.y + dx * sa + dy * ca, source.z + dz};
 }
 
+// THE SHOT'S SOURCE IS BORROWED, NOT MOVED - and the muzzle flash is why.
+//
+// Writing the camera-ray origin into the game's own point1 is correct for the RAYCAST and wrong for
+// everything the caller does afterwards. CWeapon::FireInstantHit draws the gunflash from that same
+// vector once the raycast returns, so the flash was being drawn on the camera axis a few metres
+// ahead of the lens - i.e. dead centre of the screen, at point-blank range. Reported in play as
+// losing all visibility the moment you fire.
+//
+// Turning useCameraOrigin off does fix the flash, and costs the accuracy it exists for: the ray then
+// runs from the gun PARALLEL to the camera ray, so it never converges on the crosshair at any
+// distance rather than at all of them.
+//
+// So the origin is restored the instant the raycast has read it - see kVCSWeaponRaycastDone. The
+// bullet gets the exact camera ray; the flash gets the muzzle. Nothing else in the frame can observe
+// the borrowed value, because the wrapper does nothing between the two points but return.
+static bool g_restorePending = false;
+static u32 g_restoreAddr = 0;
+static Vec3 g_restoreSource;
+
+int Hook_vcs_weapon_raycast_done() {
+	if (!g_restorePending) {
+		return 0;
+	}
+	g_restorePending = false;
+	WriteVec3(g_restoreAddr, g_restoreSource);
+	return 0;
+}
+
 int Hook_vcs_weapon_raycast() {
 	const VCSFireHookSettings &s = FireHookSettings();
 	if (!s.enabled || !IsActive())
@@ -328,6 +357,13 @@ int Hook_vcs_weapon_raycast() {
 					              camPos.z + dir.z * t};
 					// The origin moved, so the game's own source has to move with it or the bullet
 					// would travel a different line from the one we solved.
+					//
+					// Borrowed for the duration of the raycast only. Arm the restore BEFORE the
+					// write, so a failed write cannot leave the game holding our origin with nothing
+					// scheduled to take it back.
+					g_restoreAddr = srcPtr;
+					g_restoreSource = source;
+					g_restorePending = true;
 					WriteVec3(srcPtr, origin);
 				}
 			}
@@ -388,6 +424,28 @@ void InstallFireHook() {
 		g_installed = true;
 		INFO_LOG(Log::HLE, "VCS: fire hook installed at %08x", kVCSWeaponRaycastCall);
 	}
+
+	// The restore point, on the same terms: verified opcode, installed by address, and OPTIONAL.
+	//
+	// Optional because the two are not equal partners. Without the first hook there is no free aim
+	// at all; without this one there is free aim with a muzzle flash in the wrong place. So a
+	// failure here warns and leaves the shot redirect running, rather than taking the feature down
+	// with it - but useCameraOrigin has to stand down, since the borrowed origin would then never
+	// be given back and every shot would draw its flash on the camera axis.
+	const int doneIndex = GetReplacementFuncIndexByName("vcs_weapon_raycast_done");
+	auto doneOp = ReadU32(kVCSWeaponRaycastDone);
+	if (doneIndex >= 0 && doneOp && *doneOp == kVCSWeaponRaycastDoneOp) {
+		if (WriteReplaceInstructionAt(kVCSWeaponRaycastDone, doneIndex)) {
+			currentMIPS->InvalidateICache(kVCSWeaponRaycastDone, 4);
+			g_doneInstalled = true;
+			INFO_LOG(Log::HLE, "VCS: fire hook restore installed at %08x", kVCSWeaponRaycastDone);
+		}
+	}
+	if (!g_doneInstalled && FireHookSettings().useCameraOrigin) {
+		WARN_LOG(Log::HLE, "VCS: no raycast restore point at %08x - camera-origin ray off, "
+			"or the muzzle flash would draw at the camera", kVCSWeaponRaycastDone);
+		FireHookSettings().useCameraOrigin = false;
+	}
 }
 
 void RemoveFireHook() {
@@ -396,6 +454,14 @@ void RemoveFireHook() {
 	RestoreReplacedInstruction(kVCSWeaponRaycastCall);
 	currentMIPS->InvalidateICache(kVCSWeaponRaycastCall, 4);
 	g_installed = false;
+	if (g_doneInstalled) {
+		RestoreReplacedInstruction(kVCSWeaponRaycastDone);
+		currentMIPS->InvalidateICache(kVCSWeaponRaycastDone, 4);
+		g_doneInstalled = false;
+	}
+	// Anything still owed is owed to a game that is going away. Drop it rather than letting the
+	// next install find a restore armed against a stale address.
+	g_restorePending = false;
 	g_seen = 0;
 	g_redirected = 0;
 	g_trace = VCSFireHookTrace();
