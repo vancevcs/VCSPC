@@ -183,6 +183,24 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::OnFoot,    NKCODE_SPACE,              CTRL_SQUARE,    "Jump (vaults a ledge when there is one)", "Jump", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,    NKCODE_SHIFT_LEFT,         CTRL_CROSS,     "Sprint", "Sprint", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Attack / fire", "Fire", VCSKeyList::OnFoot },
+	// Ctrl fires too, alongside the left mouse button.
+	//
+	// For the trackpad case, which is not a niche one: a great many laptop touchpads cannot report
+	// a second button while the first is held, so RMB-to-aim plus LMB-to-fire is physically
+	// unpressable on them. A keyboard alternative for the trigger costs nothing and is the whole
+	// difference between the aiming work being usable on a laptop and not.
+	//
+	// One row per context that already binds fire, and each carries the SAME listName as the mouse
+	// row it joins, so the controls card renders one "Fire" line with both keys against it rather
+	// than the action twice. See KeyListing.
+	//
+	// NKCODE_CTRL_LEFT is the keyboard key; CTRL_LEFT elsewhere in this table is the PSP D-PAD
+	// LEFT button. The two are unrelated and the names collide, which is worth a sentence here
+	// because a row pairing them would look plausible and be nonsense.
+	//
+	// Checked against Core/KeyMapDefaults.cpp before adding: PPSSPP binds no VIRTKEY to it, so
+	// claiming it takes nothing away - the trap Escape and Tab document further up.
+	{ VCSInputContext::OnFoot,    NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Attack / fire", "Fire", VCSKeyList::OnFoot },
 	// Menu keys, living in the OnFoot context on purpose.
 	//
 	// Menus run under OnFoot, because the Menu context never resolves - it needs GameState, which
@@ -235,6 +253,7 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InVehicle, NKCODE_SPACE,              CTRL_RTRIGGER,  "Handbrake", "Handbrake", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_F,                  CTRL_TRIANGLE,  "Exit vehicle", "Exit vehicle", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Drive-by fire", "Drive-by fire", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Drive-by fire", "Drive-by fire", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_H,                  CTRL_DOWN,      "Horn (verified)", "Horn", VCSKeyList::InVehicle },
 	// These two are the radio in an ordinary vehicle - and, verified in play, the FORKS in a
 	// forklift: R raises and T lowers. The game repurposes d-pad left/right there rather than
@@ -274,6 +293,7 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InAircraft, NKCODE_E,                  CTRL_RTRIGGER,  "Yaw right", "Yaw right", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_F,                  CTRL_TRIANGLE,  "Exit aircraft", "Exit aircraft", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire (Hunter)", "Fire (Hunter)", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Fire (Hunter)", "Fire (Hunter)", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_T,                  CTRL_RIGHT,     "Next radio station", "Next radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_R,                  CTRL_LEFT,      "Previous radio station", "Previous radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_V,                  CTRL_SELECT,    "Change camera", "Change camera", VCSKeyList::Aircraft },
@@ -299,6 +319,7 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// the reticle instead of the camera, WASD goes quiet because the stick is now the reticle, and
 	// Q/E cycle targets instead of weapons.
 	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire", "Light attack / fire", VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,    NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Fire", "Light attack / fire", VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,    kVCSAimKey,                CTRL_RTRIGGER,  "Hold aim (verified)" },
 	// Same as on foot. Bound here mainly so Tab can't fall through to PPSSPP's fast-forward
 	// mid-fight, which would suddenly run the game at several times speed while aiming.
