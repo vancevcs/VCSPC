@@ -34,7 +34,6 @@
 #include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/HLE/ReplaceTables.h"
 #include "Core/VCS/VCSFireHook.h"
-#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/HLE/FunctionWrappers.h"
 #include "Core/HLE/sceDisplay.h"
 
@@ -1664,14 +1663,6 @@ static const ReplacementTableEntry entries[] = {
 	// matched by hash - see Core/VCS/VCSFireHook.cpp. Inert for every other game.
 	{ "vcs_weapon_raycast", &VCS::Hook_vcs_weapon_raycast, 0, REPFLAG_HOOKENTER },
 	{ "vcs_weapon_raycast_done", &VCS::Hook_vcs_weapon_raycast_done, 0, REPFLAG_HOOKENTER },
-	// GTA: VCS draw distance. Both installed by address from VCS::Tick - see
-	// Core/VCS/VCSDrawDistance.cpp. Inert for every other game.
-	//
-	// The far clip one is a REPLACEMENT, not a hook: CDraw::SetFarClipZ is a two-instruction leaf
-	// whose entire body is one store, so taking it over wholesale is exact, and PPSSPP's return-to-$ra
-	// is precisely its `jr $ra`.
-	{ "vcs_draw_distance_far_clip", &VCS::Replace_vcs_draw_distance_far_clip, 0, 0 },
-	{ "vcs_draw_distance_entity_lod", &VCS::Hook_vcs_draw_distance_entity_lod, 0, REPFLAG_HOOKENTER },
 	// This is actually used in other games, not just Dissidia.
 	{ "dissidia_recordframe_avi", &Hook_dissidia_recordframe_avi, 0, REPFLAG_HOOKENTER },
 	{ "brandish_download_frame", &Hook_brandish_download_frame, 0, REPFLAG_HOOKENTER },

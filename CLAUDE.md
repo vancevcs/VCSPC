@@ -2284,42 +2284,45 @@ right values in them, and setting a field the game writes is not the same as doi
 game does when it writes it. The entry point was a function all along, and the way to a function
 nobody can name is to break on the field and read the stack.
 
-### Draw distance — ported, measured, and not the constraint
+### Draw distance — ported, measured, removed
 
-**Status: built, working, and it changes nothing you can see.** Off by default
-(`DrawDistanceSettings().enabled`, the Graphics page, or the Draw distance tab in the debugger
-window). `Core/VCS/VCSDrawDistance.cpp`.
+**Status: gone.** It was built, it worked, and it changed nothing anyone could see, so it came out
+rather than go on sitting in the Graphics page as a switch with no effect. `VCSDrawDistance.cpp`,
+its debugger tab and its four menu rows are all deleted; what follows is the part worth keeping,
+because this is an idea that comes back.
 
 Every address came from PSPRecomp's VCS profile — a static-recompilation project targeting this
 same disc, whose `vcs_draw_distance_patch.cpp` names `CDraw::ms_fFarClipZ` at `$gp + 0x1e74`, the
 setter at `0x08a1ad6c`, the IDE/model-info table at `$gp + 24` with its count at `$gp + 7656`, and
 three draw distances at `+0x2c`, `+0x30` and `+0x34` off each model-info. None of it was hunted
-for here. All of it was disassembled out of a savestate before being trusted, which is the only
-reason the port took an afternoon.
+for here. All of it was disassembled out of a savestate before being trusted, and all of it was
+right, which is the only reason the port took an afternoon.
 
-The METHOD is not theirs and could not be. A static recompiler swaps whole functions out of a
-dispatch table and jumps to a continuation address when it is done; PPSSPP runs the real MIPS and
-a replacement always returns to `$ra`. So each of their five hooks was read first and then
-re-expressed as the smallest thing reaching the same value. Three of the five stopped being code
-patches at all — the vehicle and ped range constants are `lui` immediates, so they are one 16-bit
-field each. `SetFarClipZ` is a two-instruction leaf, which is the one case PPSSPP's replacement
-path fits exactly. Only the entity LOD site needed a hook.
+The METHOD was not theirs and could not be, and that part outlives the feature. A static recompiler
+swaps whole functions out of a dispatch table and jumps to a continuation address when it is done;
+PPSSPP runs the real MIPS and a replacement always returns to `$ra`. So each of their five hooks
+was read first and then re-expressed as the smallest thing reaching the same value. Three of the
+five stopped being code patches at all — the vehicle and ped range constants are `lui` immediates,
+so they are one 16-bit field each. `SetFarClipZ` is a two-instruction leaf, which is the one case
+PPSSPP's replacement path fits exactly. Only the entity LOD site needed a hook.
 
-**What the measurement said.** The far clip scales exactly as intended: 1978.9 out to 3957.9 at
-2x, read live off the debugger tab. At 8x the view is indistinguishable from stock.
+**What the measurement said.** The far clip scaled exactly as intended: 1978.9 out to 3957.9 at
+2x, read live off the debugger tab. At 8x the view was indistinguishable from stock.
 
-That is not a bug in the port, and it is the finding worth keeping: **the far clip only governs
+That was not a bug in the port, and it is the finding worth keeping: **the far clip only governs
 how far the game is WILLING to draw.** Whether anything is out there to draw is decided by
 streaming and the per-model distances, and VCS appears to carry no separate LOD geometry to put at
 range — the level containers show essentially no LOD-prefixed models, against one in `GAME.DTZ`.
-Flown and looked at; vanilla draw distance is adequate. Do not spend more on this without a reason
-that is not "the far clip is too close".
+Flown and looked at; vanilla draw distance is adequate. Do not restart this without a reason that
+is not "the far clip is too close".
 
-The one lever never actually pulled is the model-info table walk. It reported zero entries scaled
-in the build that was tested, because of the second trap below, and the fix for that has not
-itself been exercised. If the question ever comes back, start there — and the `$gp` offsets are
-worth trusting: on this build `$gp` reads `0x08bb1d60`, putting the far clip at `0x08bb3bd4` and
-the model count at `0x08bb3b48`, right among `TimeStep` and `FrameCounter` in the address table.
+The one lever never actually pulled was the model-info table walk. It reported zero entries scaled
+in the build that was tested, because of the second trap below, and the fix for that was never
+exercised. If the question does come back, start there, and start from
+`git log --diff-filter=D -- Core/VCS/VCSDrawDistance.cpp` rather than from nothing — the `$gp`
+offsets are worth trusting: on this build `$gp` reads `0x08bb1d60`, putting the far clip at
+`0x08bb3bd4` and the model count at `0x08bb3b48`, right among `TimeStep` and `FrameCounter` in the
+address table.
 
 ### Two traps in patching this emulator's code
 

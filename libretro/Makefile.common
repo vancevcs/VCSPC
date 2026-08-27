@@ -586,7 +586,6 @@ SOURCES_CXX += \
 	$(GPUDIR)/Common/SoftwareTransformCommon.cpp \
 	$(GPUDIR)/Common/DepthBufferCommon.cpp \
 	$(GPUDIR)/Common/DepthRaster.cpp \
-	$(GPUDIR)/Common/VCSShadow.cpp \
 	$(GPUDIR)/Common/StencilCommon.cpp \
 	$(GPUDIR)/Software/TransformUnit.cpp \
 	$(GPUDIR)/Software/SoftGpu.cpp \
@@ -778,7 +777,6 @@ SOURCES_CXX += \
 	       $(COREDIR)/VCS/VCSInput.cpp \
 	       $(COREDIR)/VCS/VCSMemory.cpp \
 	       $(COREDIR)/VCS/VCSState.cpp \
-	       $(COREDIR)/VCS/VCSDrawDistance.cpp \
 	       $(COREDIR)/VCS/VCSVault.cpp \
 	       $(COREDIR)/VCS/VCSWorld.cpp \
 	       $(COREDIR)/VCS/VCSSettings.cpp \

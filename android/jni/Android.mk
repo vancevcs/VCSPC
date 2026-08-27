@@ -558,7 +558,6 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/GPU/Common/ReinterpretFramebuffer.cpp \
   $(SRC)/GPU/Common/DepthBufferCommon.cpp \
   $(SRC)/GPU/Common/DepthRaster.cpp \
-  $(SRC)/GPU/Common/VCSShadow.cpp \
   $(SRC)/GPU/Common/VertexDecoderCommon.cpp.arm \
   $(SRC)/GPU/Common/VertexDecoderHandwritten.cpp.arm \
   $(SRC)/GPU/Common/TextureCacheCommon.cpp.arm \
@@ -714,7 +713,6 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/VCS/VCSInput.cpp.arm \
   $(SRC)/Core/VCS/VCSMemory.cpp.arm \
   $(SRC)/Core/VCS/VCSState.cpp.arm \
-  $(SRC)/Core/VCS/VCSDrawDistance.cpp.arm \
   $(SRC)/Core/VCS/VCSVault.cpp.arm \
   $(SRC)/Core/VCS/VCSWorld.cpp.arm \
   $(SRC)/Core/VCS/VCSSettings.cpp.arm \

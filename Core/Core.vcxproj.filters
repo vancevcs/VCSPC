@@ -255,9 +255,6 @@
     <ClCompile Include="VCS\VCSSettings.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
-    <ClCompile Include="VCS\VCSDrawDistance.cpp">
-      <Filter>VCS</Filter>
-    </ClCompile>
     <ClCompile Include="VCS\VCSVault.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -1579,9 +1576,6 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSSettings.h">
-      <Filter>VCS</Filter>
-    </ClInclude>
-    <ClInclude Include="VCS\VCSDrawDistance.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSVault.h">

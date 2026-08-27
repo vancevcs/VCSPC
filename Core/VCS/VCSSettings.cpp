@@ -20,12 +20,12 @@
 
 #include "Common/Data/Format/IniFile.h"
 #include "Common/File/Path.h"
+#include "Common/System/Display.h"
 #include "Common/System/Request.h"
 #include "Core/Config.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
-#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSSettings.h"
 
 namespace VCS {
@@ -37,6 +37,26 @@ static const char *const kResolutionLabels[] = {
 };
 static const char *const kAnisoLabels[] = { "Off", "2x", "4x", "8x", "16x" };
 
+// "3x (1440x816)". The multiplier is what the setting means; the pixel count is what it does, and
+// a resolution is the one setting a player already has a number for. Computed rather than written
+// into the labels above because Auto's half of it is the window's, and the window can be resized
+// while this page is open.
+static std::string ResolutionText(const Option &opt) {
+	const int index = std::clamp(*opt.intValue, 0, (int)ARRAY_SIZE(kResolutionLabels) - 1);
+
+	// Auto is NOT "render at the window size". It rounds the window UP to a whole multiple of the
+	// PSP's own 480 and renders at that, which is why it can only ever read as one of the same
+	// sizes the numbered rows offer. Same arithmetic as PresentationCommon's
+	// CalculateRenderResolution, and it has to stay the same arithmetic or the parenthesis is a
+	// lie. Its two other cases - a portrait internal rotation, and an upscaling post shader - are
+	// reached through settings this menu does not offer.
+	const int scale = index != 0 ? index : std::max((g_display.pixel_xres + 479) / 480, 1);
+
+	char buffer[48];
+	snprintf(buffer, sizeof(buffer), "%s (%dx%d)", kResolutionLabels[index], 480 * scale, 272 * scale);
+	return std::string(buffer);
+}
+
 static Path SettingsPath() {
 	return GetSysDirectory(DIRECTORY_SYSTEM) / "vcs.ini";
 }
@@ -47,7 +67,6 @@ const std::vector<Option> &Options() {
 	// table would be racing their construction.
 	static const std::vector<Option> options = [] {
 		VCSCameraSettings &cam = CameraSettings();
-		VCSDrawDistanceSettings &dd = DrawDistanceSettings();
 
 		std::vector<Option> opts;
 
@@ -63,6 +82,7 @@ const std::vector<Option> &Options() {
 			opt.defaultBool = *value;
 			opts.push_back(opt);
 		};
+
 
 		auto addFloat = [&opts](OptionPage page, const char *iniKey, const char *label,
 				const char *help, float *value, float minValue, float maxValue,
@@ -103,7 +123,8 @@ const std::vector<Option> &Options() {
 
 		auto addChoice = [&opts](OptionPage page, const char *iniKey, const char *label,
 				const char *help, int *value, const char *const *choices, int numChoices,
-				int defaultIndex, bool external = false, void (*onChange)() = nullptr) {
+				int defaultIndex, bool external = false, void (*onChange)() = nullptr,
+				std::string (*valueText)(const Option &) = nullptr) {
 			Option opt{};
 			opt.page = page;
 			opt.type = OptionType::Choice;
@@ -115,6 +136,7 @@ const std::vector<Option> &Options() {
 			opt.numChoices = numChoices;
 			opt.external = external;
 			opt.onChange = onChange;
+			opt.valueText = valueText;
 			// Explicit rather than captured from the live value: for an external setting the
 			// live value at table-build time is whatever the user last saved, so capturing it
 			// would make "restore defaults" mean "restore what I had at startup".
@@ -198,26 +220,11 @@ const std::vector<Option> &Options() {
 			&g_Config.iInternalResolution, kResolutionLabels, ARRAY_SIZE(kResolutionLabels),
 			Config::GetDefaultValueInt(&g_Config.iInternalResolution), true, []() {
 				System_PostUIMessage(UIMessage::GPU_RENDER_RESIZED);
-			});
+			}, &ResolutionText);
 		addChoice(OptionPage::Graphics, nullptr, "Anisotropic filtering",
 			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
 			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
-
-		// Draw distance. Ported from PSPRecomp's VCS profile - see Core/VCS/VCSDrawDistance.cpp
-		// for what each multiplier actually reaches.
-		addBool(OptionPage::Graphics, "DrawDistance", "Extended draw distance",
-			"Pushes the far clip and the streaming ranges past what the PSP was asked to draw.",
-			&dd.enabled);
-		addFloat(OptionPage::Graphics, "DrawDistanceWorld", "World distance",
-			"Buildings, props and the far clip. Costs streaming and fill rate.",
-			&dd.world, 1.0f, 8.0f, "%.2fx");
-		addFloat(OptionPage::Graphics, "DrawDistanceVehicles", "Vehicle distance",
-			"How far off-screen traffic survives. Above 2x, missions that count on the original range can misbehave.",
-			&dd.vehicles, 1.0f, 4.0f, "%.2fx");
-		addFloat(OptionPage::Graphics, "DrawDistanceNPCs", "Pedestrian distance",
-			"Ped population ranges. Costs emulated CPU per pedestrian, so it bites the frame rate before it looks better.",
-			&dd.npcs, 1.0f, 4.0f, "%.2fx");
 
 		return opts;
 	}();
@@ -390,6 +397,9 @@ void SetInt(const Option &opt, int value) {
 }
 
 std::string ValueText(const Option &opt) {
+	if (opt.valueText) {
+		return opt.valueText(opt);
+	}
 	switch (opt.type) {
 	case OptionType::Bool:
 		return *opt.boolValue ? "ON" : "OFF";

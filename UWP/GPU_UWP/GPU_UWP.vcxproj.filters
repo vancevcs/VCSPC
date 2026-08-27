@@ -80,7 +80,6 @@
       <Filter>Debugger</Filter>
     </ClCompile>
     <ClCompile Include="..\..\GPU\Common\DepthRaster.cpp" />
-    <ClCompile Include="..\..\GPU\Common\VCSShadow.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\GPU\Common\DepalettizeShaderCommon.h" />
@@ -164,7 +163,6 @@
       <Filter>Debugger</Filter>
     </ClInclude>
     <ClInclude Include="..\..\GPU\Common\DepthRaster.h" />
-    <ClInclude Include="..\..\GPU\Common\VCSShadow.h" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="Debugger">

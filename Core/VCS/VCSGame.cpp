@@ -22,7 +22,6 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
-#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSInput.h"
@@ -142,8 +141,6 @@ void Shutdown() {
 	RemoveFireHook();
 	VaultReset();
 	RemoveWorldQuery();
-	// Puts the range constants, the replaced setter and every model-info value back.
-	RemoveDrawDistance();
 
 	g_active = false;
 	g_discID.clear();
@@ -177,10 +174,6 @@ void Tick() {
 	if (VaultSettings().enabled) {
 		InstallWorldQuery();
 	}
-
-	// Draw distance. Installs itself on the same terms as the two above, and then keeps an eye on
-	// the model-info table, which does not exist yet when the first install succeeds.
-	DrawDistanceTick();
 
 	// Decode first, then map - the context depends on what we just read.
 	UpdateSharedState();

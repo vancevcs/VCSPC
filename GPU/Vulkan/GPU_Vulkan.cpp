@@ -35,7 +35,6 @@
 #include "GPU/GPUState.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
-#include "GPU/Common/VCSShadow.h"
 #include "GPU/Vulkan/GPU_Vulkan.h"
 #include "GPU/Vulkan/FramebufferManagerVulkan.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
@@ -247,16 +246,6 @@ void GPU_Vulkan::BeginHostFrame(const DisplayLayoutConfig &config) {
 	int curFrame = vulkan->GetCurFrame();
 
 	framebufferManager_->BeginFrame(config);
-
-	// The VCS shadow passes, if they are on at all. Here specifically: after the framebuffer
-	// manager has begun its frame, and immediately before the Dirty(DIRTY_ALL) below, so any
-	// render target or pipeline this binds is superseded before the game draws anything.
-	VCSShadow::BeginFrame(draw_);
-	if (VCSShadow::IsActive()) {
-		// Those passes bound their own render targets through thin3d, behind the framebuffer
-		// manager's back. Hand control back explicitly rather than trusting it to notice.
-		framebufferManager_->RebindFramebuffer("vcs_shadow_done");
-	}
 
 	gstate_c.Dirty(DIRTY_ALL);
 
