@@ -42,19 +42,6 @@ static float g_lastTakenDy = 0.0f;
 
 static bool g_driving = false;
 
-// The synthesised second stick we last wrote into CPad. Emu thread only.
-static bool g_padStickHeld = false;
-static float g_padStickX = 0.0f;
-static float g_padStickY = 0.0f;
-// Cumulative, never reset while a game runs - see PadStickStats for why.
-static bool g_padStickModeSet = false;
-static u64 g_padStickFrames = 0;
-static u64 g_padStickNonZero = 0;
-static float g_padStickPeak = 0.0f;
-
-// Defined further down, next to the explanation of what it writes and why.
-static void WritePadStick(float x, float y);
-
 // Diagnostics for the debugger window. Plain counters, incremented from the input thread;
 // exact ordering doesn't matter for what they're used for.
 static u64 g_mouseSeen = 0;
@@ -288,10 +275,9 @@ static float g_aimTimeStep = kAimDefaultTimeStep;
 
 // The model must step exactly once per GAME frame, and neither part of that is automatic.
 //
-// Two callers ask for a deflection. In free aim both aim channels run: ApplyAnalog writes the nub
-// and PadStickTick writes the d-pad pair, and which one the game reads is decided by
-// CameraInputMode, not by us. So the first caller in a tick solves and the second gets the same
-// answer.
+// One caller asks for a deflection - ApplyAnalog, writing the nub. It was two while the d-pad
+// pair carried a second aim channel, which is why the answer is cached per tick rather than
+// simply computed: a second asker in the same tick has to get the same answer, not a second step.
 //
 // And a tick is NOT a game frame. We run from hleEnterVblank at ~60Hz; this game runs its logic
 // at 30fps (TimeStep reads 1.668, which is 50/30 in GTA's 50fps-reference units). Left alone, that
@@ -336,15 +322,14 @@ static bool g_haveCamMode = false;
 static u64 g_gameFrames = 0;
 static u64 g_skippedTicks = 0;
 
-// The largest deflection the channel that is actually live can carry to the game.
+// The largest deflection the live channel can carry to the game.
 //
-// usePadStick decides which channel that is - it sets CameraInputMode, and the flag is what makes
-// the game read the d-pad pair instead of the nub. So it also decides whether aimRangeBoost means
-// anything at all.
+// Always full deflection now: the nub is the only aim channel, and sceCtrl clamps it there before
+// the game ever sees it. It was a variable while the d-pad pair could carry more - those fields
+// are int16 and the game's accessor never clamps them - and the model still asks, because the
+// question is a real one and the answer being constant is a property of the channel rather than
+// of the model.
 float AimChannelLimit() {
-	if (g_settings.usePadStick && PadStickAvailable() && g_settings.aimRangeBoost > 1.0f) {
-		return g_settings.aimRangeBoost;
-	}
 	return 1.0f;
 }
 
@@ -520,8 +505,7 @@ float AimAxisStep(VCSAimAxis *axis, float want, VCSAddr incAddr) {
 		}
 	}
 
-	// Saturate at what the LIVE CHANNEL can actually deliver, which is not the same as what
-	// aimRangeBoost permits.
+	// Saturate at what the LIVE CHANNEL can actually deliver.
 	//
 	// Getting this wrong is not a small error, because the clamped value is what the mirror is
 	// then built from. Solve to 3.0, have ApplyAnalog clamp the nub to 1.0, and the mirror records
@@ -808,10 +792,6 @@ static bool ContextWantsMouse(VCSInputContext context) {
 // gives lock-on, not free aim, and there the camera should keep working exactly as on foot -
 // there is no reticle to hand the mouse to.
 //
-// PluginAimActive is the other way the mouse gets spoken for: with the CLEO plugin driving aim
-// from the right stick, the plugin owns the view while aim is held, so writing camera angles
-// underneath it would fight whatever it does.
-//
 // The lock-on TOGGLE is the exception to the paragraph above, and the last piece of that mode.
 // Ordinary lock-on is something the player passes through on the way to free aim, so the camera
 // keeping its mouse look there is right. The toggle is the opposite: it says "leave this to the
@@ -825,148 +805,7 @@ static bool ContextDrivesCamera(VCSInputContext context) {
 	if (context == VCSInputContext::Aiming && LockOnModeActive()) {
 		return false;
 	}
-	return ContextWantsMouse(context) && !ReticleActive(context) && !PluginAimActive(context) &&
-	       !PadStickActive(context);
-}
-
-// Whether the mode is wanted at all. This governs the FLAG, which must stay set for as long as
-// the player is in this mode - including while free-aiming, when the delta goes elsewhere.
-static bool PadStickModeWanted(VCSInputContext context) {
-	return g_settings.usePadStick && g_settings.enabled && PadStickAvailable() &&
-	       ContextWantsMouse(context);
-}
-
-bool PadStickActive(VCSInputContext context) {
-	// Only during FREE AIM, and deliberately alongside the reticle rather than instead of it.
-	//
-	// In free aim the two channels carry different axes, confirmed in game: the nub turns the
-	// yaw, and d-pad up/down moves the PITCH. So the reticle path (nub) and this one (d-pad)
-	// are complementary, and driving only one gives you half an aim. This previously stood aside
-	// whenever the reticle was active, which is exactly backwards - it meant pitch was only ever
-	// reachable by pressing the arrow keys by hand.
-	//
-	// Everywhere else it stays off, because these fields double as the d-pad BUTTONS and the
-	// meaning is destructive: left/right is previous/next target while locked on (a trace caught
-	// us writing 255 and cycling through NPCs) and previous/next weapon on foot. Free aim is the
-	// one state where the buttons have nothing worse to do.
-	// Keyed on FreeAimActive, NOT ReticleActive. It used to key on the reticle, which became
-	// circular the moment the reticle had to stand down for this: the reticle stops so the nub is
-	// free for movement, which would have stopped the d-pad aim as well, which would have left free
-	// aim with nothing driving it at all.
-	return PadStickModeWanted(context) && FreeAimActive(context);
-}
-
-void PadStickTick(VCSInputContext context) {
-	// The flag follows the MODE, not the delta routing - otherwise entering free aim would clear
-	// it, and clearing it is what takes free aim away again.
-	if (PadStickModeWanted(context)) {
-		if (!g_padStickModeSet) {
-			WriteAddrU8(VCSAddr::CameraInputMode, 1);
-			g_padStickModeSet = true;
-		}
-	} else if (g_padStickModeSet) {
-		WriteAddrU8(VCSAddr::CameraInputMode, 0);
-		g_padStickModeSet = false;
-	}
-
-	if (!PadStickActive(context)) {
-		// Release once. After that the game's own pad update owns these fields again, and writing
-		// zeroes every frame would be pointless work that also fights a real d-pad press.
-		if (g_padStickHeld) {
-			WritePadStick(0.0f, 0.0f);
-			g_padStickHeld = false;
-			g_padStickX = 0.0f;
-			g_padStickY = 0.0f;
-		}
-		// Deliberately NOT resetting the model here. PadStickActive is a subset of ReticleActive,
-		// so this also fires on every frame where the nub is aiming and the d-pad is not - and
-		// wiping the model then would destroy the state the nub channel is mid-way through using.
-		// ApplyAnalog owns the reset, at the one point that really means "aiming stopped".
-		return;
-	}
-
-	// The flag itself is handled at the top of this function, once per mode change rather than
-	// once per frame. The game owns it: there is a setter at 0x089c6f08 (takes a byte in a1,
-	// stores to gp-0x3F00, returns the old value) and 0x08ab6898 copies it into a settings struct
-	// alongside other options, so it is a game SETTING the game changes as modes come and go.
-	// Re-asserting it every frame fought that, and the symptom was aim "locking on for a split
-	// second and then nothing" - the game set the flag for its aim mode and we stomped it back.
-	g_padStickFrames++;
-
-	float dx, dy;
-	// Take or peek, depending on whether anyone drained the delta before us.
-	//
-	// This used to always PEEK, on the reasoning that ApplyAnalog's reticle branch had already
-	// drained the frame's movement for the nub, so draining again would find nothing. That held
-	// only while the reticle ran alongside this. Now the reticle stands down whenever the d-pad is
-	// the aim channel - so that the nub is free for WASD - and with it went the only consumer that
-	// drained anything. Peeking then returns a stale value, and the mouse stops aiming entirely.
-	if (ReticleActive(context)) {
-		PeekMouseDelta(&dx, &dy);
-	} else {
-		TakeMouseDelta(&dx, &dy);
-	}
-
-	// The deflection is no longer proportional to the mouse movement - it is whatever the model
-	// says will move the aim by the distance the mouse moved. See AimAxisStep.
-	//
-	// This has to run on every frame, including frames with no movement, because a stop is an
-	// instruction: it is what makes the model push back against the game's smoother instead of
-	// letting the aim coast. The old code returned early on a zero delta, which is precisely the
-	// glide that made this feel like a stick.
-	float x = 0.0f, y = 0.0f;
-	AimDeflectionFromMouse(dx, dy, g_settings.padStickSensitivity, g_settings.invertY, &x, &y);
-	if (g_settings.invertX) {
-		x = -x;
-	}
-
-	// Only touch the fields while actually deflecting them. These ARE the d-pad - the same four
-	// fields the real buttons set - so writing zeroes every idle frame stomps genuine d-pad input
-	// 60 times a second: Q/E target cycling, weapon switching, radio, horn. That is the "only
-	// release what you pressed" rule from ApplyMapping, and it applies here for the same reason.
-	//
-	// Not writing when idle is safe: the game's own pad update rewrites these every frame from the
-	// real buttons, so letting go hands them straight back rather than leaving a stale deflection.
-	// One zeroing write on the release frame clears whatever we last put there.
-	if (x == 0.0f && y == 0.0f) {
-		if (g_padStickHeld) {
-			WritePadStick(0.0f, 0.0f);
-			g_padStickHeld = false;
-			g_padStickX = 0.0f;
-			g_padStickY = 0.0f;
-		}
-		return;
-	}
-
-	WritePadStick(x, y);
-	g_padStickHeld = true;
-	g_padStickX = x;
-	g_padStickY = y;
-
-	// Persistent evidence. The live x/y self-centres the instant the mouse stops, so it reads
-	// zero in every screenshot and can neither confirm nor deny that this works. These don't
-	// decay, so they answer "has the mouse EVER driven this axis" at a glance.
-	if (x != 0.0f || y != 0.0f) {
-		g_padStickNonZero++;
-		const float mag = (x < 0.0f ? -x : x) > (y < 0.0f ? -y : y)
-			? (x < 0.0f ? -x : x) : (y < 0.0f ? -y : y);
-		if (mag > g_padStickPeak) {
-			g_padStickPeak = mag;
-		}
-	}
-}
-
-void PadStickStats(u64 *frames, u64 *nonZero, float *peak, bool *modeFlagSet) {
-	*frames = g_padStickFrames;
-	*nonZero = g_padStickNonZero;
-	*peak = g_padStickPeak;
-	const std::optional<u32> mode = ReadAddrU32(VCSAddr::CameraInputMode);
-	*modeFlagSet = mode.has_value() && *mode != 0;
-}
-
-void GetPadStick(float *x, float *y) {
-	*x = g_padStickX;
-	*y = g_padStickY;
+	return ContextWantsMouse(context) && !ReticleActive(context);
 }
 
 bool HandleMouseDelta(float dx, float dy) {
@@ -1007,52 +846,6 @@ void AddLookDelta(float dx, float dy) {
 	std::lock_guard<std::mutex> guard(g_deltaMutex);
 	g_pendingDx += dx;
 	g_pendingDy += dy;
-}
-
-bool PadStickAvailable() {
-	// CameraInputMode is required, not optional: with it unset the d-pad fields are never read,
-	// so the whole mechanism is inert and offering it would just be a switch that does nothing.
-	return IsAddrSet(VCSAddr::PadDPadLeft) && IsAddrSet(VCSAddr::PadDPadRight) &&
-	       IsAddrSet(VCSAddr::PadDPadUp) && IsAddrSet(VCSAddr::PadDPadDown) &&
-	       IsAddrSet(VCSAddr::CameraInputMode);
-}
-
-// Drives the second analog stick VCS thinks it has.
-//
-// The game synthesises that stick from the d-pad: the camera X axis is computed as
-// (DPadRight - DPadLeft) / 2 and Y as (DPadDown - DPadUp) / 2, in the pad functions at
-// 0x0898bb4c and 0x0898bb8c. Those fields are int16 and the real d-pad only ever puts 0 or 255
-// in them, so the axis a player can actually produce is -127, 0 or +127 - three positions. But
-// nothing in the arithmetic requires that, and writing intermediate values yields a genuine
-// analog axis, which is what makes mouse input expressible at all.
-//
-// Writing here rather than pressing buttons is the whole point: no PSP input can express a
-// partial d-pad. It is the same thing PSPRecomp does by replacing those two functions, and the
-// same thing the CLEO plugin does by writing into CPad - reached with a plain memory write.
-//
-// x and y are -1..1, or wider when aimRangeBoost allows. Only one side of each pair is ever
-// nonzero, exactly as a real d-pad can never be pressed left and right at once.
-static void WritePadStick(float x, float y) {
-	const float scale = 254.0f;   // halved by the game, so 254 lands on the +/-127 a d-pad reaches
-
-	// The ceiling is the int16 the field actually is, not 255. 255 is only the largest value a
-	// real d-pad produces - the accessor at 0x0898bb4c subtracts the pair, halves it and sign
-	// extends, with no clamp anywhere - so a larger value is a larger axis, which is what
-	// aimRangeBoost is for. The model is the limiter; this just avoids wrapping the sign bit.
-	const int kMax = 32767;
-	int ix = (int)(x * scale);
-	int iy = (int)(y * scale);
-	if (ix > kMax) ix = kMax;
-	if (ix < -kMax) ix = -kMax;
-	if (iy > kMax) iy = kMax;
-	if (iy < -kMax) iy = -kMax;
-
-	WriteAddrU16(VCSAddr::PadDPadRight, (u16)(ix > 0 ? ix : 0));
-	WriteAddrU16(VCSAddr::PadDPadLeft,  (u16)(ix < 0 ? -ix : 0));
-	// Y is inverted relative to the pair order: the game computes (Down - Up), so a positive
-	// requested y (look up) has to land in the Up field.
-	WriteAddrU16(VCSAddr::PadDPadDown,  (u16)(iy < 0 ? -iy : 0));
-	WriteAddrU16(VCSAddr::PadDPadUp,    (u16)(iy > 0 ? iy : 0));
 }
 
 void TakeMouseDelta(float *dx, float *dy) {

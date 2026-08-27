@@ -187,29 +187,6 @@ bool SolveAimRay(float origin[3], float dir[3]) {
 	return true;
 }
 
-// The route that shipped, kept only so it can be compared against the one above in play.
-//
-// Rebuilds the direction as (cos, sin) of `CameraYaw - PI` with `CameraPitch` used as-is, plus a
-// crosshair offset expressed as a flat angle against live FOV. Both conventions were calibrated by
-// aiming at things and watching where the round went, so they are right about what they measured -
-// they are just measuring the orbit angle rather than the camera's forward.
-static bool LegacyAngleRay(Vec3 *dir) {
-	auto camYaw = ReadAddrFloat(VCSAddr::CameraYaw);
-	auto camPitch = ReadAddrFloat(VCSAddr::CameraPitch);
-	if (!camYaw || !camPitch)
-		return false;
-
-	const VCSFireHookSettings &s = FireHookSettings();
-	auto fov = ReadFloat(kVCSCam0 + kVCSCamFOVOffset);
-	const float chairDeg = (s.crosshairX - 0.5f) * 0.9f * (fov ? *fov : 70.0f) * kScreenAspect;
-
-	const float yaw = *camYaw - kPi - chairDeg * kPi / 180.0f + s.aimYawOffsetDeg * kPi / 180.0f;
-	const float pitch = *camPitch;
-	const float cp = cosf(pitch);
-	*dir = Vec3{cp * cosf(yaw), cp * sinf(yaw), sinf(pitch)};
-	return true;
-}
-
 // How far the shot should travel, out of the weapon's own CWeaponInfo.
 //
 // Returns false when any link in the chain fails, and the caller falls back rather than guessing -
@@ -246,14 +223,6 @@ static bool WeaponRange(float *out, int *weaponType) {
 		return false;
 	*out = *range;
 	return true;
-}
-
-// Rotate a shot about Z by some angle, preserving its length. Only used by the debug path.
-static Vec3 Deflected(const Vec3 &source, const Vec3 &target, float degrees) {
-	const float a = degrees * kPi / 180.0f;
-	const float ca = cosf(a), sa = sinf(a);
-	const float dx = target.x - source.x, dy = target.y - source.y, dz = target.z - source.z;
-	return Vec3{source.x + dx * ca - dy * sa, source.y + dx * sa + dy * ca, source.z + dz};
 }
 
 // THE SHOT'S SOURCE IS BORROWED, NOT MOVED - and the muzzle flash is why.
@@ -324,66 +293,58 @@ int Hook_vcs_weapon_raycast() {
 	trace.gameRange = Dist(source, target);
 	StoreVec3(trace.gunSource, source);
 
-	if (s.debugDeflectDegrees != 0.0f) {
-		aimed = Deflected(source, target, s.debugDeflectDegrees);
-		trace.range = trace.gameRange;
-		StoreVec3(trace.origin, source);
-	} else {
-		// How far to fire. The game's own target length is the last resort and not the default,
-		// because it means three different things on three different code paths - see the header.
-		float range = s.fallbackRange;
-		if (s.useWeaponRange) {
-			float w = 0.0f;
-			if (WeaponRange(&w, &trace.weaponType))
-				range = w;
-			else if (trace.gameRange > range)
-				range = trace.gameRange;
-		} else if (trace.gameRange > range) {
+	// How far to fire. The game's own target length is the last resort and not the default,
+	// because it means three different things on three different code paths - see the header.
+	float range = s.fallbackRange;
+	if (s.useWeaponRange) {
+		float w = 0.0f;
+		if (WeaponRange(&w, &trace.weaponType))
+			range = w;
+		else if (trace.gameRange > range)
 			range = trace.gameRange;
-		}
-
-		Vec3 origin = source;
-		Vec3 dir;
-		bool haveRay = false;
-		if (!s.legacyAngleRay) {
-			Vec3 camPos;
-			if (CameraRay(&camPos, &dir, &trace)) {
-				haveRay = true;
-				if (s.useCameraOrigin) {
-					// re3's Find3rdPersonCamTargetVector, exactly: start at the camera and slide
-					// the origin along the ray to the point nearest the muzzle. The ray stays
-					// collinear with the pixel the crosshair covers, which is the whole point -
-					// but it no longer starts behind the player, so it cannot hit geometry between
-					// the camera and the gun.
-					const float t = (source.x - camPos.x) * dir.x
-					              + (source.y - camPos.y) * dir.y
-					              + (source.z - camPos.z) * dir.z;
-					origin = Vec3{camPos.x + dir.x * t,
-					              camPos.y + dir.y * t,
-					              camPos.z + dir.z * t};
-					// The origin moved, so the game's own source has to move with it or the bullet
-					// would travel a different line from the one we solved.
-					//
-					// Borrowed for the duration of the raycast only. Arm the restore BEFORE the
-					// write, so a failed write cannot leave the game holding our origin with nothing
-					// scheduled to take it back.
-					g_restoreAddr = srcPtr;
-					g_restoreSource = source;
-					g_restorePending = true;
-					WriteVec3(srcPtr, origin);
-				}
-			}
-		}
-		if (!haveRay && !LegacyAngleRay(&dir))
-			return 0;
-
-		aimed = Vec3{origin.x + dir.x * range,
-		             origin.y + dir.y * range,
-		             origin.z + dir.z * range};
-		trace.range = range;
-		StoreVec3(trace.origin, origin);
-		StoreVec3(trace.dir, dir);
+	} else if (trace.gameRange > range) {
+		range = trace.gameRange;
 	}
+
+	// The camera ray is the only way the shot is built now. The angle-derived fallback that used
+	// to stand behind it was the pre-CameraRay construction, kept while the two were being
+	// compared; no ray at all is the honest answer to CameraRay failing, and letting the game
+	// resolve the shot its own way is a better one than firing along a guess.
+	Vec3 camPos;
+	Vec3 dir;
+	if (!CameraRay(&camPos, &dir, &trace))
+		return 0;
+
+	Vec3 origin = source;
+	if (s.useCameraOrigin) {
+		// re3's Find3rdPersonCamTargetVector, exactly: start at the camera and slide the origin
+		// along the ray to the point nearest the muzzle. The ray stays collinear with the pixel
+		// the crosshair covers, which is the whole point - but it no longer starts behind the
+		// player, so it cannot hit geometry between the camera and the gun.
+		const float t = (source.x - camPos.x) * dir.x
+		              + (source.y - camPos.y) * dir.y
+		              + (source.z - camPos.z) * dir.z;
+		origin = Vec3{camPos.x + dir.x * t,
+		              camPos.y + dir.y * t,
+		              camPos.z + dir.z * t};
+		// The origin moved, so the game's own source has to move with it or the bullet would
+		// travel a different line from the one we solved.
+		//
+		// Borrowed for the duration of the raycast only. Arm the restore BEFORE the write, so a
+		// failed write cannot leave the game holding our origin with nothing scheduled to take
+		// it back.
+		g_restoreAddr = srcPtr;
+		g_restoreSource = source;
+		g_restorePending = true;
+		WriteVec3(srcPtr, origin);
+	}
+
+	aimed = Vec3{origin.x + dir.x * range,
+	             origin.y + dir.y * range,
+	             origin.z + dir.z * range};
+	trace.range = range;
+	StoreVec3(trace.origin, origin);
+	StoreVec3(trace.dir, dir);
 
 	if (WriteVec3(dstPtr, aimed)) {
 		g_redirected++;

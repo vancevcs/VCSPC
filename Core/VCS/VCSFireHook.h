@@ -109,11 +109,6 @@ struct VCSFireHookSettings {
 	// the camera would reintroduce the desync that got mouse look in free aim disproved.
 	bool enabled = true;
 
-	// Debug: instead of aiming from the camera, rotate the game's own shot by this many degrees.
-	// Non-zero reproduces exactly what the vcsfiretest.py harness did, in-engine, which is the
-	// cheapest way to confirm the hook itself works before trusting the camera maths on top.
-	float debugDeflectDegrees = 0.0f;
-
 	// How close to the player a ray must start to count as the player's shot.
 	//
 	// This wrapper is a pure forwarding shim with NO shooter argument - unlike reVC's, which
@@ -157,11 +152,6 @@ struct VCSFireHookSettings {
 	// reproduces the stored pitch (+0x210 sits at the same height as its target, implying a level
 	// camera while Alpha reads -11.9 degrees). See kVCSCamSourceOffset.
 	bool useCameraOrigin = true;
-
-	// The old route, kept switchable rather than deleted, because it is what shipped and A/B-ing it
-	// in play costs nothing. Rebuilds the direction from CameraYaw/CameraPitch the old way,
-	// including the FOV-scaled crosshair trim, instead of reading the stored basis.
-	bool legacyAngleRay = false;
 
 	// Residual yaw trim, degrees, applied on top of whichever route is selected. Expected to be
 	// zero now that the basis is read rather than reconstructed; kept because "expected" is not

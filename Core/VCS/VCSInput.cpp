@@ -90,12 +90,6 @@ static bool g_analogIsReticle = false;
 static u64 g_reticleFrames = 0;
 static u64 g_reticleNonZero = 0;
 
-// The right analog stick, which only the CLEO plugin path drives. Tracked separately from the
-// left stick because it has its own owner and its own release. Emu thread only.
-static bool g_aimStickHeld = false;
-static float g_aimStickX = 0.0f;
-static float g_aimStickY = 0.0f;
-
 // Right mouse button. See the declaration in the header for why this is named rather than
 // written out at each of its three use sites.
 const InputKeyCode kVCSAimKey = NKCODE_EXT_MOUSEBUTTON_2;
@@ -363,6 +357,14 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Fire", "Light attack / fire", VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,    NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Fire", "Light attack / fire", VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,    kVCSAimKey,                CTRL_RTRIGGER,  "Hold aim (verified)" },
+	// The menu keys again, because the game's own pause menu can be opened while aim is held and
+	// this context has to answer for it. Without these, Enter fell through to PPSSPP's mapper,
+	// which binds it to Select - so it did nothing at all in a menu, while Shift (Cross, the
+	// heavy hit here) went on confirming and made the failure look like Enter specifically being
+	// broken. The cost is the one the OnFoot rows already accept: Enter also throws a heavy hit
+	// and Backspace also fires, neither of which is reachable while a menu is up.
+	{ VCSInputContext::Aiming,    NKCODE_ENTER,              CTRL_CROSS,     "Confirm in menus (also heavy hit)" },
+	{ VCSInputContext::Aiming,    NKCODE_DEL,                CTRL_CIRCLE,    "Back in menus, Backspace (also fires)" },
 	// Same as on foot. Bound here mainly so Tab can't fall through to PPSSPP's fast-forward
 	// mid-fight, which would suddenly run the game at several times speed while aiming.
 	{ VCSInputContext::Aiming,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
@@ -1302,12 +1304,6 @@ void ResetHostKeys() {
 		g_analogY = 0.0f;
 	}
 	g_analogIsReticle = false;
-	if (g_aimStickHeld) {
-		__CtrlSetAnalogXY(CTRL_STICK_RIGHT, 0.0f, 0.0f);
-		g_aimStickHeld = false;
-		g_aimStickX = 0.0f;
-		g_aimStickY = 0.0f;
-	}
 }
 
 bool IsHostKeyDown(InputKeyCode key) {
@@ -1569,13 +1565,10 @@ void ApplyAnalog(VCSInputContext context) {
 		// The model keeps state between frames, so it has to be dropped when aiming stops -
 		// otherwise the next free aim opens by cancelling a glide that ended long ago, and jumps.
 		//
-		// But "the reticle isn't driving" is no longer the same as "nothing is aiming". With the
-		// d-pad as the aim channel the reticle stands down permanently, and resetting here would
-		// wipe the model on every single frame, moments before PadStickTick asks it for a
-		// deflection. Only reset when neither aim channel is running.
-		if (!PadStickActive(context)) {
-			AimModelReset();
-		}
+		// The reticle is the only aim channel there is, so "not driving" and "nothing is aiming"
+		// are the same statement again. They came apart while the d-pad carried a second channel,
+		// which needed the model kept alive here; that channel is gone.
+		AimModelReset();
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 		switch (context) {
 		case VCSInputContext::OnFoot:
@@ -1690,56 +1683,6 @@ void ApplyAnalog(VCSInputContext context) {
 	g_analogY = y;
 }
 
-bool PluginAimActive(VCSInputContext context) {
-	return context == VCSInputContext::Aiming && CameraSettings().aimViaRightStick;
-}
-
-void ApplyAimStick(VCSInputContext context) {
-	if (!PluginAimActive(context)) {
-		// Release exactly once, then leave the stick alone - same discipline as ApplyAnalog.
-		if (g_aimStickHeld) {
-			__CtrlSetAnalogXY(CTRL_STICK_RIGHT, 0.0f, 0.0f);
-			g_aimStickHeld = false;
-			g_aimStickX = 0.0f;
-			g_aimStickY = 0.0f;
-		}
-		return;
-	}
-
-	float dx = 0.0f, dy = 0.0f;
-	TakeMouseDelta(&dx, &dy);
-
-	const VCSCameraSettings &s = CameraSettings();
-	float x = dx * s.aimSensitivity;
-	float y = -dy * s.aimSensitivity * (s.aimInvertY ? -1.0f : 1.0f);
-
-	if (x == 0.0f && y == 0.0f) {
-		if (g_aimStickHeld) {
-			__CtrlSetAnalogXY(CTRL_STICK_RIGHT, 0.0f, 0.0f);
-			g_aimStickHeld = false;
-			g_aimStickX = 0.0f;
-			g_aimStickY = 0.0f;
-		}
-		return;
-	}
-
-	const float length = std::sqrt(x * x + y * y);
-	if (length > 1.0f) {
-		x /= length;
-		y /= length;
-	}
-
-	__CtrlSetAnalogXY(CTRL_STICK_RIGHT, x, y);
-	g_aimStickHeld = true;
-	g_aimStickX = x;
-	g_aimStickY = y;
-}
-
-void GetAppliedAimStick(float *x, float *y) {
-	*x = g_aimStickX;
-	*y = g_aimStickY;
-}
-
 // Sniper and RPG - the manually-aimed, scoped weapons. Weapon camera modes 7 and 8, measured.
 bool ScopedWeaponActive() {
 	const std::optional<u32> mode = ReadAddrU32(VCSAddr::WeaponCamMode);
@@ -1843,29 +1786,6 @@ bool ReticleActive(VCSInputContext context) {
 	if (g_latchTimer > 0) {
 		return false;
 	}
-	// usePadStick DOES suppress this now, and that is the whole point of it.
-	//
-	// It sets CameraInputMode, which moves the aim axis onto the d-pad pair - so PadStickTick is
-	// already aiming, and driving the nub from the mouse as well is redundant. Worse, it is what
-	// stops the player moving: the nub is the movement channel, and while the reticle owns it,
-	// WASD has nowhere to go. Confirmed in play - with the second stick on, the crosshair moved
-	// from the d-pad exactly as intended and WASD did nothing at all.
-	//
-	// Standing down here hands the nub back to ApplyAnalog's ordinary WASD path, giving two
-	// separate channels from one physical stick:
-	//
-	//   aim      d-pad pair, driven by the mouse    (PadStickTick)
-	//   movement nub, driven by WASD                (ApplyAnalog's else branch)
-	//
-	// That only became useful once the movement call stopped being skipped - see MoveGateBranch.
-	// Before that patch the nub had nothing to do either way, which is why suppressing this used
-	// to leave free aim with no driver and was reverted.
-	if (CameraSettings().usePadStick && PadStickAvailable()) {
-		return false;
-	}
-	if (CameraSettings().aimViaRightStick) {
-		return false;
-	}
 	// FreeAimActive above already established the state. Keyed on IsAiming - the LOCK-ON flag,
 	// inverted - and deliberately not on IsFreeAiming, which only ever goes to 1 for the sniper
 	// and the RPG (docs/VCS_ADDRESSES.md calls it SUSPECT for exactly this kind of reuse). The
@@ -1890,10 +1810,6 @@ void GetAppliedAnalog(float *x, float *y) {
 
 void SetForcedButtons(u32 mask) {
 	g_forcedButtons = mask;
-}
-
-u32 GetForcedButtons() {
-	return g_forcedButtons;
 }
 
 VCSInputContext GetCurrentContext() {

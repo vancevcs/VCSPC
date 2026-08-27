@@ -1737,15 +1737,24 @@ void NativeAxis(const AxisInput *axes, size_t count) {
 		return;
 	}
 
-	if (g_screenManager->PassInputToMapper() & (InputMode::Other | InputMode::ImDebuggerToggle)) {
-		// Fork-specific: GTA VCS claims the pad's sticks and triggers, the sibling of the
-		// HandleHostKey call in NativeKey. One axis at a time rather than a filtered batch,
-		// because the claim is per-axis - a pad sends its sticks and its triggers together, and
-		// this scheme takes the stick while leaving a rudder pedal to the mapper.
-		for (size_t i = 0; i < count; i++) {
-			if (!VCS::HandleHostAxis(axes[i])) {
-				g_controlMapper.Axis(&axes[i], 1);
-			}
+	// Fork-specific: GTA VCS claims the pad's sticks and triggers, the sibling of the
+	// HandleHostKey call in NativeKey. One axis at a time rather than a filtered batch, because
+	// the claim is per-axis - a pad sends its sticks and its triggers together, and this scheme
+	// takes the stick while leaving a rudder pedal to the mapper.
+	//
+	// The VCS layer is told about the axis OUTSIDE the mapper gate, and that is the whole point
+	// rather than an oversight. With a screen on top - our own pause menu above all - the gate
+	// closes and every axis event is dropped. Hold the aim trigger, press Start, let the trigger
+	// go while the menu is up, and the release is the event that never arrives: the layer goes on
+	// believing aim is held, the Aiming context latches for the rest of the session, and the
+	// symptom is that Enter stops confirming in the game's own menus, because Aiming has no row
+	// for it. Seeing the input and being allowed to act on it are different questions.
+	const bool toMapper =
+		(g_screenManager->PassInputToMapper() & (InputMode::Other | InputMode::ImDebuggerToggle)) != 0;
+	for (size_t i = 0; i < count; i++) {
+		const bool claimed = VCS::HandleHostAxis(axes[i]);
+		if (toMapper && !claimed) {
+			g_controlMapper.Axis(&axes[i], 1);
 		}
 	}
 

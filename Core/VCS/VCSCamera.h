@@ -158,9 +158,6 @@ struct VCSCameraSettings {
 	// the 0.0005 was compensating for a build that discarded half the mouse movement, so it rose
 	// again once the frame sync landed and the input actually arrived.
 	//
-	// aimRangeBoost is what buys back the ceiling, but only on the d-pad channel. If you turn that
-	// on, this can go back up.
-	//
 	// Only meaningful with aimResponseModel on - the model is what turns a wanted rotation back
 	// into a deflection. With the model off it degrades to a raw deflection scale, which is what
 	// this setting used to be (0.015 stick/count).
@@ -203,38 +200,6 @@ struct VCSCameraSettings {
 	//
 	// On by default. Turn it off to get the old proportional mapping back for comparison.
 	bool aimResponseModel = true;
-
-	// Extra deflection range for the d-pad channel, beyond what a real stick can reach.
-	//
-	// The game's aim rate maxes out at about 0.05 rad per frame, which is a good deal slower than
-	// mouse look, so fast aim movements queue up instead of landing at once. The d-pad fields are
-	// int16 and the accessor at 0x0898bb4c only halves and sign-extends them - it does not clamp -
-	// so writing past 255 produces an axis past 127 and, through the square, a much higher rate.
-	// (CLAUDE.md used to say the axis was clamped to +/-127. It is not; that is just the largest
-	// value a real d-pad can produce.)
-	//
-	// This is what makes FAST aim movements linear, and the model needs it to do its job. Simulated
-	// against the game's own formula, for a fixed total mouse travel spread across frames:
-	//
-	//     counts per frame       1x        2x        3x        4x     (target 13.75 deg)
-	//     1                  13.75     13.75     13.75     13.75
-	//     5                  13.75     13.75     13.75     13.75
-	//     10                  7.98     13.75     13.75     13.75
-	//     20                  2.65     10.61     13.75     13.75
-	//     30                  1.40      5.60     12.59     13.75
-	//
-	// At 30fps, 20 counts per frame is an ordinary aiming movement, not a flick - so 1.0 leaves
-	// the common case still collapsing. 3.0 covers everything up to a deliberate flick, which is
-	// why it is the default despite being past what the hardware could produce.
-	//
-	// Set it to 1.0 for hardware-faithful range. Does nothing on the nub channel, where sceCtrl
-	// clamps to full deflection before the game ever sees it - it needs usePadStick.
-	//
-	// Defaults to 1.0 because usePadStick is not used in practice, which makes this inert. Left in
-	// place rather than removed: the finding that the axis is not clamped is real and worth
-	// keeping, and this is the only lever on the game's aim rate ceiling if that channel is ever
-	// revisited.
-	float aimRangeBoost = 1.0f;
 
 	// How much of the game's smoothing momentum to cancel when the mouse stops, 0..1.
 	//
@@ -325,20 +290,6 @@ struct VCSCameraSettings {
 	// defaults the other way round on purpose (flight-sim style look), so the two deliberately do
 	// not share a setting - inheriting the camera's inversion here felt broken in testing.
 	bool aimInvertY = false;
-
-	// Send the aim delta to the PSP's RIGHT analog stick instead of the left one, for the CLEO
-	// plugin. Requires memstick/PSP/PLUGINS/cleo - off by default because without the plugin
-	// nothing reads that stick and aiming would silently do nothing.
-	//
-	// The right stick is a channel VCS itself never reads. On real hardware it doesn't exist;
-	// PPSSPP carries it in the spare bytes of SceCtrlData (see CtrlData in sceCtrl.cpp, "the PSP
-	// has only one stick, but has space for more info"). That's what makes it a safe side channel
-	// - writing to it cannot disturb the game, only a plugin listening for it.
-	//
-	// Turning this on also disables the left-stick reticle, so the two can never fight over the
-	// same aim, and stops the camera being driven while aim is held, since the plugin owns the
-	// view then.
-	bool aimViaRightStick = false;
 
 	// Drop straight into free aim when the aim key goes down, instead of starting in lock-on and
 	// requiring the player to break out. On by default: free aim is the point on a PC, and
@@ -645,34 +596,6 @@ struct VCSCameraSettings {
 	// How far along the crosshair ray to park it. Far enough that the offset between the camera and
 	// the muzzle stops mattering for the resulting bearing; near enough to stay inside the world.
 	float pedAimGunDistance = 40.0f;
-
-	// --- The pad's synthesised second stick ---
-	//
-	// VCS wants two analog sticks and the PSP has one, so the game builds the second from the
-	// d-pad: camera X is (DPadRight - DPadLeft) / 2, Y is (DPadDown - DPadUp) / 2, in the pad
-	// functions at 0x0898bb4c / 0x0898bb8c. Those fields are int16 but the real d-pad only puts
-	// 0 or 255 in them, so a player can only ever produce -127, 0 or +127. Writing intermediate
-	// values makes it a true analog axis - which is the game's OWN camera and aim input, so it
-	// drives both, through the code path the game already has.
-	//
-	// Off by default: it is a different mechanism from the direct CameraYaw writes, and the two
-	// should be compared before either becomes the default.
-	bool usePadStick = false;
-
-	// Stick deflection per unit of raw mouse movement, for the LEGACY path only - it is unused
-	// while aimResponseModel is on, which is the default.
-	//
-	// The history here is worth keeping, because it is a clean example of a correct measurement
-	// producing a wrong conclusion. This was lowered to 0.008 to leave headroom, which made the
-	// path do nothing at all; it was then raised to 0.05 on the theory that "free aim reads these
-	// fields as a button, not as an analog axis" - the evidence being that arrow keys put a clean
-	// 255 in them and moved the aim, while writes of 26-50 into the very same fields did not.
-	//
-	// There is no button threshold. The fields are a real analog axis and always were; the game
-	// squares it (see aimResponseModel), so an axis of 13-25 out of 127 produces about 1/400th of
-	// the rotation 255 does - invisible, and indistinguishable from being ignored. Saturating was
-	// treating the symptom. The model removes the reason to.
-	float padStickSensitivity = 0.05f;
 };
 
 VCSCameraSettings &CameraSettings();
@@ -704,8 +627,8 @@ struct VCSAimAxis {
 	}
 };
 
-// Converts a wanted rotation, in radians, into a stick deflection in -1..1 (or wider, if
-// aimRangeBoost allows and the channel can carry it). Emu thread only - it reads the game's
+// Converts a wanted rotation, in radians, into a stick deflection in -1..1. Emu thread only - it
+// reads the game's
 // timestep. Call exactly once per axis per frame, including with want == 0: a frame with no mouse
 // movement is what tells the model to cancel the glide.
 float AimAxisStep(VCSAimAxis *axis, float want, VCSAddr incAddr);
@@ -746,9 +669,9 @@ bool AimModelReady();
 // The deflection last solved, for re-asserting on a tick that isn't a game frame.
 void AimLastDeflection(float *x, float *y);
 
-// The largest deflection the live channel can actually carry to the game - 1.0 on the nub, since
-// sceCtrl clamps it, and aimRangeBoost on the d-pad channel. The model must solve against this
-// rather than against the setting, or its mirror records rotation that never happened.
+// The largest deflection the live channel can actually carry to the game - 1.0, since the nub is
+// the only channel and sceCtrl clamps it there. The model must solve against this rather than
+// against the setting, or its mirror records rotation that never happened.
 float AimChannelLimit();
 
 // Which side the open-loop yaw kick is parked on (-1, 0, +1) and how far the mouse has travelled
@@ -802,34 +725,10 @@ void TakeMouseDelta(float *dx, float *dy);
 // both need this frame's movement and only the first of them can drain it.
 void PeekMouseDelta(float *dx, float *dy);
 
-// Whether all four pad d-pad field addresses are known, so the second stick can be driven.
-bool PadStickAvailable();
-
-// Whether the mouse is currently driving that stick. When true, the camera is not written
-// directly - the game moves its own camera in response to the axis we feed it.
-bool PadStickActive(VCSInputContext context);
-
-// Writes the synthesised second stick for this frame. Emu thread only, once per frame, and must
-// run after ApplyAnalog/ApplyAimStick and before CameraTick - see the ordering note in Tick.
-void PadStickTick(VCSInputContext context);
-
 // Writes the gun direction directly during free aim. Emu thread only, once per frame, and must
 // run before CameraTick so it gets the mouse delta first. Every frame is not optional - the game
 // recomputes this value and an unasserted write is undone almost immediately.
 void AimTick(VCSInputContext context);
-
-// The stick position written on the most recent tick, for the debugger window.
-void GetPadStick(float *x, float *y);
-
-// Cumulative evidence that this path is alive, because the live x/y above cannot provide it:
-// the axis is a rate control, so it self-centres the moment the mouse stops and reads zero in
-// every screenshot. frames counts ticks where the path ran at all, nonZero counts ticks that
-// actually pushed a deflection, and peak is the largest magnitude ever written.
-//
-// nonZero staying at 0 while frames climbs means the path is running but no mouse movement is
-// reaching it - the usual cause being the cursor sitting over the ImGui debugger window, which
-// takes the mouse before NativeMouseDelta can hand it here.
-void PadStickStats(u64 *frames, u64 *nonZero, float *peak, bool *modeFlagSet);
 
 // Walks the player during free aim by writing the ped's velocity. Emu thread only, once per frame,
 // and it must run every frame - the game rewrites the field. Experimental; see moveInFreeAim.

@@ -536,7 +536,18 @@ void VCSBindingRow::Draw(UIContext &dc) {
 
 VCSMenuScreen::VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode mode)
 	: UIBaseDialogScreen(gamePath), bootPending_(bootPending), mode_(mode),
-	  art_(new VCSMenuArt()) {}
+	  art_(new VCSMenuArt()) {
+	// Drop everything the input layer is holding, because from here until this screen closes it
+	// stops being told about releases: NativeKey only reaches HandleHostKey while input is being
+	// passed to the mapper, and a screen on top closes that gate. Anything still down when the
+	// menu opened would still be down when it closed - which for the aim control means the
+	// Aiming context latching, and for a movement key means walking into a wall on resume.
+	//
+	// The axis path solves the same problem the other way, by being told regardless of the gate;
+	// it can afford to, because an axis carries its whole state in every event. A key does not -
+	// its release is a single event, and a dropped one is gone.
+	VCS::ResetHostKeys();
+}
 
 void VCSMenuScreen::deviceLost() {
 	// Before Vulkan goes. Release() clears the map as well as the textures, so the destructor

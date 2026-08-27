@@ -137,10 +137,6 @@ bool VaultInProgress() {
 	return g_phase != VaultPhase::Idle;
 }
 
-bool VaultArmed() {
-	return g_armed;
-}
-
 void VaultReset() {
 	g_phase = VaultPhase::Idle;
 	g_phaseTicks = 0;

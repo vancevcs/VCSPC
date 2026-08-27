@@ -355,34 +355,11 @@ void ApplyAnalog(VCSInputContext context);
 // In practice this means free aim in VCS is the sniper rifle and the RPG, and those are the only
 // places a mouse can really aim. Emu thread only - it reads the decoded state.
 //
-// Always false when aimViaRightStick is on: that mode aims through the other stick instead, and
-// letting both run would give two things fighting over one aim.
 // Aim held and the game is not steering it - i.e. free aim, as opposed to lock-on. The state,
 // independent of which mechanism is currently driving it.
 bool FreeAimActive(VCSInputContext context);
 
 bool ReticleActive(VCSInputContext context);
-
-// Whether the mouse is currently feeding the PSP's RIGHT analog stick for the CLEO plugin.
-//
-// True whenever the aim key is held and aimViaRightStick is set - deliberately NOT gated on
-// IsFreeAiming, unlike the left-stick reticle. Two reasons:
-//
-//   - Nothing in VCS reads the right stick, so feeding it can never make the player strafe or
-//     misbehave. It is inert unless the plugin is listening. The caution that applies to the
-//     left stick simply doesn't apply here.
-//   - The plugin may be what PUTS the game into free aim, so gating on the game already being in
-//     free aim could never let it start. Chicken and egg.
-bool PluginAimActive(VCSInputContext context);
-
-// Feeds the right analog stick from the mouse for the plugin. Emu thread only, once per frame,
-// and MUST run after ApplyAnalog and before CameraTick - see the ordering note in VCSGame::Tick.
-// Only touches the stick while it is actually driving it, and releases it exactly once, the same
-// ownership discipline ApplyAnalog follows for the left stick.
-void ApplyAimStick(VCSInputContext context);
-
-// The right-stick position applied on the most recent tick, for the debugger window.
-void GetAppliedAimStick(float *x, float *y);
 
 // Whether the stick applied on the most recent tick came from the mouse (the reticle) rather
 // than from WASD. Purely for the debugger, which otherwise can't tell the two apart.
@@ -423,7 +400,6 @@ u32 ApplyMapping(VCSInputContext context);
 // source of wrong bindings - aim sat on L trigger doing nothing for a long time. Holding each
 // button directly and watching the game answers it in seconds. Mask of CTRL_* bits; 0 clears.
 void SetForcedButtons(u32 mask);
-u32 GetForcedButtons();
 
 // The context resolved on the most recent tick, for the debugger window.
 VCSInputContext GetCurrentContext();

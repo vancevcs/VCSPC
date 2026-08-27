@@ -391,19 +391,6 @@ void ImVCSWindow::DrawInputTester() {
 	ImGui::SameLine();
 	ImGui::TextColored(rNonZero > 0 ? kGoodColor : kBadColor, "%llu", (unsigned long long)rNonZero);
 
-	// The plugin channel. Nothing in VCS reads this stick, so movement here proves only that we
-	// are sending - whether anything receives it is the CLEO plugin's business.
-	float rx = 0.0f, ry = 0.0f;
-	VCS::GetAppliedAimStick(&rx, &ry);
-	ImGui::Text("Right stick (plugin aim):");
-	ImGui::SameLine();
-	if (VCS::PluginAimActive(context)) {
-		ImGui::TextColored((rx != 0.0f || ry != 0.0f) ? kGoodColor : kUnsetColor,
-			"x=%+.2f  y=%+.2f", rx, ry);
-	} else {
-		ImGui::TextColored(kUnsetColor, "inactive");
-	}
-
 	// Independent of any mapping: proves real host input is reaching this layer at all. If this
 	// stays 0 while you hold a key, the problem is the NativeKey hook, not the mapping table.
 	const size_t held = VCS::HeldHostKeyCount();
@@ -523,10 +510,6 @@ void ImVCSWindow::DrawCamera() {
 		}
 
 		ImGui::Checkbox("Enable fire-site free aim", &f.enabled);
-		ImGui::SliderFloat("Debug deflect (deg)", &f.debugDeflectDegrees, -45.0f, 45.0f, "%.1f");
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("Non-zero ignores the camera and just rotates the game's own shot, reproducing the vcsfiretest.py experiment in-engine. Use it FIRST: if bullets do not visibly swing, the hook is not firing. Set to 0 for real camera-derived aiming.");
-		}
 		ImGui::SliderFloat("Crosshair X", &f.crosshairX, 0.40f, 0.60f, "%.4f");
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Where the crosshair sits ACROSS the screen, 0.5 being centre. re3's m_f3rdPersonCHairMultX, and it means the same thing: the ray is unprojected through that pixel. Expected to want 0.5 now that the camera's own Front is used - the 0.51 the old build wanted was correcting a 3.3 degree error in the direction, not describing the crosshair.");
@@ -542,10 +525,6 @@ void ImVCSWindow::DrawCamera() {
 		ImGui::Checkbox("Camera-origin ray (removes parallax)", &f.useCameraOrigin);
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("Fire from the camera and slide the origin forward to the muzzle, as re3 does, instead of firing from the gun along a borrowed direction. Off means accepting parallax that changes with the camera's angle to the player AND with range. The camera position is CCam+0x20, measured rather than ranked.");
-		}
-		ImGui::Checkbox("Legacy angle ray (the route that shipped)", &f.legacyAngleRay);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("A/B against the old behaviour without a rebuild: rebuilds the direction from CameraYaw/CameraPitch with the FOV-scaled crosshair trim. Kept because it is what the previous build did, not because it is expected to be better.");
 		}
 		ImGui::Checkbox("Weapon range from CWeaponInfo", &f.useWeaponRange);
 		if (ImGui::IsItemHovered()) {
@@ -949,14 +928,9 @@ void ImVCSWindow::DrawCamera() {
 				"This is the only thing here that writes game CODE rather than data, and a wrong "
 				"address crashes rather than misbehaves. It refuses to patch unless the "
 				"instruction reads exactly as expected.\n\n"
-				"IMPORTANT: on its own this makes you walk wherever you sweep the crosshair, "
-				"because movement reads the same analog axis the aim uses. Turn on 'Drive the "
-				"game's second stick' as well - that moves the aim onto the d-pad and frees the "
-				"nub for WASD.");
-		}
-		if (s.moveInFreeAim && !s.usePadStick) {
-			ImGui::TextColored(kBadColor,
-				"  Needs 'Drive the game's second stick' too, or you walk where you aim.");
+				"IMPORTANT: the crosshair and the player read the same analog axis, so the "
+				"movement has to come from somewhere else - it is the latched run the entry "
+				"sequence establishes before free aim engages. See MoveGateBranch.");
 		}
 		ImGui::Checkbox("Plain mapping for sniper / RPG", &s.aimScopedLinear);
 		if (ImGui::IsItemHovered()) {
@@ -1023,29 +997,7 @@ void ImVCSWindow::DrawCamera() {
 				"0 restores the old behaviour, which stutters. 2 is about right. Raise it if "
 				"movement still feels interrupted; lower it for a snappier stop.");
 		}
-		ImGui::SliderFloat("Aim range boost", &s.aimRangeBoost, 1.0f, 8.0f, "%.1fx");
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip(
-				"Needed for FAST aim movements to stay linear. The game's aim rate tops out near "
-				"0.05 rad per frame, well under mouse look, so without this anything quicker than "
-				"a slow drag gets flattened - which still reads as a thumbstick even with the "
-				"model on.\n\n"
-				"The d-pad fields are int16 and the accessor only halves and sign-extends them - "
-				"it never clamps - so writing past what a real d-pad could produce gives a larger "
-				"axis and, through the square, a proportionally higher rate.\n\n"
-				"3x covers everything up to a deliberate flick. 1x is hardware-faithful range.\n\n"
-				"Only affects the second-stick (d-pad) channel below. The nub is clamped to full "
-				"deflection by sceCtrl before the game sees it.");
-		}
-		if (s.aimRangeBoost > 1.0f && !s.usePadStick) {
-			// Worth shouting about: this slider is the obvious thing to reach for when aiming
-			// feels rate-limited, and on the nub it does nothing at all - so someone can spend a
-			// while dragging it to the stop and concluding the model doesn't work.
-			ImGui::TextColored(kBadColor,
-				"  Doing nothing - the nub is clamped by sceCtrl. Needs 'Drive the game's "
-				"second stick' below.");
-		}
-		if (s.aimSensitivity > 0.0015f && !s.usePadStick) {
+		if (s.aimSensitivity > 0.0015f) {
 			ImGui::TextColored(kUnsetColor,
 				"  On the nub, much above 0.001 saturates on ordinary movement - watch the carry.");
 		}
@@ -1092,67 +1044,6 @@ void ImVCSWindow::DrawCamera() {
 		ImGui::SetTooltip(
 			"Separate from the camera's Invert Y on purpose. The camera defaults to inverted, "
 			"the reticle does not - pushing the mouse away raises the crosshair.");
-	}
-
-	ImGui::Checkbox("Aim via right stick (CLEO plugin)", &s.aimViaRightStick);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"Sends the aim delta to the PSP's right analog stick instead of the left, for the "
-			"CLEO plugin in memstick/PSP/PLUGINS/cleo. Nothing in VCS itself reads that stick, "
-			"so with no plugin installed this makes aiming do nothing at all. Also disables the "
-			"left-stick reticle and stops the camera being driven while aim is held.");
-	}
-	if (s.aimViaRightStick) {
-		ImGui::SameLine();
-		ImGui::TextColored(kGoodColor, "(plugin mode)");
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	ImGui::TextWrapped(
-		"Second stick: VCS wants two analog sticks and the PSP has one, so it builds the second "
-		"from the d-pad - camera X is (DPadRight - DPadLeft) / 2. Those fields are int16 but a "
-		"real d-pad only puts 0 or 255 in them, so a player gets three positions. Writing values "
-		"in between makes it a true analog axis, and it is the game's OWN camera and aim input, "
-		"so it should drive both. Both this and the nub feed the same accessor and get the same "
-		"response, so the aim model above applies to whichever one is live - CameraInputMode "
-		"decides that, and turning this on is what sets it.");
-	if (!VCS::PadStickAvailable()) {
-		ImGui::TextColored(kBadColor, "Pad d-pad addresses unset - cannot drive the second stick.");
-	} else {
-		ImGui::Checkbox("Drive the game's second stick", &s.usePadStick);
-		if (!s.aimResponseModel) {
-			ImGui::SliderFloat("Stick sensitivity", &s.padStickSensitivity, 0.002f, 0.10f, "%.3f stick/count");
-		}
-		float px = 0.0f, py = 0.0f;
-		VCS::GetPadStick(&px, &py);
-		ImGui::Text("Written:");
-		ImGui::SameLine();
-		ImGui::TextColored((px != 0.0f || py != 0.0f) ? kGoodColor : kUnsetColor,
-			"x=%+.2f  y=%+.2f", px, py);
-		ImGui::SameLine();
-		ImGui::TextDisabled("(live - reads 0 whenever the mouse is still)");
-
-		// The numbers that survive long enough to appear in a screenshot.
-		u64 frames = 0, nonZero = 0;
-		float peak = 0.0f;
-		bool modeSet = false;
-		VCS::PadStickStats(&frames, &nonZero, &peak, &modeSet);
-		ImGui::Text("Mode flag in game:");
-		ImGui::SameLine();
-		ImGui::TextColored(modeSet ? kGoodColor : kBadColor, modeSet ? "set" : "NOT set");
-		ImGui::Text("Ticks driving: %llu   with movement: ", (unsigned long long)frames);
-		ImGui::SameLine();
-		ImGui::TextColored(nonZero > 0 ? kGoodColor : kBadColor, "%llu", (unsigned long long)nonZero);
-		ImGui::SameLine();
-		ImGui::Text("  peak %.2f", peak);
-		if (frames > 0 && nonZero == 0) {
-			ImGui::TextColored(kBadColor,
-				"No mouse movement is reaching this. Move the cursor OVER THE GAME - the "
-				"debugger window takes the mouse before we ever see it.");
-		}
 	}
 
 	if (s.aimResponseModel) {

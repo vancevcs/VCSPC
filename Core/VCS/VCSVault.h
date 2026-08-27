@@ -212,9 +212,6 @@ void VaultTick(VCSInputContext context);
 // move him too.
 bool VaultInProgress();
 
-// Whether a ledge is currently detected and the jump key would vault rather than jump.
-bool VaultArmed();
-
 // Everything the debugger needs to show why a vault did or didn't happen. All of it is the
 // last-computed value, so it stays readable while standing still in front of a wall.
 struct VCSVaultDebug {

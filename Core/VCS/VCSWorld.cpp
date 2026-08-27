@@ -686,10 +686,6 @@ bool RequestNativeClimb(u32 ped, const VCSClimbForce *force) {
 	return true;
 }
 
-bool NativeClimbPending() {
-	return g_climbPending;
-}
-
 bool NativeClimbForced() {
 	return g_climbForced;
 }
@@ -699,11 +695,6 @@ bool NativeClimbAnswered(bool *found) {
 		*found = g_climbFound;
 	}
 	return g_climbAnswered;
-}
-
-void NativeClimbStats(u64 *requests, bool *lastFound) {
-	if (requests) *requests = g_climbRequests;
-	if (lastFound) *lastFound = g_climbFound;
 }
 
 void WorldQueryTick() {

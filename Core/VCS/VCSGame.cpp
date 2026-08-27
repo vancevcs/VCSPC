@@ -196,27 +196,22 @@ void Tick() {
 	// lag rather than as nothing happening.
 	ApplyPadLook(context);
 
-	// These three MUST stay in this order. All of them want this frame's mouse delta and exactly
-	// one of them gets it, decided by context and settings:
+	// These MUST stay in this order. Both want this frame's mouse delta and exactly one of them
+	// gets it, decided by context and settings:
 	//
-	//   ApplyAnalog   takes it when the LEFT stick is the reticle (free aim, stock behaviour)
-	//   ApplyAimStick takes it when the RIGHT stick feeds the CLEO plugin (aimViaRightStick)
-	//   CameraTick    takes whatever neither of them claimed, and turns it into a rotation
+	//   ApplyAnalog   takes it when the LEFT stick is the reticle (free aim)
+	//   CameraTick    takes whatever it did not claim, and turns it into a rotation
 	//
-	// The first two are mutually exclusive, so the delta is never spent twice. Reordering these
-	// lines would silently break aiming - the camera would consume the movement and the crosshair
-	// would never move.
-	//   PadStickTick  takes it when the mouse drives the game's own synthesised second stick
+	// Reordering these lines would silently break aiming - the camera would consume the movement
+	// and the crosshair would never move.
 	//
-	// Opens the aim model's frame. Both ApplyAnalog and PadStickTick will ask it what deflection
-	// to write and it must only step once, so this has to come before either of them.
+	// Opens the aim model's frame. ApplyAnalog asks it what deflection to write and it must only
+	// step once, so this has to come first.
 	AimModelBeginFrame();
 
 	ApplyAnalog(context);
-	ApplyAimStick(context);
-	PadStickTick(context);
 	// Before CameraTick, so free aim gets the delta ahead of the camera - same one-consumer rule
-	// as the two above.
+	// as the line above.
 	AimTick(context);
 
 	// Mouse look last, so it sees the context we just resolved. This writes memory rather than

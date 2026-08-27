@@ -155,15 +155,10 @@ bool RequestNativeClimb(u32 ped, const VCSClimbForce *force);
 // anyway. Always false when the game accepted on its own.
 bool NativeClimbForced();
 
-// Whether that request is still outstanding.
-bool NativeClimbPending();
-
 // Whether it has been answered, and whether the game found anything to climb. An answer of "not
 // found" is a real answer: it means the game's own ledge search declined, and the caller should do
 // whatever it does instead.
 bool NativeClimbAnswered(bool *found);
-
-void NativeClimbStats(u64 *requests, bool *lastFound);
 
 // Whether a question is still in the air - prepared, sent, or running. False the moment there is
 // nothing outstanding, INCLUDING when a request was abandoned unanswered. Callers must key their

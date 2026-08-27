@@ -1360,7 +1360,14 @@ further than free aim needs.
 
 ### VCS has a second analog stick, synthesised from the d-pad
 
-This is the important one, and it supersedes both the reticle work and the plugin route above.
+**Status: the code is gone; the findings are why this section stays.** `usePadStick`,
+`PadStickTick` and the rest were removed once free aim turned out to be a button - the mechanism
+worked and was never needed, and it sat behind a switch nobody turned on. What is worth keeping is
+everything below: the two pad functions, the field offsets, and the fact that VCS wants a second
+stick at all. Rebuild it from here if a reason ever appears; do not reach for it first.
+
+It was written as the one that superseded both the reticle work and the plugin route. That was
+wrong in the same way both of those were - see "Read the game's own Controls screen first".
 
 **VCS internally expects two analog sticks.** The PSP has one, so the game builds the second out of
 the d-pad. Two pad functions do it, and they disassemble cleanly:
@@ -1467,6 +1474,11 @@ functions outright in recompiled code. Its `config/vcs_ulus10160.toml` also conf
 `0x08804000`, which matches this build exactly.
 
 ### The CLEO plugin route — aiming through the right stick
+
+**Status: the code is gone.** `aimViaRightStick` and `ApplyAimStick` fed the PSP's right stick for
+a plugin that was never installed here, so the path could not run at all; nothing in VCS itself
+reads that stick. The account below is kept because it explains how another port solved this, and
+that is a different kind of fact from a switch in our own menu.
 
 Another PPSSPP-based VCS port (`Enginevcs.exe`, the "GTA Legacy" build) solves free aim a
 completely different way, and the approach is worth understanding because it's the one that can
@@ -1883,6 +1895,21 @@ asks whether **either** device is enabled, because a player on a pad has every r
 Mouse control off and would otherwise have found the right stick silently dead. Nothing leaks
 through: each device gates its own contribution at the entry point, so with both off nothing fills
 the accumulator in the first place.
+
+**Being told about input and being allowed to act on it are different questions.** Both entry
+points sit behind `PassInputToMapper()`, which closes whenever a screen is on top - so while our
+own pause menu is up, the layer is told nothing. Hold the aim trigger, press Start, release it in
+the menu, and the release is the event that never arrives: the layer goes on believing aim is
+held and the Aiming context latches for the rest of the session. It surfaced as "Enter stopped
+confirming in the game's menus", because Aiming had no row for Enter and it fell through to
+PPSSPP's mapper, which binds it to Select - while Shift went on working, since Cross is the heavy
+hit there. A control that half-works is how a latched context announces itself.
+
+The two paths need different answers, and the reason is in the shape of the data. `HandleHostAxis`
+is now called regardless of the gate, which it can afford because an axis carries its whole state
+in every event - a late one simply corrects the record. A key cannot: its release is a single
+event and a dropped one is gone forever, so `VCSMenuScreen`'s constructor calls `ResetHostKeys()`
+instead and nothing survives across the menu at all.
 
 **Two thresholds on the triggers, not one.** A trigger resting against a single line - which is
 where a finger holds one - crosses it on noise alone, and the button underneath is Fire. Press at
