@@ -1003,6 +1003,12 @@ bool HandleMouseDelta(float dx, float dy) {
 	return true;
 }
 
+void AddLookDelta(float dx, float dy) {
+	std::lock_guard<std::mutex> guard(g_deltaMutex);
+	g_pendingDx += dx;
+	g_pendingDy += dy;
+}
+
 bool PadStickAvailable() {
 	// CameraInputMode is required, not optional: with it unset the d-pad fields are never read,
 	// so the whole mechanism is inert and offering it would just be a switch that does nothing.
@@ -1210,7 +1216,18 @@ void CameraTick(VCSInputContext context) {
 		TakeMouseDelta(&dx, &dy);
 	}
 
-	if (!g_settings.enabled || !ContextDrivesCamera(context)) {
+	// "Is any device driving the camera", not "is the mouse enabled".
+	//
+	// This used to read g_settings.enabled alone, which was the same question while the mouse was
+	// the only thing that could look around. Now the pad's right stick fills the same accumulator,
+	// and a player on a pad has every reason to turn Mouse control off - it is presented as a
+	// mouse setting and its help talks about mouse look - which would have left the right stick
+	// silently dead.
+	//
+	// It cannot let a delta through that nobody asked for: each device gates its own contribution
+	// at the entry point (HandleMouseDelta on the mouse's flag, ApplyPadLook on the pad's), so
+	// with both off nothing fills the accumulator and there is nothing here to apply.
+	if ((!g_settings.enabled && !PadSettings().enabled) || !ContextDrivesCamera(context)) {
 		g_holdFrames = 0;
 		g_lastContext = context;
 		return;

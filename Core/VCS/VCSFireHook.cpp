@@ -303,10 +303,16 @@ int Hook_vcs_weapon_raycast() {
 		return 0;
 
 	// Guard, in two independent halves, because getting this wrong redirects other people's
-	// bullets through the player's camera. The aim key says the player intends to aim; the
-	// distance says this particular ray is the player's. Neither alone is enough - NPCs shoot
-	// through this same wrapper, and they do it while the player is aiming too.
-	if (!IsHostKeyDown(kVCSAimKey))
+	// bullets through the player's camera. The first half says the player is aiming in a mode
+	// this fork steers; the distance says this particular ray is the player's. Neither alone is
+	// enough - NPCs shoot through this same wrapper, and they do it while the player is aiming too.
+	//
+	// It asks CameraDrivenAimHeld rather than whether the aim control is down, and the difference
+	// only appeared with the pad. This redirects the shot along the CAMERA ray, which is right
+	// when the camera is the aim and wrong under lock-on: there the game has picked a target the
+	// camera need not be pointing at, and redirecting would send the bullet past it. The mouse
+	// always free aims, so for the mouse the two are the same question and this path is unchanged.
+	if (!CameraDrivenAimHeld())
 		return 0;
 
 	Vec3 player;

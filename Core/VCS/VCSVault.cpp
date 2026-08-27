@@ -673,7 +673,7 @@ void VaultTick(VCSInputContext context) {
 
 	// The trigger. Jump when there is nothing to climb, vault when there is - so nothing is taken
 	// away from the player, and there is no new key to learn.
-	const bool jumpDown = IsHostKeyDown(kVCSJumpKey);
+	const bool jumpDown = JumpHeld();
 	if (!jumpDown) {
 		g_triggerLatched = false;
 	} else if (!g_triggerLatched) {

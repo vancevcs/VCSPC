@@ -39,6 +39,11 @@
 
 namespace VCS {
 
+// Defined in VCSInput.h, which owns the listing. Forward-declared so that every file touching a
+// setting does not also pull in the input layer - a scoped enum has a fixed underlying type, so
+// a declaration is all a signature needs.
+enum class VCSListDevice;
+
 enum class OptionType {
 	Bool,
 	Float,
@@ -50,9 +55,17 @@ enum class OptionType {
 // rows below is the order on screen.
 enum class OptionPage {
 	Mouse,
+	Controller,
 	Aiming,
 	Audio,
 	Graphics,
+
+	// Not a settings page - nothing about the game changes here. It holds the one row that says
+	// which device the controls listing describes, and it is in this table at all because that
+	// is what buys a row that draws, adjusts and persists without a second kind of row existing.
+	// Nothing builds a page from it: VCSMenuScreen asks for the row by name, see
+	// ListDeviceOption.
+	Bindings,
 };
 
 struct Option {
@@ -83,6 +96,22 @@ struct Option {
 	// Some settings need something to happen when they change, not just a new value - changing
 	// the internal resolution has to tell the GPU to resize. Null for everything else.
 	void (*onChange)();
+
+	// A row that is only live while some other setting is on, greyed out and inert when it is
+	// not. Null for the ones that always apply.
+	//
+	// Master volume is why this exists, and it earned it: PPSSPP's sound has a master switch
+	// above the volume, so a muted emulator leaves a volume row that moves, reads back the new
+	// value, and changes nothing you can hear. A row that lies about having done something is
+	// worse than one that is visibly unavailable. PPSSPP's own settings screen greys the same
+	// row against the same flag.
+	bool *enabledBy;
+
+	// How the value reads, for the one case a label or a format string cannot say it. Resolution
+	// is that case: "2x" is the setting and "(960x544)" is what it produces, and the second half
+	// has to be computed rather than written down, because Auto's depends on the window. Null
+	// everywhere else, and the rules below apply instead.
+	std::string (*valueText)(const Option &opt);
 
 	// Float only, and deliberately the same ranges the debugger window uses - two UIs onto one
 	// variable disagreeing about its range is a bug waiting to be reported as "the slider does
@@ -155,5 +184,14 @@ void SetInt(const Option &opt, int value);
 
 // What the right-hand column shows: "ON", "OFF", "63", or a formatted value.
 std::string ValueText(const Option &opt);
+
+// Which device the controls listing describes, and the row that changes it.
+//
+// The row is fetched rather than built into a page, because it is the one option that belongs on
+// a page made of something else - it sits above the four situations on the bindings page. Legal
+// to hold on to: Options() is a function-local static built once, so a pointer into it outlives
+// any screen.
+const Option *ListDeviceOption();
+VCSListDevice ListDevice();
 
 }  // namespace VCS

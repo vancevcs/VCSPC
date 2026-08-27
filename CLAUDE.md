@@ -232,6 +232,34 @@ Two more details that will bite if they are "simplified":
   It is safe to call for anything in `struct Config`; only the blocks that override
   `CanResetToDefault()` (display layout, touch controls, gestures) assert.
 
+### The controls card is two tables in one shape
+
+`CONTROLS - BINDINGS` is a read-only reference card with a keyboard column and a controller one,
+and each is generated from the table that actually drives that device: `kVCSKeyMappings` for one,
+`kVCSPadMappings` for the other. Neither can drift from what pressing the thing does, which is the
+only property here worth protecting. The switch is a row on the bindings page; left and right also
+flip it from inside a card, so the two can be compared without walking back up to it. The heading
+follows the switch, which means `title_keyboard.png` and `title_controller.png` both have to exist.
+
+It was **one** table read twice for a while, and why that stopped working is worth recording. When
+a pad still went through the PSP's own layout, every keyboard row already knew both halves - the
+key it binds and the PSP button that key produces - so the pad's card was the same rows with the
+other half shown, and it could not drift by construction. The moment the pad got a scheme of its
+own that stopped being true: the two devices now agree about the face buttons and about almost
+nothing else. Two tables is the honest answer, and generating each card from its own table is what
+keeps the guarantee that made the single table attractive.
+
+Two rules hold it together, and both are the kind of thing a tidy-up undoes:
+
+- **A row with nothing against it on this device is not printed empty, it is not printed.** A row
+  is only created once there is a control to put in it, so an action with no binding on this
+  device leaves no blank line behind rather than a line that reads as a missing binding.
+- **`kVCSListingExtras` carries two control columns**, not one. It is the handful of rows neither
+  table can hold - the sticks, mouse look, the glances, the forks - and they are the ones that can
+  drift, in both directions. An empty column there is what keeps WASD off the pad's card and the
+  left stick off the keyboard's, and it is also how one row says "MOUSE" on one and "LEFT STICK"
+  on the other without being written down twice.
+
 ### The page titles are art, and they have to be
 
 `Tools/vcsmenuart.py` bakes the script-font headings into `assets/vcs/`, and they are baked
@@ -1784,6 +1812,93 @@ The general lesson: a button that "does nothing" in the tester may need a second
 specific situation, before it does anything. Test modifiers in combination and near things.
 
 Use the button tester (Input tab) to fill in the `?` entries rather than guessing.
+
+### The gamepad is remapped, not passed through
+
+A pad used to go straight past this layer. `HandleHostKey` answered only for a keyboard or a
+mouse, so a pad reached the PSP's own layout through PPSSPP's mapper - and that, rather than any
+individual binding being wrong, is what made playing with a pad feel like playing a handheld.
+`kVCSPadMappings` is a second context-aware table beside the keyboard's, and `HandleHostAxis` is
+the axis half, called from `NativeAxis` the way `HandleHostKey` is called from `NativeKey`.
+
+The shape of it: triggers aim and fire on foot and are the pedals in a car, the right stick looks,
+the bumpers glance in a vehicle and yaw in the air and zoom a scope, the d-pad carries weapons
+across and view controls down, Start opens *this* menu while View opens the game's.
+
+Five things are worth knowing before changing any of it.
+
+**The face buttons did not move, and that is not laziness.** Xbox A/B/X/Y sit in the same four
+places as Cross/Circle/Square/Triangle, and VCS already puts sprint, fire, jump and enter-vehicle
+on them - and the whole melee set too. On foot and in a fight the modern layout and the handheld's
+agree by position. Everything else differs.
+
+**Every control is claimed in every context, mapped or not.** PPSSPP's XInput defaults put
+`VIRTKEY_PAUSE` on the left trigger, `VIRTKEY_FASTFORWARD` on the right one and
+`VIRTKEY_SPEED_TOGGLE` on the right stick click. An unclaimed control here does not fall through
+harmlessly - it opens a menu or triples the game speed in the middle of a firefight. The `psp = 0`
+rows are what prevent that, and they are the same inverse-Escape-trap discipline the keyboard
+table already documents.
+
+**The pad needs a held-set of its own.** An arrow key and a d-pad direction are the *same*
+`InputKeyCode`, so a single set would have the debug spawner's arrow-key rows firing whenever
+somebody pressed a direction on a pad. The two devices genuinely cannot share that state.
+
+**A question asked of one device is a bug waiting for the other.** Vaulting asked
+`IsHostKeyDown(kVCSJumpKey)` and the fire hook asked `IsHostKeyDown(kVCSAimKey)`, and both were
+right for as long as a keyboard was the only thing that could answer. A pad turned them into
+silent failures: it jumped but never climbed, and a scoped shot followed the ped's aim while the
+camera moved - the "looks correct and misses" failure this file already warns about, arriving by a
+new road. Both are named questions now, `JumpHeld` and `CameraDrivenAimHeld`, and the rule is: if
+more than one device can express an intent, name the intent and ask *that*, never a key.
+
+The second one is worth reading rather than copying, because "either device" would have been the
+wrong fix. The hook redirects the shot along the CAMERA ray, which is correct when the camera is
+the aim and actively wrong under lock-on, where the game has chosen a target the camera need not
+be pointing at. So the question is not whether aim is held but whether this fork is steering it -
+identical for the mouse, which always free aims, and different for the pad, which does not.
+
+**The pad aims by lock-on, always - and that is `LockOnModeActive`, not a mechanism of its own.**
+Holding a trigger on a pad is a request for the game's assist rather than for a crosshair; a stick
+is bad at placing one, which is why every console shooter since has offered help. So the
+auto-free-aim pulse that fires for the mouse deliberately does not fire for the pad. Expressing it
+as the *existing* lock-on mode means everything already written against that toggle applies
+without being taught that a pad exists, and there is exactly one place to look the day the two
+need to differ. A scoped weapon is the exception, and it is what the phrase means rather than a
+hole in it: the sniper and the RPG have no lock-on to be pinned to, so asserting one would leave
+the right stick dead with a crosshair on screen and nothing able to move it. Same shape as the
+`MeleeEquipped` rule in `FreeAimActive` - an automatic, weapon-driven exception standing beside
+the manual toggle.
+
+**The right stick becomes mouse movement at the edge.** `ApplyPadLook` pushes a delta into the
+same accumulator `HandleMouseDelta` fills, so the sensitivity, the FOV scale, the free-aim solver
+and the vehicle pitch rules are all the code that was measured against a mouse rather than a
+stick-shaped copy of it. It has to run *before* `ApplyAnalog` in `VCSGame::Tick` - that is where
+free aim drains the accumulator, and filling it afterwards makes the stick a frame late in every
+frame, which reads as lag rather than as nothing happening.
+
+Sharing that accumulator cost one gate its meaning, and the fix is worth knowing about.
+`CameraTick` used to return early on `g_settings.enabled` - the *mouse* flag - which was the same
+question as "is anything driving the camera" while the mouse was the only thing that could. It now
+asks whether **either** device is enabled, because a player on a pad has every reason to turn
+Mouse control off and would otherwise have found the right stick silently dead. Nothing leaks
+through: each device gates its own contribution at the entry point, so with both off nothing fills
+the accumulator in the first place.
+
+**Two thresholds on the triggers, not one.** A trigger resting against a single line - which is
+where a finger holds one - crosses it on noise alone, and the button underneath is Fire. Press at
+0.45, release at 0.35.
+
+`VCSPadMapping` carries one column the keyboard's does not: `scopedOnly`. The zoom bumpers are the
+game's Square and Cross, which with anything but a scope in hand are Block and Heavy Hit, so
+ungated they would have a bumper throwing punches on every press. It is the only row-level gate on
+either table, and it is why the pad table is its own struct rather than a second `VCSKeyMapping`.
+
+**If a stick ever feels inverted, check the axis sign first.** XInput reports `JOYSTICK_AXIS_Y`
+positive when the stick is pushed away from the player, and the PSP's nub is also positive away
+from the camera, so `HandleHostAxis` negates nothing. That is specific to XInput - PPSSPP's
+*generic* pad defaults invert that axis, because an SDL joystick reports the opposite sign - so a
+non-XInput pad is the case to suspect. The look stick is negated exactly once, in `ApplyPadLook`,
+because a mouse's positive dy is down the screen and everything downstream expects a mouse.
 
 ### Hand-to-hand combat is four buttons and five states
 

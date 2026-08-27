@@ -38,6 +38,7 @@ TITLES = {
     "controls": "Controls",
     "settings": "Settings",
     "keyboard": "Keyboard",
+    "controller": "Controller",
     "display": "Display",
     "graphics": "Graphics",
     "audio": "Audio",

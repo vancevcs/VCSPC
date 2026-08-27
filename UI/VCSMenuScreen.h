@@ -51,14 +51,15 @@ enum class VCSMenuPage {
 	Settings,
 	Controls,
 	Mouse,
+	Controller,
 	Aiming,
 	Audio,
 	Graphics,
 
-	// The read-only controls listing: a menu of the four situations, then a page of bindings
-	// for each. Nothing on those pages can be edited - they are a reference card, which is what
-	// the game's own Controls screen is once you take the rebinding out.
-	Keyboard,
+	// The read-only controls listing: the device switch and a menu of the four situations, then
+	// a page of bindings for each. Nothing on those pages can be edited - they are a reference
+	// card, which is what the game's own Controls screen is once you take the rebinding out.
+	Bindings,
 	KeysOnFoot,
 	KeysVehicle,
 	KeysAircraft,
@@ -172,6 +173,14 @@ private:
 	void AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page);
 	// True for the four pages that list bindings rather than offering anything to change.
 	static bool IsKeyListPage(VCSMenuPage page);
+	// Flip the listing between the two devices. Rebuilds the page, because on a listing page the
+	// rows themselves change; on the switch's own page nothing does, which is why the row there
+	// edits the option directly instead of coming through here.
+	void ToggleListDevice();
+	// Whether the controller caveat belongs on this page. True on the pad's card and on the page
+	// that switched to it, false everywhere else - it is a statement about what the listing
+	// describes, so it has no business on a settings page.
+	bool ShowingControllerNote() const;
 	static VCS::VCSKeyList ToKeyList(VCSMenuPage page);
 	// The frame the listing sits in. Sized to the rows actually on the page, so BACK lands just
 	// below it whether the page has eight rows or eighteen.

@@ -1738,7 +1738,15 @@ void NativeAxis(const AxisInput *axes, size_t count) {
 	}
 
 	if (g_screenManager->PassInputToMapper() & (InputMode::Other | InputMode::ImDebuggerToggle)) {
-		g_controlMapper.Axis(axes, count);
+		// Fork-specific: GTA VCS claims the pad's sticks and triggers, the sibling of the
+		// HandleHostKey call in NativeKey. One axis at a time rather than a filtered batch,
+		// because the claim is per-axis - a pad sends its sticks and its triggers together, and
+		// this scheme takes the stick while leaving a rudder pedal to the mapper.
+		for (size_t i = 0; i < count; i++) {
+			if (!VCS::HandleHostAxis(axes[i])) {
+				g_controlMapper.Axis(&axes[i], 1);
+			}
+		}
 	}
 
 	QueuedEvent ev{};

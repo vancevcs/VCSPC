@@ -776,6 +776,19 @@ int AimStillFrames();
 // disabled, CameraYaw isn't known, or the player is in a menu.
 bool HandleMouseDelta(float dx, float dy);
 
+// Adds look movement from something that is not a mouse - today the pad's right stick, via
+// ApplyPadLook.
+//
+// Deliberately NOT HandleMouseDelta with a different caller. That one is a claim: it answers
+// whether mouse look wants the movement, and it is gated on the mouse being enabled and on the
+// context wanting it. A stick has already been claimed by the time it gets here, its caller has
+// already decided the context is one that looks around, and it must keep working for a player
+// who has mouse control switched off. What is shared is everything downstream - one accumulator,
+// one sensitivity, one aim solver - which is the point.
+//
+// Input thread or emu thread; the accumulator is mutex-guarded either way.
+void AddLookDelta(float dx, float dy);
+
 // Drains the mouse movement accumulated since the last call, and returns it. Emu thread only.
 //
 // Exists so the aiming path in VCSInput can take the delta for the reticle instead of leaving it

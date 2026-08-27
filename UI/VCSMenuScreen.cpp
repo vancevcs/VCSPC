@@ -113,6 +113,16 @@ static const uint32_t kListRuleColor = 0x40FFFFFF;       // hairline under the c
 // entry in the table.
 static const FontStyle kListHeaderFont(FontFamily::SansSerif, 20, FontStyleFlags::Default);
 
+// The one thing a controller player is owed in writing, and the reason it is a fixed line rather
+// than a row's help text: it is true of the whole card, not of whichever row has focus.
+//
+// It is also not a hedge. The pad bindings listed are the game's own and work exactly as they do
+// on a PSP; what a pad cannot reach is everything this fork built on top of them - mouse look,
+// free aim, the lock-on toggle, the vault. "Less polished" is the difference between the game's
+// scheme and the scheme this port was made for.
+static const char *const kControllerNote =
+	"Controls on a controller are less polished than on mouse and keyboard.";
+
 // Centre of the screen, in the same dp space as a view's bounds. Deliberately not
 // bounds_.centerX(): a row's own bounds are only the screen's width if the layout gave it every
 // pixel, and when that assumption quietly failed the whole menu sat off-centre. The screen's
@@ -289,7 +299,7 @@ void VCSMenuItem::Adjust(int direction) {
 }
 
 bool VCSMenuItem::Key(const KeyInput &input) {
-	if (option_ && HasFocus() && (input.flags & KeyInputFlags::DOWN)) {
+	if (option_ && IsEnabled() && HasFocus() && (input.flags & KeyInputFlags::DOWN)) {
 		switch (input.keyCode) {
 		case NKCODE_DPAD_LEFT:
 			Adjust(-1);
@@ -335,8 +345,10 @@ bool VCSMenuItem::Touch(const TouchInput &input) {
 		UI::SetFocusedView(this, UI::FocusFlags::CAUSE_OTHER);
 	}
 
-	// Dragging along the block strip sets the value directly.
-	if (option_ && ShowsBlocks(*option_)) {
+	// Dragging along the block strip sets the value directly. Checked for enablement here as
+	// well as in the press handling below, because this branch comes first and would otherwise
+	// let the pointer drag a value the keyboard cannot reach.
+	if (option_ && IsEnabled() && ShowsBlocks(*option_)) {
 		const Bounds strip = BlockStrip(bounds_).Expand(0.0f, 14.0f);
 		if ((input.flags & TouchInputFlags::DOWN) && strip.Contains(input.x, input.y)) {
 			draggingValue_ = true;
@@ -393,7 +405,7 @@ bool VCSMenuItem::Touch(const TouchInput &input) {
 void VCSMenuItem::ClickInternal() {
 	// Clicking a toggle flips it. Block-rendered values are edited through the strip and the
 	// arrow keys, so a click elsewhere on one deliberately does nothing.
-	if (option_ && option_->type == VCS::OptionType::Bool) {
+	if (option_ && IsEnabled() && option_->type == VCS::OptionType::Bool) {
 		*option_->boolValue = !*option_->boolValue;
 	}
 	UI::ClickableItem::ClickInternal();
@@ -559,12 +571,13 @@ VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) {
 	case VCSMenuPage::Audio: return VCSMenuPage::Settings;
 	case VCSMenuPage::Graphics: return VCSMenuPage::Settings;
 	case VCSMenuPage::Mouse: return VCSMenuPage::Controls;
+	case VCSMenuPage::Controller: return VCSMenuPage::Controls;
 	case VCSMenuPage::Aiming: return VCSMenuPage::Controls;
-	case VCSMenuPage::Keyboard: return VCSMenuPage::Controls;
-	case VCSMenuPage::KeysOnFoot: return VCSMenuPage::Keyboard;
-	case VCSMenuPage::KeysVehicle: return VCSMenuPage::Keyboard;
-	case VCSMenuPage::KeysAircraft: return VCSMenuPage::Keyboard;
-	case VCSMenuPage::KeysMelee: return VCSMenuPage::Keyboard;
+	case VCSMenuPage::Bindings: return VCSMenuPage::Controls;
+	case VCSMenuPage::KeysOnFoot: return VCSMenuPage::Bindings;
+	case VCSMenuPage::KeysVehicle: return VCSMenuPage::Bindings;
+	case VCSMenuPage::KeysAircraft: return VCSMenuPage::Bindings;
+	case VCSMenuPage::KeysMelee: return VCSMenuPage::Bindings;
 	default: return VCSMenuPage::Root;
 	}
 }
@@ -572,6 +585,7 @@ VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) {
 bool VCSMenuScreen::IsOptionPage(VCSMenuPage page) {
 	switch (page) {
 	case VCSMenuPage::Mouse:
+	case VCSMenuPage::Controller:
 	case VCSMenuPage::Aiming:
 	case VCSMenuPage::Audio:
 	case VCSMenuPage::Graphics:
@@ -604,6 +618,7 @@ VCS::VCSKeyList VCSMenuScreen::ToKeyList(VCSMenuPage page) {
 
 VCS::OptionPage VCSMenuScreen::ToOptionPage(VCSMenuPage page) {
 	switch (page) {
+	case VCSMenuPage::Controller: return VCS::OptionPage::Controller;
 	case VCSMenuPage::Aiming: return VCS::OptionPage::Aiming;
 	case VCSMenuPage::Audio: return VCS::OptionPage::Audio;
 	case VCSMenuPage::Graphics: return VCS::OptionPage::Graphics;
@@ -617,10 +632,17 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 	case VCSMenuPage::Settings: return "settings";
 	case VCSMenuPage::Controls: return "controls";
 	case VCSMenuPage::Mouse: return "mouse";
+	// Shares its art with the bindings page on its controller setting, which is right: both
+	// pages are about the pad, and both headings say the same word.
+	case VCSMenuPage::Controller: return "controller";
 	case VCSMenuPage::Aiming: return "aiming";
 	case VCSMenuPage::Audio: return "audio";
 	case VCSMenuPage::Graphics: return "graphics";
-	case VCSMenuPage::Keyboard: return "keyboard";
+	// The one heading that is not fixed: the page is the same page either way, and what it is a
+	// listing OF is the whole of what the switch changes. Both files are generated by
+	// Tools/vcsmenuart.py, so both have to be in its TITLES.
+	case VCSMenuPage::Bindings:
+		return VCS::ListDevice() == VCS::VCSListDevice::Controller ? "controller" : "keyboard";
 	case VCSMenuPage::KeysOnFoot: return "onfoot";
 	case VCSMenuPage::KeysVehicle: return "invehicle";
 	case VCSMenuPage::KeysAircraft: return "aircraft";
@@ -635,7 +657,35 @@ void VCSMenuScreen::GoToPage(VCSMenuPage page) {
 	RecreateViews();
 }
 
+void VCSMenuScreen::ToggleListDevice() {
+	const VCS::Option *device = VCS::ListDeviceOption();
+	if (!device) {
+		return;
+	}
+	// Through SetInt rather than by assigning the variable, so this and the row on the bindings
+	// page cannot disagree about clamping or about what a change means.
+	VCS::SetInt(*device, *device->intValue == 0 ? 1 : 0);
+	RecreateViews();
+}
+
+bool VCSMenuScreen::ShowingControllerNote() const {
+	if (VCS::ListDevice() != VCS::VCSListDevice::Controller) {
+		return false;
+	}
+	return page_ == VCSMenuPage::Bindings || IsKeyListPage(page_);
+}
+
 bool VCSMenuScreen::key(const KeyInput &key) {
+	// Left and right flip the card between the two devices, so they can be compared without
+	// walking back up to the switch that owns them - which is the difference between a switch
+	// and a detour. Only on a listing page: everywhere else those keys belong to the focused
+	// row, and taking them would leave every slider on the settings pages unadjustable.
+	if ((key.flags & KeyInputFlags::DOWN) && IsKeyListPage(page_)
+		&& (key.keyCode == NKCODE_DPAD_LEFT || key.keyCode == NKCODE_DPAD_RIGHT)) {
+		ToggleListDevice();
+		return true;
+	}
+
 	// Back on a sub-page means "up one level", not "close the menu" - the page table's parent
 	// link, which is how reVC expresses this too.
 	const bool back = key.keyCode == NKCODE_ESCAPE || key.keyCode == NKCODE_BACK;
@@ -683,8 +733,15 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 		if (option.page != optionPage) {
 			continue;
 		}
-		rows_.push_back(parent->Add(new VCSMenuItem(&option,
-			new LinearLayoutParams(FILL_PARENT, kRowHeight))));
+		VCSMenuItem *row = parent->Add(new VCSMenuItem(&option,
+			new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+		if (option.enabledBy) {
+			// A pointer rather than a value, so the row follows the switch the moment it is
+			// flipped - the two are on the same page and the greying has to happen under the
+			// cursor, not on the next visit.
+			row->SetEnabledPtr(option.enabledBy);
+		}
+		rows_.push_back(row);
 	}
 
 	// A blank row before the two actions, the way the original separates them from the settings.
@@ -701,7 +758,8 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 void VCSMenuScreen::AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page) {
 	using namespace UI;
 
-	const std::vector<VCS::VCSListingRow> listing = VCS::KeyListing(ToKeyList(page));
+	const std::vector<VCS::VCSListingRow> listing =
+		VCS::KeyListing(ToKeyList(page), VCS::ListDevice());
 	for (const VCS::VCSListingRow &row : listing) {
 		parent->Add(new VCSBindingRow(row.name, row.keys,
 			new LinearLayoutParams(FILL_PARENT, kListRowHeight)));
@@ -772,6 +830,7 @@ void VCSMenuScreen::CreateViews() {
 		AddBackRow(list);
 	} else if (page_ == VCSMenuPage::Controls) {
 		AddPageRow(list, "MOUSE", VCSMenuPage::Mouse);
+		AddPageRow(list, "CONTROLLER", VCSMenuPage::Controller);
 		AddPageRow(list, "AIMING", VCSMenuPage::Aiming);
 
 		// Read-only, and that is the whole design: the bindings are context-aware, so one key
@@ -779,10 +838,21 @@ void VCSMenuScreen::CreateViews() {
 		// express that would be lying about what it changed. PPSSPP's own mapper is deliberately
 		// not offered here either, for the same reason - it binds keys to PSP buttons, one step
 		// below the layer that decides what a PSP button means.
-		AddPageRow(list, "KEYBOARD", VCSMenuPage::Keyboard);
+		//
+		// Named for what it lists rather than for a device, because it lists two.
+		AddPageRow(list, "BINDINGS", VCSMenuPage::Bindings);
 
 		AddBackRow(list);
-	} else if (page_ == VCSMenuPage::Keyboard) {
+	} else if (page_ == VCSMenuPage::Bindings) {
+		// The switch above the four situations it applies to. An ordinary settings row on a page
+		// that is otherwise all page rows, which is the honest shape: it changes a value, and
+		// they go somewhere. Nothing on this page has to be rebuilt when it moves - the heading
+		// and the caveat are both drawn from the live value every frame - so it edits the option
+		// directly, the way every other settings row does.
+		if (const VCS::Option *device = VCS::ListDeviceOption()) {
+			rows_.push_back(list->Add(new VCSMenuItem(device,
+				new LinearLayoutParams(FILL_PARENT, kRowHeight))));
+		}
 		AddPageRow(list, "ON FOOT", VCSMenuPage::KeysOnFoot);
 		AddPageRow(list, "IN VEHICLE", VCSMenuPage::KeysVehicle);
 		AddPageRow(list, "AIRCRAFT", VCSMenuPage::KeysAircraft);
@@ -842,7 +912,12 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 		const float headerY = panel.y + kListHeaderHeight * 0.5f;
 		dc.DrawText("ACTION", g_display.dp_xres * kListNameFrac, headerY, kListHeaderColor,
 			ALIGN_VCENTER | ALIGN_LEFT);
-		dc.DrawText("BINDING", g_display.dp_xres * kListKeyFrac, headerY, kListHeaderColor,
+		// The column names the device rather than saying "BINDING", which makes it the one place
+		// a card states what it is a card of. The buttons alone do not say it - CIRCLE and LMB
+		// are obvious, D-PAD LEFT and Q less so - and a player who flipped the switch by
+		// accident has nothing else to read.
+		dc.DrawText(VCS::ListDevice() == VCS::VCSListDevice::Controller ? "CONTROLLER" : "KEYBOARD",
+			g_display.dp_xres * kListKeyFrac, headerY, kListHeaderColor,
 			ALIGN_VCENTER | ALIGN_LEFT);
 
 		// A hairline rather than a full rule: enough to separate the caption from the data
@@ -867,14 +942,23 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 
 	dc.SetFontStyle(dc.GetTheme().uiFontSmall);
 
-	if (focused && !focused->help().empty()) {
-		dc.DrawText(focused->help(), bar.x + kTitleLeft, bar.centerY(),
+	// The caveat outranks the focused row's own help, and deliberately: it is true of everything
+	// on the page rather than of the row under the cursor, so a player is owed it whether or not
+	// they happen to be sitting on the switch that turned it on.
+	std::string_view note;
+	if (ShowingControllerNote()) {
+		note = kControllerNote;
+	} else if (focused) {
+		note = focused->help();
+	}
+	if (!note.empty()) {
+		dc.DrawText(note, bar.x + kTitleLeft, bar.centerY(),
 			colorAlpha(kHintColor, 0.85f), ALIGN_VCENTER | ALIGN_LEFT);
 	}
 
 	const char *hint = "ENTER / LMB - SELECT     ESC - BACK";
 	if (IsKeyListPage(page_)) {
-		hint = "ESC - BACK";
+		hint = "LEFT / RIGHT - DEVICE     ESC - BACK";
 	} else if (focused && focused->option()) {
 		hint = focused->option()->type == VCS::OptionType::Bool
 			? "ENTER / LMB - TOGGLE     ESC - BACK"

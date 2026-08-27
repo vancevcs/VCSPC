@@ -190,6 +190,12 @@ void Tick() {
 
 	ApplyMapping(context);
 
+	// The pad's right stick becomes look movement here, and it has to be BEFORE the three
+	// consumers below rather than beside them: it FILLS the accumulator they drain. Run after
+	// them and the stick would be one frame behind in every context, which on a camera reads as
+	// lag rather than as nothing happening.
+	ApplyPadLook(context);
+
 	// These three MUST stay in this order. All of them want this frame's mouse delta and exactly
 	// one of them gets it, decided by context and settings:
 	//

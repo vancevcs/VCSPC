@@ -85,6 +85,13 @@ extern const InputKeyCode kVCSAimKey;
 // gets a jump and a climb at once.
 extern const InputKeyCode kVCSJumpKey;
 
+// The pad's aim and jump controls, named for exactly the reason the two above are: more than one
+// place has to agree about them, and a pad row is now the other half of every agreement the
+// keyboard rows already had. The jump one is the concrete lesson - vaulting asked whether the
+// JUMP KEY was down, which a pad has no way to answer, so a pad could jump and never climb.
+extern const InputKeyCode kVCSPadAimButton;
+extern const InputKeyCode kVCSPadJumpButton;
+
 // Which page of the read-only controls listing a row appears on, if any.
 //
 // Deliberately not the same thing as VCSInputContext, and the Aiming context is why: its rows
@@ -102,6 +109,26 @@ enum class VCSKeyList {
 	Melee = 1 << 3,
 };
 ENUM_CLASS_BITOPS(VCSKeyList);
+
+// Which device the controls listing describes.
+//
+// One table read two ways, rather than two tables. Every row below already knows both halves -
+// the host key it is bound to and the PSP button that key produces - so the controller card is
+// the same rows with the other column shown, and it cannot drift from the keyboard one for the
+// same reason the keyboard one cannot drift from the bindings.
+//
+// Two tables, one card. The keyboard's rows come from kVCSKeyMappings and the pad's from
+// kVCSPadMappings, and each card is built from the table that actually drives that device - so
+// neither can drift from what pressing the thing does, which is the only property here worth
+// protecting.
+//
+// The pad card is still the shorter of the two, and for a narrower reason than it used to be:
+// the sticks carry four actions the keyboard needs rows for, and a handful of this layer's
+// keyboard-only inventions - the lock-on toggle, the spawner - have no button at all.
+enum class VCSListDevice {
+	Keyboard,
+	Controller,
+};
 
 // One row of the mapping table: in this context, this host key produces these PSP button bits.
 // psp is a mask of the CTRL_* defines from Core/HLE/sceCtrl.h, so a single key can produce a
@@ -129,20 +156,134 @@ struct VCSKeyMapping {
 extern const VCSKeyMapping kVCSKeyMappings[];
 extern const size_t kVCSKeyMappingCount;
 
+// --- The gamepad scheme -----------------------------------------------------------------------
+//
+// A second scheme beside the keyboard one, laid out the way a modern console game is rather than
+// the way the PSP was: the triggers aim and fire, the right stick looks, the bumpers glance and
+// zoom. It is not a re-labelling of the PSP's buttons - it moves them, which is the whole point,
+// and that is why a pad has to come THROUGH this layer instead of past it as it used to.
+//
+// The face buttons are the one part that did not move. Xbox A/B/X/Y sit where the PSP's
+// Cross/Circle/Square/Triangle do, and VCS already puts the right actions on them, so on foot and
+// in a fight the modern layout and the handheld's agree by position. Everything else differs.
+//
+// Everything the pad sends must be CLAIMED, mapped or not - the inverse of the Escape trap the
+// keyboard table documents. PPSSPP's XInput defaults put the pause menu on the left trigger and
+// fast-forward on the right one, so a trigger this table failed to claim would not fall through
+// harmlessly, it would open a menu mid-firefight.
+
+// Tunables for the pad. Separate from VCSCameraSettings because these describe a stick, not a
+// mouse: a stick reports a POSITION that has to be integrated into movement, where a mouse
+// reports the movement itself. One sensitivity number cannot mean both.
+struct VCSPadSettings {
+	// Off hands the pad back to PPSSPP's own mapper, which is the PSP's layout button for button.
+	// Worth keeping reachable: this scheme is an opinion, and the handheld's is the other one.
+	bool enabled = true;
+
+	// Right stick look, in virtual mouse counts per tick at full deflection.
+	//
+	// Expressed in MOUSE counts deliberately. The stick's delta is pushed into the same
+	// accumulator the mouse fills, so everything downstream - the sensitivity, the FOV scale, the
+	// free-aim solver, the vehicle pitch rules - is the code that was measured against a mouse
+	// rather than a second copy of it that would drift from the first.
+	float lookSpeed = 14.0f;
+
+	bool invertLookY = false;
+
+	// Below this the stick reads as centred. Sticks rest off-centre, and a resting stick that
+	// still turns the camera is the most obvious way for this to feel broken.
+	float deadzone = 0.18f;
+
+	// How far a trigger travels before it counts as a press, and the lower value it has to fall
+	// back past to count as a release. Two numbers rather than one because a trigger held near a
+	// single line chatters the button it is bound to, and this trigger is the fire button.
+	float triggerPress = 0.45f;
+	float triggerRelease = 0.35f;
+};
+
+VCSPadSettings &PadSettings();
+
+// One row of the gamepad table.
+//
+// Deliberately not a VCSKeyMapping. A pad row needs a gate the keyboard's does not - see
+// scopedOnly - and the two are matched on different things: a keyboard row on a key, a pad row on
+// a button that may be a trigger this layer synthesised. Sharing the struct to save a declaration
+// would mean one table carrying a column the other must never use.
+struct VCSPadMapping {
+	VCSInputContext context;
+
+	// The button as PPSSPP delivers it. The two analog triggers arrive as AXES and are turned
+	// into NKCODE_BUTTON_L2 / NKCODE_BUTTON_R2 by HandleHostAxis, so this table can stay one flat
+	// list of buttons rather than growing an axis half.
+	InputKeyCode button;
+
+	u32 psp;
+
+	// Only sent while a scoped weapon is up. This exists for the zoom bumpers: zoom is the game's
+	// Square and Cross, which with anything else in hand are Block and Heavy Hit, so an ungated
+	// row would have a bumper throwing punches every time it was pressed unscoped.
+	bool scopedOnly;
+
+	// Engineering note, for the debugger's mapping table - same job as VCSKeyMapping's.
+	const char *description;
+
+	// Player-facing name and page for the controls card, on the same terms as the keyboard's: no
+	// listName means the row is real but not shown, which is what a claimed-and-inert row wants.
+	const char *listName;
+	VCSKeyList list;
+};
+
+extern const VCSPadMapping kVCSPadMappings[];
+extern const size_t kVCSPadMappingCount;
+
+// The gamepad entry point for axes, called from NativeAxis alongside HandleHostKey's call in
+// NativeKey. Records the two sticks and turns the analog triggers into button presses.
+//
+// Returns true when this layer has taken the axis, in which case PPSSPP's own mapper must NOT
+// also see it - it drives the same PSP stick we do, and both writing it means neither wins.
+// False for every other game, for a pad with the scheme switched off, and for an axis no part of
+// this scheme uses.
+bool HandleHostAxis(const AxisInput &axis);
+
+// Turns the right stick into look movement for this tick, by pushing a delta into the same
+// accumulator the mouse fills.
+//
+// Emu thread, once per frame, and it MUST run before ApplyAnalog: in free aim that accumulator is
+// drained to place the crosshair, so a delta arriving after the drain is a frame late every
+// frame, which reads as a stick that lags rather than one that does nothing.
+void ApplyPadLook(VCSInputContext context);
+
+// Whether a gamepad button is currently held.
+//
+// The pad's held set is separate from the keyboard's, and has to be: an arrow key and a d-pad
+// direction are the SAME InputKeyCode, so one set would have the spawner's arrow-key rows firing
+// whenever a player pressed a direction on a pad.
+bool IsPadButtonDown(InputKeyCode button);
+
+// A pad button as the controls card prints it - "A", "LB", "LT", "D-PAD UP", "VIEW". Xbox names,
+// because that is the pad this scheme is laid out for and PlayStation shapes here would describe
+// neither the pad in the player's hands nor the console the game came from.
+std::string PadButtonName(InputKeyCode button);
+
 // One line of the controls listing: an action, and the keys that perform it in table order.
 struct VCSListingRow {
 	const char *name;
 	std::vector<std::string> keys;
 };
 
-// The listing for one page. Built by grouping kVCSKeyMappings on listName, after the handful of
-// rows that cannot be in that table at all - see kVCSListingExtras.
-std::vector<VCSListingRow> KeyListing(VCSKeyList list);
+// The listing for one page and one device. Built by grouping kVCSKeyMappings on listName, after
+// the handful of rows that cannot be in that table at all - see kVCSListingExtras.
+//
+// A row that has nothing to show on the requested device is left out entirely rather than
+// printed empty: on a pad that is every row this layer invented, and on the keyboard it is the
+// nub. An action with no binding is not a line in a controls card.
+std::vector<VCSListingRow> KeyListing(VCSKeyList list, VCSListDevice device);
 
 // A key as the listing prints it: short and upper case, the way the game's own Controls screen
 // sets them. PPSSPP's GetKeyName is the fallback; the overrides exist because "MB1" and
 // "MWheelD" are not what a player calls those.
 std::string KeyDisplayName(InputKeyCode key);
+
 
 // Decides which context the player is in, from the decoded state. Returns Unknown whenever the
 // state doesn't give us enough to be sure, which is the safe answer - callers treat Unknown as
@@ -287,11 +428,43 @@ u32 GetForcedButtons();
 // The context resolved on the most recent tick, for the debugger window.
 VCSInputContext GetCurrentContext();
 
-// Whether the lock-on toggle is on. While it is, aiming stays in the game's lock-on: no Free Aim
-// press, the mouse does not take the analog stick, and it does not turn the camera either - so
-// WASD moves, the game frames the target, and the mouse does nothing until aim is released.
-// Exists for melee, whose lock-on does not register in IsAiming.
+// Whether aiming is pinned to the game's own lock-on. While it is, there is no Free Aim press,
+// the mouse does not take the analog stick, and it does not turn the camera either - so movement
+// still moves, the game frames the target, and looking around does nothing until aim is released.
+//
+// Two sources, meaning the same thing downstream:
+//
+//   - the keyboard's manual toggle, which exists for melee, whose lock-on does not register in
+//     IsAiming;
+//   - the pad, which aims this way ALWAYS - holding its trigger is a request for the game's
+//     assist rather than for a crosshair, which is what a stick is good at and what every
+//     console shooter does.
+//
+// A scoped weapon is the exception on the pad's side; see the definition for why that is the
+// phrase's meaning rather than a hole in it.
 bool LockOnModeActive();
+
+// Whether the player is asking to jump, on EITHER device.
+//
+// Vaulting is why this is a function rather than a key: a vault happens INSTEAD of a jump when
+// there is a ledge in front of the player, so whatever presses the PSP's jump button and whatever
+// arms the climb have to be the same question. Asking it of one device is how a pad ended up able
+// to jump but never to climb.
+//
+// Context is the caller's business, not this function's - Space is the handbrake in a car and X is
+// too, and it is VaultTick's on-foot check that keeps a climb out of both.
+bool JumpHeld();
+
+// Whether the player is aiming in a mode THIS LAYER steers, as opposed to one the game steers.
+//
+// The fire hook's guard, and the distinction matters more than "is aim held": the hook redirects
+// the shot along the camera ray, which is correct when the camera is the aim and actively wrong
+// under lock-on, where the game has chosen a target the camera need not be pointing at.
+//
+// For the mouse the two questions have always had the same answer, because the mouse always free
+// aims - so nothing about that path changes. The pad is where they come apart: it aims by lock-on
+// except with a scope, and a scope is precisely the case where the camera IS the aim.
+bool CameraDrivenAimHeld();
 
 // Whether any of WASD is held. The free-aim brake keys on this: while a movement key is down the
 // latched run is left to carry the player, and releasing them all is what applies the brake.

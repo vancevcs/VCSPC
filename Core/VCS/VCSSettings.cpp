@@ -26,6 +26,7 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
+#include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSSettings.h"
 
 namespace VCS {
@@ -61,17 +62,25 @@ static Path SettingsPath() {
 	return GetSysDirectory(DIRECTORY_SYSTEM) / "vcs.ini";
 }
 
+// Which device the controls listing is showing. An index rather than the enum, because that is
+// what a Choice option edits and what the ini stores; ListDevice() is the one place the two
+// meanings are joined.
+static int g_listDevice = 0;
+static const char *const kListDeviceLabels[] = { "Keyboard", "Controller" };
+
 const std::vector<Option> &Options() {
 	// Function-local static, not a file-scope table, because the rows point into
 	// CameraSettings() and FireHookSettings() - themselves function-local statics. A file-scope
 	// table would be racing their construction.
 	static const std::vector<Option> options = [] {
 		VCSCameraSettings &cam = CameraSettings();
+		VCSPadSettings &pad = PadSettings();
 
 		std::vector<Option> opts;
 
 		auto addBool = [&opts](OptionPage page, const char *iniKey, const char *label,
-				const char *help, bool *value) {
+				const char *help, bool *value, bool external = false,
+				bool defaultValue = false) {
 			Option opt{};
 			opt.page = page;
 			opt.type = OptionType::Bool;
@@ -79,10 +88,21 @@ const std::vector<Option> &Options() {
 			opt.label = label;
 			opt.help = help;
 			opt.boolValue = value;
-			opt.defaultBool = *value;
+			opt.external = external;
+			// For a setting we own, the compiled-in value IS the default and capturing it here is
+			// right. For one PPSSPP owns, the live value at table-build time is whatever the user
+			// last saved, so capturing it would make "restore defaults" mean "restore what I had
+			// at startup" - the same trap addInt and addChoice take an explicit default to avoid.
+			opt.defaultBool = external ? defaultValue : *value;
 			opts.push_back(opt);
 		};
 
+		// Ties the row just added to another setting, so it greys out when that one is off.
+		// Applied afterwards rather than as a parameter on all four adders, since one row in the
+		// table wants it.
+		auto enabledBy = [&opts](bool *flag) {
+			opts.back().enabledBy = flag;
+		};
 
 		auto addFloat = [&opts](OptionPage page, const char *iniKey, const char *label,
 				const char *help, float *value, float minValue, float maxValue,
@@ -168,6 +188,29 @@ const std::vector<Option> &Options() {
 			"Look up and down while driving, not only left and right.",
 			&cam.pitchInVehicle);
 
+		// --- Controller ---
+		//
+		// Four rows, and the first is the important one: the scheme this fork lays out for a pad
+		// is an opinion, and the handheld's own layout is the other one. Off hands the pad back
+		// to PPSSPP's mapper and every button goes back to meaning what it means on a PSP.
+		//
+		// The sensitivity is in the stick's own units rather than the mouse's, and the two rows
+		// are separate on purpose: a mouse count and a stick deflection are different kinds of
+		// number, and one slider driving both would be a slider that is wrong for whichever
+		// device the player is not holding.
+		addBool(OptionPage::Controller, "PadEnabled", "Controller scheme",
+			"Off gives a pad the PSP's own layout, through PPSSPP's control mapper.",
+			&pad.enabled);
+		addFloat(OptionPage::Controller, "PadLookSpeed", "Look sensitivity",
+			"How fast the right stick turns the camera.",
+			&pad.lookSpeed, 4.0f, 40.0f);
+		addBool(OptionPage::Controller, "PadInvertLookY", "Invert look vertically",
+			"Push the right stick forward to look down.",
+			&pad.invertLookY);
+		addFloat(OptionPage::Controller, "PadDeadzone", "Stick deadzone",
+			"How far a stick must move before it counts. Raise it if the camera drifts at rest.",
+			&pad.deadzone, 0.02f, 0.45f);
+
 		// --- Aiming ---
 
 		addFloat(OptionPage::Aiming, "AimSensitivity", "Aim sensitivity",
@@ -208,10 +251,26 @@ const std::vector<Option> &Options() {
 		// blocks honest: one press moves one block. It was a Choice into an eleven-label list
 		// first, which read correctly and was wrong - the index and the value are not the same
 		// number, so the first press dropped the volume from 100 to 10.
+		// The master switch, above the volume it governs - because with it off the volume row
+		// below does nothing at all, and there was no way to discover that from inside this menu.
+		// Somebody muted the emulator in PPSSPP's own settings, came back a fortnight later, and
+		// found an in-game volume slider that moved and changed nothing.
+		//
+		// The default is written out rather than asked for, which breaks this file's own rule
+		// about external settings, and the reason is worth stating: Config has GetDefaultValueInt
+		// and no bool equivalent, and adding one means editing Core/Config.cpp - the file this
+		// fork keeps its hands off so that rebases stay clean. Upstream's default is `true`
+		// (ConfigSetting("Enable", ..., true) in Core/Config.cpp), and a sound-enable flag
+		// defaulting to anything else is not a change anyone is going to make.
+		addBool(OptionPage::Audio, nullptr, "Sound",
+			"Master switch. Off silences everything, whatever the volume below says.",
+			&g_Config.bEnableSound, true, true);
+
 		addInt(OptionPage::Audio, nullptr, "Master volume",
 			"Overall volume, applied by the emulator.",
 			&g_Config.iGameVolume, VOLUME_OFF, VOLUMEHI_FULL, VOLUMEHI_FULL / 10,
 			Config::GetDefaultValueInt(&g_Config.iGameVolume), true);
+		enabledBy(&g_Config.bEnableSound);
 
 		// --- Graphics ---
 
@@ -225,6 +284,15 @@ const std::vector<Option> &Options() {
 			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
 			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
+
+		// --- The controls listing ---
+		//
+		// The first non-external Choice, which is why Load/Save grew a case for one. It changes
+		// what a reference card says and nothing about the game, but persisting it is the point:
+		// a player on a pad sets it once and the card stays where they put it.
+		addChoice(OptionPage::Bindings, "ControlsListDevice", "Show controls for",
+			"Which device the controls below are listed for.",
+			&g_listDevice, kListDeviceLabels, ARRAY_SIZE(kListDeviceLabels), 0);
 
 		return opts;
 	}();
@@ -266,7 +334,14 @@ void LoadSettings() {
 		}
 		switch (opt.type) {
 		case OptionType::Choice:
-			break;  // No non-external Choice options yet.
+			// Clamped to the label list rather than to a min/max pair: an index past the end
+			// would read off it, and a hand-edited file is exactly how that happens.
+			if (!section->Get(opt.iniKey, opt.intValue)) {
+				*opt.intValue = opt.defaultInt;
+			} else {
+				*opt.intValue = std::clamp(*opt.intValue, 0, opt.numChoices - 1);
+			}
+			break;
 		case OptionType::Bool:
 			if (!section->Get(opt.iniKey, opt.boolValue)) {
 				*opt.boolValue = opt.defaultBool;
@@ -306,6 +381,7 @@ void SaveSettings() {
 		}
 		switch (opt.type) {
 		case OptionType::Choice:
+			section->Set(opt.iniKey, *opt.intValue);
 			break;
 		case OptionType::Bool:
 			section->Set(opt.iniKey, *opt.boolValue);
@@ -320,6 +396,19 @@ void SaveSettings() {
 	}
 
 	ini.Save(SettingsPath());
+}
+
+const Option *ListDeviceOption() {
+	for (const Option &opt : Options()) {
+		if (opt.page == OptionPage::Bindings) {
+			return &opt;
+		}
+	}
+	return nullptr;
+}
+
+VCSListDevice ListDevice() {
+	return g_listDevice == 1 ? VCSListDevice::Controller : VCSListDevice::Keyboard;
 }
 
 void ResetPage(OptionPage page) {

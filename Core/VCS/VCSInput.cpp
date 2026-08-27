@@ -24,6 +24,7 @@
 #include <set>
 
 #include "Common/Common.h"
+#include "Common/System/System.h"
 #include "Core/KeyMap.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/VCS/VCSCamera.h"
@@ -34,6 +35,30 @@
 #include "Core/VCS/VCSVault.h"
 
 namespace VCS {
+
+// The pad's own held set, its sticks, and its settings.
+//
+// A SECOND set rather than more entries in the keyboard's, and that is forced rather than tidy:
+// PPSSPP delivers a d-pad direction and an arrow key as the same InputKeyCode, so one set would
+// have the debug spawner - which is on the arrow keys - firing whenever somebody pressed a
+// direction on a pad. The two devices genuinely need separate state.
+//
+// The sticks are atomics rather than mutex-guarded because they are two floats written whole by
+// the input thread and read whole by the emu thread, with no invariant between them that a torn
+// pair could break: a frame that saw a new X against an old Y would aim a fraction of a degree
+// wrong, once. The held set has no such luxury - a missed insert leaves a button stuck.
+static std::set<InputKeyCode> g_heldPadButtons;
+static std::atomic<float> g_padLeftX{0.0f};
+static std::atomic<float> g_padLeftY{0.0f};
+static std::atomic<float> g_padRightX{0.0f};
+static std::atomic<float> g_padRightY{0.0f};
+
+VCSPadSettings &PadSettings() {
+	// Function-local static for the same reason CameraSettings() is one: the option table points
+	// into it and is itself built lazily, so a file-scope object would be racing that order.
+	static VCSPadSettings settings;
+	return settings;
+}
 
 // Host keys currently held down. Written from the input thread, read from the emu thread, so
 // it needs the mutex. Only keys in the mapping table matter, but tracking everything is simpler
@@ -100,6 +125,12 @@ const InputKeyCode kVCSLockOnKey = NKCODE_L;
 // the press, so the game never sees a jump on the tick a climb starts.
 const InputKeyCode kVCSJumpKey = NKCODE_SPACE;
 
+// The pad's two. X is jump because it sits where the PSP's Square does and Square is jump; LT is
+// aim because that is where a modern pad puts it. Both are named so the table rows below and the
+// code that asks about them cannot drift apart - see JumpHeld and CameraDrivenAimHeld.
+const InputKeyCode kVCSPadAimButton = NKCODE_BUTTON_L2;
+const InputKeyCode kVCSPadJumpButton = NKCODE_BUTTON_X;
+
 // Set on the input thread by the key above, read on the emu thread by FreeAimActive.
 static std::atomic<bool> g_lockOnMode{false};
 
@@ -140,8 +171,19 @@ static const int kLatchDropSprintAt = 7;  // sprint for the first half, run for 
 // latches a run to the left of where you are looking exactly as W latches forwards, and a change of
 // key simply re-runs the latch. It is kept to one key deliberately - every extra direction is
 // another latched heading to get stuck in, and the movement cannot be steered once latched.
+// Defined with the rest of the pad plumbing further down; needed here because "is the player
+// asking to move" is a question the free-aim latch has to ask of whichever device is in hand.
+static bool PadLeftStick(float *x, float *y);
+
 bool MovementKeysHeld() {
-	return IsHostKeyDown(NKCODE_W);
+	if (IsHostKeyDown(NKCODE_W)) {
+		return true;
+	}
+	// The stick pushed FORWARD, which is the pad's W. Any deflection would be the wrong test: the
+	// latch exists to give the game a running state to hold on to, and a player strafing sideways
+	// into free aim would latch a sidestep.
+	float x = 0.0f, y = 0.0f;
+	return PadLeftStick(&x, &y) && y > 0.0f;
 }
 
 // Defined further down, next to the explanation of why a scope changes the answer.
@@ -444,6 +486,140 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 
 const size_t kVCSKeyMappingCount = ARRAY_SIZE(kVCSKeyMappings);
 
+// The gamepad scheme. Xbox names throughout; LT and RT arrive as axes and are turned into
+// NKCODE_BUTTON_L2 / R2 by HandleHostAxis before they reach this table.
+//
+// Read it against "What each PSP button actually does in VCS" in CLAUDE.md and the shape is
+// clear: the face buttons stay where the handheld put them, because Xbox A/B/X/Y sit in the same
+// four places as Cross/Circle/Square/Triangle and VCS already has the right actions on them. What
+// moves is everything a PSP had nowhere to put - aim and fire onto the triggers, the camera onto
+// a stick, the glances onto the bumpers - and the d-pad, which stops being four unrelated
+// functions and becomes weapons on the horizontal and view controls on the vertical.
+//
+// EVERY BUTTON IS CLAIMED IN EVERY CONTEXT, mapped or not, and the psp = 0 rows are not padding.
+// PPSSPP's XInput defaults (Core/KeyMapDefaults.cpp, defaultXInputKeyMap) put VIRTKEY_PAUSE on
+// the left trigger, VIRTKEY_FASTFORWARD on the right one and VIRTKEY_SPEED_TOGGLE on the right
+// stick click. An unclaimed control here does not fall through harmlessly - it opens a menu, or
+// runs the game at triple speed, in the middle of whatever the player was doing.
+const VCSPadMapping kVCSPadMappings[] = {
+	// --- On foot ---
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_A,      CTRL_CROSS,     false, "Sprint", "Sprint", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_B,      CTRL_CIRCLE,    false, "Attack / fire", "Fire", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     kVCSPadJumpButton,    CTRL_SQUARE,    false, "Jump (vaults a ledge when there is one)", "Jump", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_Y,      CTRL_TRIANGLE,  false, "Enter vehicle", "Enter vehicle", VCSKeyList::OnFoot },
+	// The triggers, which is the change this whole table exists for. On the PSP aim is R and fire
+	// is a face button, so aiming and shooting need a thumb and a shoulder; here they are the two
+	// fingers already resting on the triggers, which is what every shooter since has settled on.
+	{ VCSInputContext::OnFoot,     kVCSPadAimButton,     CTRL_RTRIGGER,  false, "Aim - lock-on, always; see LockOnModeActive", "Aim weapon", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_R2,     CTRL_CIRCLE,    false, "Fire", "Fire", VCSKeyList::OnFoot },
+	// The d-pad, reorganised: weapons across, view controls down. On the PSP the vertical pair is
+	// unrelated to the horizontal one - up is unknown and down is nothing on foot - so nothing is
+	// lost by giving them the two functions the PSP hid on Select and L.
+	{ VCSInputContext::OnFoot,     NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous weapon", "Previous weapon", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next weapon", "Next weapon", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_DPAD_UP,       CTRL_SELECT,    false, "Change camera (verified)", "Change camera", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_DPAD_DOWN,     CTRL_LTRIGGER,  false, "Switch to nearby weapon drop (verified)", "Take nearby weapon", VCSKeyList::OnFoot },
+	// Start is the FORK's menu and View is the GAME's. That is the modern split - the system
+	// button opens the system menu - and it is why Start carries no PSP button: it is handled on
+	// the press edge in HandlePadKey, because a UI message is not something a button mask can say.
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey, not a PSP button)", "Menu", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)", "Pause", VCSKeyList::OnFoot },
+	// Claimed and inert. The bumpers are zoom, which only means anything down a scope, so they
+	// live in the Aiming rows below; leaving them unclaimed here would let PPSSPP's defaults send
+	// them to the PSP's L and R, i.e. a second weapon-drop swap and a stray aim.
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_L1,     0,              false, "Suppressed (zoom belongs to the Aiming rows)" },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_R1,     0,              false, "Suppressed (zoom belongs to the Aiming rows)" },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (PPSSPP maps it to the speed toggle)" },
+
+	// --- In a vehicle ---
+	//
+	// The triggers become the pedals, which is the one substitution here that is really about
+	// feel rather than about layout: they are analog, the PSP's accelerate and brake were two
+	// face buttons, and driving with a thumb is the single most handheld-feeling thing left.
+	// The PSP button underneath is still digital - the game reads a button, not a pedal - so what
+	// this buys is where your fingers rest, not throttle control.
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_R2,     CTRL_CROSS,     false, "Accelerate", "Accelerate", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_L2,     CTRL_SQUARE,    false, "Brake / reverse", "Brake / reverse", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_A,      CTRL_DOWN,      false, "Horn (verified)", "Horn", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_B,      CTRL_CIRCLE,    false, "Drive-by fire", "Drive-by fire", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_X,      CTRL_RTRIGGER,  false, "Handbrake", "Handbrake", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_Y,      CTRL_TRIANGLE,  false, "Exit vehicle", "Exit vehicle", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous radio station / lower forks (verified)", "Previous radio station", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next radio station / raise forks (verified)", "Next radio station", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_DPAD_UP,       CTRL_SELECT,    false, "Change camera (verified)", "Change camera", VCSKeyList::InVehicle },
+	// Unbound on purpose, and claimed anyway. The PSP's spare vehicle direction is d-pad UP and
+	// what it does is still a question mark in CLAUDE.md's table, so there is nothing verified to
+	// put here - and an unclaimed direction would reach the game's d-pad down, which is the horn
+	// that button A already is.
+	{ VCSInputContext::InVehicle,  NKCODE_DPAD_DOWN,     0,              false, "Unbound (nothing verified to put here)" },
+	// The glances. psp = 0 because a glance is L trigger AND a stick direction at once: the
+	// trigger half comes from GlanceButtonMask and the stick half from ApplyAnalog, exactly as
+	// the keyboard's Q and E do it. The rows exist to claim the bumpers.
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_L1,     0,              false, "Look left (L trigger + stick, see GlanceDirection)" },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_R1,     0,              false, "Look right (L trigger + stick, see GlanceDirection)" },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)", "Menu", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)", "Pause", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (PPSSPP maps it to the speed toggle)" },
+
+	// --- Helicopters and planes ---
+	//
+	// The bumpers yaw, which is where the PSP had them (L and R directly, not the car's glance
+	// modifier), and the triggers climb and descend. So the shoulders keep their meaning from the
+	// car - the outer pair turns you, the inner pair is the throttle - even though the buttons
+	// underneath are completely different.
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_R2,     CTRL_CROSS,     false, "Climb / throttle up", "Climb", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_L2,     CTRL_SQUARE,    false, "Descend / throttle down", "Descend", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_L1,     CTRL_LTRIGGER,  false, "Yaw left", "Yaw left", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_R1,     CTRL_RTRIGGER,  false, "Yaw right", "Yaw right", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_B,      CTRL_CIRCLE,    false, "Fire (Hunter)", "Fire (Hunter)", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_Y,      CTRL_TRIANGLE,  false, "Exit aircraft", "Exit aircraft", VCSKeyList::Aircraft },
+	// A and X have nothing to do up here - climb and descend moved to the triggers, and the PSP
+	// put nothing else on those two in the air. Claimed so they cannot reach Cross and Square,
+	// which in an aircraft are exactly climb and descend and would fight the triggers.
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_A,      0,              false, "Unbound (climb is on the right trigger)" },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_X,      0,              false, "Unbound (descend is on the left trigger)" },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous radio station", "Previous radio station", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next radio station", "Next radio station", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_UP,       CTRL_SELECT,    false, "Change camera", "Change camera", VCSKeyList::Aircraft },
+	// The PSP's own centre view, kept reachable. It is d-pad down there too, so this is the one
+	// aircraft row where the modern layout and the handheld's happen to agree.
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Centre view", "Centre view", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)", "Menu", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)", "Pause", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (PPSSPP maps it to the speed toggle)" },
+
+	// --- Aiming, which is also hand-to-hand ---
+	//
+	// Entered by holding LT, and the four face buttons are the melee set the moment the game
+	// decides you are fighting rather than shooting - see the state table in the keyboard rows
+	// above. They need no remapping at all: the PSP's melee assignments already sit under the
+	// Xbox button in the same position.
+	{ VCSInputContext::Aiming,     kVCSPadAimButton,     CTRL_RTRIGGER,  false, "Hold aim (verified)" },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_R2,     CTRL_CIRCLE,    false, "Fire", "Light attack / fire", VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_B,      CTRL_CIRCLE,    false, "Light attack / fire", "Light attack / fire", VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_A,      CTRL_CROSS,     false, "Heavy hit / stomp / knee (melee)", "Heavy hit / stomp", VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_X,      CTRL_SQUARE,    false, "Block (melee)", "Block", VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_Y,      CTRL_TRIANGLE,  false, "Grab / throw / neckbreak / pull up", "Grab / throw", VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,     NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous target", "Previous target", VCSKeyList::OnFoot | VCSKeyList::Melee },
+	{ VCSInputContext::Aiming,     NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next target", "Next target", VCSKeyList::OnFoot | VCSKeyList::Melee },
+	// Both vertical directions are deliberately dead while aiming, and for different reasons.
+	// Up would change the camera mid-fight, which nobody wants and the PSP does not offer either.
+	// Down is the game's own FREE AIM button, and the auto-free-aim pulse in ApplyMapping owns it
+	// - a player pressing it by hand at the wrong moment would cancel or double the pulse.
+	{ VCSInputContext::Aiming,     NKCODE_DPAD_UP,       0,              false, "Suppressed (no camera change mid-fight)" },
+	{ VCSInputContext::Aiming,     NKCODE_DPAD_DOWN,     0,              false, "Suppressed (d-pad down is Free Aim, which the pulse owns)" },
+	// Zoom, and the reason VCSPadMapping has a scopedOnly column at all. These are the game's
+	// Square and Cross, which with anything but a scope in hand are Block and Heavy Hit, so
+	// ungated they would have a bumper throwing punches every time it was pressed in a fight.
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_R1,     CTRL_SQUARE,    true,  "Sniper zoom in (verified)", "Sniper zoom in", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_L1,     CTRL_CROSS,     true,  "Sniper zoom out (verified)", "Sniper zoom out", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)" },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)" },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (PPSSPP maps it to the speed toggle)" },
+};
+
+const size_t kVCSPadMappingCount = ARRAY_SIZE(kVCSPadMappings);
+
 // --- The read-only controls listing ---------------------------------------------------------
 //
 // Rows the listing needs that kVCSKeyMappings cannot hold, because they are not buttons: WASD
@@ -458,7 +634,12 @@ const size_t kVCSKeyMappingCount = ARRAY_SIZE(kVCSKeyMappings);
 struct VCSListingExtra {
 	VCSKeyList list;
 	const char *name;
+	// The two devices side by side, so a row that reads differently on each is still one row.
+	// An empty array means the action does not exist on that device and the row is simply not
+	// drawn there - which is most of what separates the two cards, since a stick is one control
+	// where WASD is four, and a few of this layer's keyboard-only inventions have no button.
 	const char *keys[3];
+	const char *padKeys[3];
 	// Movement belongs at the top of a page and the odd-job keys at the bottom, and neither has
 	// a place in the mapping table's order to be interleaved with. One bit is enough to say
 	// which end.
@@ -466,30 +647,46 @@ struct VCSListingExtra {
 };
 
 static const VCSListingExtra kVCSListingExtras[] = {
-	{ VCSKeyList::OnFoot,    "Forward",        { "W" } },
-	{ VCSKeyList::OnFoot,    "Backwards",      { "S" } },
-	{ VCSKeyList::OnFoot,    "Left",           { "A" } },
-	{ VCSKeyList::OnFoot,    "Right",          { "D" } },
-	{ VCSKeyList::OnFoot,    "Look",           { "MOUSE" } },
+	// One nub against four keys. Printing "NUB" four times over would be four ways of saying
+	// one thing, so the pad gets a row of its own and the WASD rows stay off its card.
+	{ VCSKeyList::OnFoot,    "Move",           { },          { "LEFT STICK" } },
+	{ VCSKeyList::OnFoot,    "Forward",        { "W" },      { } },
+	{ VCSKeyList::OnFoot,    "Backwards",      { "S" },      { } },
+	{ VCSKeyList::OnFoot,    "Left",           { "A" },      { } },
+	{ VCSKeyList::OnFoot,    "Right",          { "D" },      { } },
+	// Blank on the pad because VCS has no on-foot look, not because one was left out: the PSP
+	// has one stick, the game gives it to movement, and the camera follows by itself. Changing
+	// the camera on Select is the whole of a pad's control over it, and that row comes from the
+	// mapping table.
+	{ VCSKeyList::OnFoot,    "Look",           { "MOUSE" },  { "RIGHT STICK" } },
 
-	{ VCSKeyList::InVehicle, "Steer left",     { "A" } },
-	{ VCSKeyList::InVehicle, "Steer right",    { "D" } },
-	{ VCSKeyList::InVehicle, "Look",           { "MOUSE" } },
+	{ VCSKeyList::InVehicle, "Steer",          { },          { "LEFT STICK" } },
+	{ VCSKeyList::InVehicle, "Steer left",     { "A" },      { } },
+	{ VCSKeyList::InVehicle, "Steer right",    { "D" },      { } },
+	{ VCSKeyList::InVehicle, "Look",           { "MOUSE" },  { "RIGHT STICK" } },
 	// Glances, for shooting out of the side of a car. Not in the mapping table because on the
 	// PSP they are L trigger plus a stick direction - a button and an axis at once, which a row
-	// there cannot express. See GlanceDirection.
-	{ VCSKeyList::InVehicle, "Look left",      { "Q" } },
-	{ VCSKeyList::InVehicle, "Look right",     { "E" } },
+	// there cannot express. See GlanceDirection. That combination is exactly what the pad column
+	// has to print, and it is the one cell on either card that names two controls at once.
+	{ VCSKeyList::InVehicle, "Look left",      { "Q" },      { "LB" } },
+	{ VCSKeyList::InVehicle, "Look right",     { "E" },      { "RB" } },
 	// The same two keys as the radio above, which is the game's doing rather than ours: a
 	// special vehicle reuses d-pad left and right for its own function. Listed separately
 	// because one row cannot carry both meanings, and a player in a forklift is not looking for
 	// the radio.
-	{ VCSKeyList::InVehicle, "Raise forks / turret", { "T" }, true },
-	{ VCSKeyList::InVehicle, "Lower forks / turret", { "R" }, true },
+	{ VCSKeyList::InVehicle, "Raise forks / turret", { "T" }, { "D-PAD RIGHT" }, true },
+	{ VCSKeyList::InVehicle, "Lower forks / turret", { "R" }, { "D-PAD LEFT" },  true },
 
-	{ VCSKeyList::Aircraft,  "Pitch and roll", { "MOUSE" } },
+	// The one row where the mouse and the nub really are the same control: both are the axis
+	// pair the aircraft flies on.
+	{ VCSKeyList::Aircraft,  "Pitch and roll", { "MOUSE" },  { "LEFT STICK" } },
+	// Pad only. On the keyboard the aircraft camera is the mouse, which the row above already
+	// says; on the pad it is a stick of its own and needs its own line.
+	{ VCSKeyList::Aircraft,  "Look",           { },          { "RIGHT STICK" } },
 
-	{ VCSKeyList::Melee,     "Face target",    { "MOUSE" } },
+	// Melee targeting is the game's own on a pad - it picks the target and turns you to face
+	// them, and there is nothing to press.
+	{ VCSKeyList::Melee,     "Face target",    { "MOUSE" },  { } },
 };
 
 // Short and upper case, the way the game sets them. PPSSPP's own names are the fallback and are
@@ -512,57 +709,115 @@ std::string KeyDisplayName(InputKeyCode key) {
 	return name;
 }
 
-std::vector<VCSListingRow> KeyListing(VCSKeyList list) {
+// The pad's buttons as the card names them. Xbox names, because that is the pad this scheme is
+// laid out for - PlayStation shapes here would describe neither the controller in the player's
+// hands nor, since the buttons have moved, the console the game came from.
+//
+// "VIEW" rather than "BACK" or "SELECT": it is what Microsoft has called that button for over a
+// decade and what is printed next to it on the pad someone is holding.
+std::string PadButtonName(InputKeyCode button) {
+	switch (button) {
+	case NKCODE_BUTTON_A: return "A";
+	case NKCODE_BUTTON_B: return "B";
+	case NKCODE_BUTTON_X: return "X";
+	case NKCODE_BUTTON_Y: return "Y";
+	case NKCODE_BUTTON_L1: return "LB";
+	case NKCODE_BUTTON_R1: return "RB";
+	case NKCODE_BUTTON_L2: return "LT";
+	case NKCODE_BUTTON_R2: return "RT";
+	case NKCODE_BUTTON_THUMBL: return "LEFT STICK";
+	case NKCODE_BUTTON_THUMBR: return "RIGHT STICK";
+	case NKCODE_DPAD_UP: return "D-PAD UP";
+	case NKCODE_DPAD_DOWN: return "D-PAD DOWN";
+	case NKCODE_DPAD_LEFT: return "D-PAD LEFT";
+	case NKCODE_DPAD_RIGHT: return "D-PAD RIGHT";
+	case NKCODE_BUTTON_START: return "START";
+	case NKCODE_BUTTON_SELECT: return "VIEW";
+	default:
+		break;
+	}
+	// Nothing in kVCSPadMappings reaches this, and if something ever does, a name is better than
+	// a blank cell - a blank one would read as an unbound action rather than as a missing string.
+	std::string name = KeyMap::GetKeyName(button);
+	for (char &c : name) {
+		c = toupper((unsigned char)c);
+	}
+	return name;
+}
+
+std::vector<VCSListingRow> KeyListing(VCSKeyList list, VCSListDevice device) {
 	std::vector<VCSListingRow> rows;
 	if (list == VCSKeyList::None) {
 		return rows;
 	}
 
-	auto addExtras = [&rows, list](bool atEnd) {
+	const bool pad = device == VCSListDevice::Controller;
+
+	auto addExtras = [&rows, list, pad](bool atEnd) {
 		for (const VCSListingExtra &extra : kVCSListingExtras) {
 			if (!(extra.list & list) || extra.atEnd != atEnd) {
 				continue;
 			}
 			VCSListingRow row;
 			row.name = extra.name;
-			for (const char *key : extra.keys) {
+			for (const char *key : pad ? extra.padKeys : extra.keys) {
 				if (key) {
 					row.keys.push_back(key);
 				}
 			}
-			rows.push_back(row);
+			// Nothing against it on this device means the action is not on this device, so the
+			// row is not on this card either. An empty line would read as a missing binding.
+			if (!row.keys.empty()) {
+				rows.push_back(row);
+			}
 		}
 	};
 
-	addExtras(false);
-
-	for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
-		const VCSKeyMapping &mapping = kVCSKeyMappings[i];
-		if (!(mapping.list & list) || !mapping.listName) {
-			continue;
-		}
-
-		// Rows sharing a name are one line with several keys against it - which is how the
-		// listing shows that Fire is the left mouse button and Backspace, without either of
-		// them being written down twice.
+	// Rows sharing a name are one line with several controls against it - which is how the card
+	// shows that Fire is both the left mouse button and Backspace, or on the pad both B and RT,
+	// without either of them being written down twice.
+	auto addRow = [&rows](const char *listName, const std::string &control) {
 		VCSListingRow *row = nullptr;
 		for (VCSListingRow &existing : rows) {
-			if (!strcmp(existing.name, mapping.listName)) {
+			if (!strcmp(existing.name, listName)) {
 				row = &existing;
 				break;
 			}
 		}
 		if (!row) {
-			rows.push_back(VCSListingRow{mapping.listName, {}});
+			rows.push_back(VCSListingRow{listName, {}});
 			row = &rows.back();
 		}
+		// The same control can reach one action through two contexts - Q cycles weapons on foot
+		// and targets while aiming, and the aim control appears in both the OnFoot and Aiming
+		// rows. Show it once.
+		if (std::find(row->keys.begin(), row->keys.end(), control) == row->keys.end()) {
+			row->keys.push_back(control);
+		}
+	};
 
-		// The same key can reach one action through two contexts - Q cycles weapons on foot and
-		// targets while aiming, and the aim key appears in both the OnFoot and Aiming rows. Show
-		// it once.
-		const std::string name = KeyDisplayName(mapping.key);
-		if (std::find(row->keys.begin(), row->keys.end(), name) == row->keys.end()) {
-			row->keys.push_back(name);
+	addExtras(false);
+
+	// Each card is built from the table that actually drives that device. Deriving the pad's card
+	// from the keyboard's table would have been possible while a pad still went through the PSP's
+	// own layout - every row knew the button its key produced - and it stopped being possible the
+	// moment the pad got a scheme of its own, because the two no longer agree about anything but
+	// the face buttons.
+	if (pad) {
+		for (size_t i = 0; i < kVCSPadMappingCount; i++) {
+			const VCSPadMapping &mapping = kVCSPadMappings[i];
+			if (!(mapping.list & list) || !mapping.listName) {
+				continue;
+			}
+			addRow(mapping.listName, PadButtonName(mapping.button));
+		}
+	} else {
+		for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
+			const VCSKeyMapping &mapping = kVCSKeyMappings[i];
+			if (!(mapping.list & list) || !mapping.listName) {
+				continue;
+			}
+			addRow(mapping.listName, KeyDisplayName(mapping.key));
 		}
 	}
 
@@ -614,7 +869,10 @@ VCSInputContext ResolveContext(const VCSState &state) {
 		//
 		// Both aim flags are still read into VCSState for the debugger, and remain the way to
 		// find out what the game actually did with the input we sent it.
-		if (IsHostKeyDown(kVCSAimKey)) {
+		// Either device's aim control. The pad's is the left trigger, which by the time it gets
+		// here is an ordinary held button - HandleHostAxis turns the axis into one, precisely so
+		// that questions like this one have a single shape to ask.
+		if (IsHostKeyDown(kVCSAimKey) || IsPadButtonDown(kVCSPadAimButton)) {
 			return VCSInputContext::Aiming;
 		}
 		return VCSInputContext::OnFoot;
@@ -626,6 +884,24 @@ VCSInputContext ResolveContext(const VCSState &state) {
 // Assumes g_hostKeyMutex is held.
 static bool IsHostKeyDownLocked(InputKeyCode key) {
 	return g_heldKeys.find(key) != g_heldKeys.end();
+}
+
+// The same question of the pad's set. Assumes g_hostKeyMutex is held.
+//
+// The scheme being switched off answers false here rather than at each call site, and that is the
+// difference between a clean switch and a stuck one: HandleHostAxis stops recording when the
+// scheme goes off, so a trigger held across that moment would otherwise stay in the set forever -
+// and the aim trigger holding means the Aiming context never ends.
+static bool IsPadButtonDownLocked(InputKeyCode button) {
+	if (!PadSettings().enabled) {
+		return false;
+	}
+	return g_heldPadButtons.find(button) != g_heldPadButtons.end();
+}
+
+bool IsPadButtonDown(InputKeyCode button) {
+	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+	return IsPadButtonDownLocked(button);
 }
 
 // Assumes g_hostKeyMutex is held. Whether this context maps this key at all.
@@ -669,11 +945,13 @@ static bool GlanceDirection(VCSInputContext context, float *x, float *y) {
 		return false;
 	}
 
+	// Either device. The bumpers are the pad's glance for the same reason Q and E are the
+	// keyboard's: they are the controls a thumb is not already using while driving.
 	bool q, e;
 	{
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
-		q = IsHostKeyDownLocked(NKCODE_Q);
-		e = IsHostKeyDownLocked(NKCODE_E);
+		q = IsHostKeyDownLocked(NKCODE_Q) || IsPadButtonDownLocked(NKCODE_BUTTON_L1);
+		e = IsHostKeyDownLocked(NKCODE_E) || IsPadButtonDownLocked(NKCODE_BUTTON_R1);
 	}
 
 	if (q && e) {
@@ -709,6 +987,226 @@ static bool ContextUsesKeyForMovement(VCSInputContext context, InputKeyCode key)
 	}
 }
 
+// --- The pad's input path ---------------------------------------------------------------------
+
+static bool IsPadDevice(InputDeviceID device) {
+	return (device >= DEVICE_ID_PAD_0 && device <= DEVICE_ID_PAD_9) ||
+	       (device >= DEVICE_ID_XINPUT_0 && device <= DEVICE_ID_XINPUT_3);
+}
+
+// A RADIAL deadzone, rescaled so that the first movement past it is small rather than a jump to
+// the deadzone's own width.
+//
+// Radial rather than per-axis, and that is not a detail on a look stick: a square deadzone lets
+// one axis through while the other is still inside the box, so a slow diagonal push starts as a
+// pure horizontal sweep and only becomes diagonal once it clears the corner. On a camera that
+// reads as the stick refusing to look diagonally.
+static bool PadStickDeflection(float rawX, float rawY, float *x, float *y) {
+	*x = 0.0f;
+	*y = 0.0f;
+
+	const float dead = std::clamp(PadSettings().deadzone, 0.0f, 0.9f);
+	const float length = std::sqrt(rawX * rawX + rawY * rawY);
+	if (length <= dead || length <= 0.0f) {
+		return false;
+	}
+
+	float scaled = (length - dead) / (1.0f - dead);
+	if (scaled > 1.0f) {
+		scaled = 1.0f;
+	}
+	*x = rawX / length * scaled;
+	*y = rawY / length * scaled;
+	return true;
+}
+
+// Both sticks answer false with the scheme switched off, so one check covers every caller rather
+// than each of them remembering to ask.
+static bool PadLeftStick(float *x, float *y) {
+	if (!PadSettings().enabled) {
+		*x = 0.0f;
+		*y = 0.0f;
+		return false;
+	}
+	return PadStickDeflection(g_padLeftX.load(std::memory_order_relaxed),
+		g_padLeftY.load(std::memory_order_relaxed), x, y);
+}
+
+static bool PadRightStick(float *x, float *y) {
+	if (!PadSettings().enabled) {
+		*x = 0.0f;
+		*y = 0.0f;
+		return false;
+	}
+	return PadStickDeflection(g_padRightX.load(std::memory_order_relaxed),
+		g_padRightY.load(std::memory_order_relaxed), x, y);
+}
+
+// Whether this context has a row for this button at all - the pad's answer to ContextMapsKeyLocked,
+// and the thing that decides whether the button is claimed. Reads only the table, so it needs no
+// lock.
+static bool PadContextMapsButton(VCSInputContext context, InputKeyCode button) {
+	for (size_t i = 0; i < kVCSPadMappingCount; i++) {
+		if (kVCSPadMappings[i].context == context && kVCSPadMappings[i].button == button) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// An analog trigger, turned into a button.
+//
+// Two thresholds rather than one, and the fire button is why. A trigger resting against a single
+// line - which is exactly where a finger holds one - crosses it on noise alone, and the button
+// underneath is Fire. Pressing at 0.45 and releasing at 0.35 puts a tenth of the travel between
+// the two decisions, which is more than any trigger's jitter and less than any player's hold.
+static void SetPadTrigger(InputKeyCode button, float value) {
+	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+	const bool wasDown = IsPadButtonDownLocked(button);
+	const bool nowDown = wasDown ? value > PadSettings().triggerRelease
+	                             : value > PadSettings().triggerPress;
+	if (nowDown == wasDown) {
+		return;
+	}
+	if (nowDown) {
+		g_heldPadButtons.insert(button);
+	} else {
+		g_heldPadButtons.erase(button);
+	}
+}
+
+static bool HandlePadKey(const KeyInput &key) {
+	if (!PadSettings().enabled) {
+		return false;
+	}
+
+	const bool down = (key.flags & KeyInputFlags::DOWN) != 0;
+	const bool up = (key.flags & KeyInputFlags::UP) != 0;
+	if (!down && !up) {
+		return false;
+	}
+
+	// Start opens the fork's own menu, which is the modern split: the system button reaches the
+	// system menu and the game's pause screen is on View. Handled here rather than in the table
+	// because a UI message is not a PSP button, and BEFORE the context gate below on purpose - a
+	// menu button that only works once the address table has resolved a context is a menu button
+	// that does not work on the boot screen, which is where somebody reaching for it is most
+	// likely to be.
+	if (key.keyCode == NKCODE_BUTTON_START) {
+		if (down) {
+			System_PostUIMessage(UIMessage::REQUEST_GAME_PAUSE);
+		}
+		return true;
+	}
+
+	const VCSInputContext context = g_currentContext.load(std::memory_order_relaxed);
+
+	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+	if (down) {
+		g_heldPadButtons.insert(key.keyCode);
+	} else {
+		g_heldPadButtons.erase(key.keyCode);
+	}
+
+	// Same rule the keyboard follows: claim only what we will act on, so an empty address table
+	// leaves a pad behaving exactly as it did before any of this existed.
+	if (context == VCSInputContext::Unknown) {
+		return false;
+	}
+	return PadContextMapsButton(context, key.keyCode);
+}
+
+bool HandleHostAxis(const AxisInput &axis) {
+	if (!IsActive() || !PadSettings().enabled || !IsPadDevice(axis.deviceId)) {
+		return false;
+	}
+
+	// The claim is withheld until a context resolves, exactly as HandleHostKey withholds it - and
+	// here it is not a nicety but the difference between a working pad and a dead one. With the
+	// context Unknown, ApplyAnalog applies nothing; claiming the sticks anyway would take the
+	// movement away from PPSSPP's mapper and then not use it, leaving a player unable to move at
+	// all on a build where the address table came up empty.
+	//
+	// The positions are still RECORDED either way. That costs nothing, and it means the first
+	// tick after a context resolves already knows where the sticks are rather than waiting for
+	// the player to move them.
+	const bool claim = g_currentContext.load(std::memory_order_relaxed) != VCSInputContext::Unknown;
+
+	switch (axis.axisId) {
+	// The sticks are stored raw and read through the deadzone, rather than deadzoned here. The
+	// deadzone is a setting, and a value stored through the old one would survive a change to it.
+	case JOYSTICK_AXIS_X:
+		g_padLeftX.store(axis.value, std::memory_order_relaxed);
+		return claim;
+	case JOYSTICK_AXIS_Y:
+		// XInput reports this positive when the stick is pushed AWAY from the player, and the PSP
+		// stick's positive Y is also away from the camera, so the two agree and nothing is
+		// negated here. That is specific to XInput: PPSSPP's generic pad defaults invert this
+		// axis (Core/KeyMapDefaults.cpp), because an SDL joystick reports the opposite sign.
+		g_padLeftY.store(axis.value, std::memory_order_relaxed);
+		return claim;
+	case JOYSTICK_AXIS_Z:
+		g_padRightX.store(axis.value, std::memory_order_relaxed);
+		return claim;
+	case JOYSTICK_AXIS_RZ:
+		g_padRightY.store(axis.value, std::memory_order_relaxed);
+		return claim;
+	// Claiming the triggers is not optional. PPSSPP's XInput defaults put VIRTKEY_PAUSE on the
+	// left trigger and VIRTKEY_FASTFORWARD on the right one, so an unclaimed trigger opens a menu
+	// or triples the game speed - and this scheme's triggers are aim and fire, i.e. held.
+	case JOYSTICK_AXIS_LTRIGGER:
+		SetPadTrigger(NKCODE_BUTTON_L2, axis.value);
+		return claim;
+	case JOYSTICK_AXIS_RTRIGGER:
+		SetPadTrigger(NKCODE_BUTTON_R2, axis.value);
+		return claim;
+	default:
+		// A pedal set, a hat, a sixth axis on some flight stick. Not ours; let the mapper have it.
+		return false;
+	}
+}
+
+void ApplyPadLook(VCSInputContext context) {
+	switch (context) {
+	case VCSInputContext::OnFoot:
+	case VCSInputContext::InVehicle:
+	case VCSInputContext::InAircraft:
+	case VCSInputContext::Aiming:
+		break;
+	default:
+		// Nothing looks around in a context we cannot identify, and accumulating a delta that
+		// nothing drains would dump the whole hoard into the camera the moment one resolved.
+		return;
+	}
+
+	float x = 0.0f, y = 0.0f;
+	if (!PadRightStick(&x, &y)) {
+		return;
+	}
+
+	// Squared response, sign preserved. A stick is a position and the camera wants a rate, so the
+	// player is holding the speed rather than moving to it - and a linear map makes the slow half
+	// of the travel useless for fine work while the fast half is all the same to a thumb. Squaring
+	// is the standard answer and costs nothing.
+	const float ax = x * std::fabs(x);
+	const float ay = y * std::fabs(y);
+
+	const VCSPadSettings &pad = PadSettings();
+	float dx = ax * pad.lookSpeed;
+	// The stick's positive Y is away from the player; a mouse's positive dy is DOWN the screen,
+	// and everything downstream of this - the camera, the free-aim solver, the invert settings -
+	// was written for a mouse. One negation here rather than a special case in each of them.
+	float dy = -ay * pad.lookSpeed;
+	if (pad.invertLookY) {
+		dy = -dy;
+	}
+
+	// Into the same accumulator the mouse fills, which is the whole design: the stick becomes
+	// mouse movement at the edge and every measured thing behind it - sensitivity, the FOV scale,
+	// the aim response model - is reused rather than reimplemented against a second input.
+	AddLookDelta(dx, dy);
+}
+
 void SetHostKeyDown(InputKeyCode key, bool down) {
 	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 	if (down) {
@@ -724,8 +1222,16 @@ bool HandleHostKey(const KeyInput &key) {
 		return false;
 	}
 
-	// This is a keyboard and mouse layer. A gamepad should keep going through PPSSPP's own
-	// mapper untouched, so don't claim anything from one.
+	// A gamepad goes down its own path, against its own table.
+	//
+	// It used to be turned away right here - this was a keyboard and mouse layer, and a pad went
+	// past it to PPSSPP's mapper and the PSP's own layout. That is precisely what made playing
+	// with a pad feel like playing a handheld: not the buttons being wrong, but nothing in this
+	// file ever seeing them.
+	if (IsPadDevice(key.deviceId)) {
+		return HandlePadKey(key);
+	}
+
 	if (key.deviceId != DEVICE_ID_KEYBOARD && key.deviceId != DEVICE_ID_MOUSE) {
 		return false;
 	}
@@ -773,7 +1279,14 @@ void ResetHostKeys() {
 	{
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 		g_heldKeys.clear();
+		g_heldPadButtons.clear();
 	}
+	// A stick left deflected across a shutdown would walk the player the instant the next game
+	// started, before any axis event arrived to correct it.
+	g_padLeftX.store(0.0f, std::memory_order_relaxed);
+	g_padLeftY.store(0.0f, std::memory_order_relaxed);
+	g_padRightX.store(0.0f, std::memory_order_relaxed);
+	g_padRightY.store(0.0f, std::memory_order_relaxed);
 	// Otherwise the debugger keeps showing the last context from a game that has since stopped.
 	g_currentContext.store(VCSInputContext::Unknown, std::memory_order_relaxed);
 	// Anything we were holding has to be released too, or the buttons stay stuck down in the
@@ -812,12 +1325,33 @@ u32 ComputeButtonMask(VCSInputContext context) {
 		return 0;
 	}
 
+	// Read before the lock, deliberately. This reads the decoded game state, and taking that
+	// while holding the input mutex would be the only place in this file where two locks are held
+	// at once - in an order nothing else guarantees.
+	//
+	// It also costs this function the "no side effects, pure function of the key state" property
+	// its comment used to claim. The gate is worth it: see the scopedOnly rows.
+	const bool scoped = ScopedWeaponActive();
+
 	// One lock for the whole table rather than one per row.
 	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 	u32 mask = 0;
 	for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
 		const VCSKeyMapping &mapping = kVCSKeyMappings[i];
 		if (mapping.context == context && IsHostKeyDownLocked(mapping.key)) {
+			mask |= mapping.psp;
+		}
+	}
+	// The pad's rows OR into the same mask. Both devices are live at once and always have been -
+	// somebody with a pad in their hands and a hand on the keyboard gets both, and two rows
+	// naming the same button simply set the same bit. No check for the scheme being on: that
+	// lives in IsPadButtonDownLocked, which is the only place it should.
+	for (size_t i = 0; i < kVCSPadMappingCount; i++) {
+		const VCSPadMapping &mapping = kVCSPadMappings[i];
+		if (mapping.context != context || (mapping.scopedOnly && !scoped)) {
+			continue;
+		}
+		if (IsPadButtonDownLocked(mapping.button)) {
 			mask |= mapping.psp;
 		}
 	}
@@ -872,8 +1406,10 @@ u32 ApplyMapping(VCSInputContext context) {
 	// Arm the auto-free-aim pulse on the edge into Aiming - not while in it, or it would retrigger
 	// every frame and hold d-pad down forever.
 	if (context == VCSInputContext::Aiming && g_prevAppliedContext != VCSInputContext::Aiming) {
-		if (CameraSettings().autoFreeAim && !g_lockOnMode.load(std::memory_order_relaxed) &&
-			!MeleeEquipped()) {
+		// Through LockOnModeActive rather than the raw flag: the pad is a second source of the
+		// same answer, and reading the atomic here would have armed the pulse for a pad that is
+		// meant never to leave lock-on.
+		if (CameraSettings().autoFreeAim && !LockOnModeActive() && !MeleeEquipped()) {
 			// If the player is already asking to move, spend a few ticks establishing a running
 			// state before pressing Free Aim, so the game has something worth latching. The pulse
 			// is armed when that finishes rather than now.
@@ -1075,6 +1611,41 @@ void ApplyAnalog(VCSInputContext context) {
 		default:
 			break;
 		}
+
+		// The pad's left stick, which REPLACES the keys rather than adding to them.
+		//
+		// Summing would be the obvious thing and is wrong: a stick already carries magnitude, so
+		// adding a key's full 1.0 to a half-pushed stick asks for a deflection neither input
+		// requested, and holding W with a centred stick would be indistinguishable from holding
+		// both. Whichever device is actually being moved is the one that answers.
+		float padX = 0.0f, padY = 0.0f;
+		if (PadLeftStick(&padX, &padY)) {
+			switch (context) {
+			case VCSInputContext::OnFoot:
+			// Aiming without free aim is lock-on, where the stick strafes around the target -
+			// movement, so the stick drives it exactly as on foot. Free aim never reaches here:
+			// the reticle branch above returns first, and it has to, because the PSP has one
+			// stick and in free aim it is the crosshair.
+			case VCSInputContext::Aiming:
+				x = padX;
+				y = padY;
+				break;
+			case VCSInputContext::InVehicle:
+				// Steering only, exactly as A and D are. The pedals are the triggers and go
+				// through the button table, so the stick's Y has nothing here to drive.
+				x = padX;
+				break;
+			case VCSInputContext::InAircraft:
+				// X banks and Y pitches - the whole reason this context exists. Pushed away from
+				// the player is positive on both the stick and the PSP's nub, and that pitches
+				// the NOSE DOWN, which is what converts the rotor's lift into forward flight.
+				x = padX;
+				y = padY;
+				break;
+			default:
+				break;
+			}
+		}
 	}
 
 	const bool wantsStick = x != 0.0f || y != 0.0f;
@@ -1228,7 +1799,10 @@ bool FreeAimActive(VCSInputContext context) {
 	// in IsAiming (confirmed in play - the flag reads 0 while visibly locked on), so the test below
 	// concluded free aim and handed over the stick. This key stays as the manual override; the
 	// weapon test right below it is the automatic one.
-	if (g_lockOnMode.load(std::memory_order_relaxed)) {
+	// LockOnModeActive rather than the raw flag, for the same reason ApplyMapping asks it: the
+	// pad is a second source of this answer, and a half-applied mode is exactly what the comment
+	// above describes going wrong.
+	if (LockOnModeActive()) {
 		return false;
 	}
 	// Melee has no free aim to give, so never hand it the mouse. In lock-on the stick is MOVEMENT,
@@ -1326,8 +1900,48 @@ VCSInputContext GetCurrentContext() {
 	return g_currentContext.load(std::memory_order_relaxed);
 }
 
+bool JumpHeld() {
+	return IsHostKeyDown(kVCSJumpKey) || IsPadButtonDown(kVCSPadJumpButton);
+}
+
+bool CameraDrivenAimHeld() {
+	// The mouse, unchanged and unconditional: it has no lock-on mode of its own to be in.
+	if (IsHostKeyDown(kVCSAimKey)) {
+		return true;
+	}
+	// The pad, only where it is not in lock-on - which is the scoped weapons, and exactly the
+	// case where the right stick is steering the camera as the aim.
+	return IsPadButtonDown(kVCSPadAimButton) && !LockOnModeActive();
+}
+
 bool LockOnModeActive() {
-	return g_lockOnMode.load(std::memory_order_relaxed);
+	// The keyboard's manual toggle, unchanged.
+	if (g_lockOnMode.load(std::memory_order_relaxed)) {
+		return true;
+	}
+
+	// And the pad, which aims this way always.
+	//
+	// Expressed as this mode rather than as a mechanism of its own, because it IS this mode: no
+	// Free Aim press, the stick stays movement, the camera stays the game's. Everything already
+	// written against the toggle therefore applies to the pad without being taught that a pad
+	// exists - and there is exactly one place to look when the two ever need to differ.
+	//
+	// The mouse's aim key wins when both are somehow held. Free aim is what a mouse is for, and
+	// reaching for it is the more deliberate of the two acts.
+	if (!IsPadButtonDown(kVCSPadAimButton) || IsHostKeyDown(kVCSAimKey)) {
+		return false;
+	}
+
+	// A SCOPE IS THE EXCEPTION, and it is not a softening of "always lock-on" - it is what the
+	// phrase means when the game has no lock-on to offer. The sniper and the RPG have none: aim
+	// with one and the game scopes in, and the shot follows the camera rather than any target the
+	// game picked. Pinning them to a lock-on that does not exist would not make aiming assisted,
+	// it would leave the right stick dead with a crosshair on screen and nothing able to move it.
+	//
+	// Same shape as the MeleeEquipped rule in FreeAimActive: an automatic, weapon-driven exception
+	// beside the manual toggle.
+	return !ScopedWeaponActive();
 }
 
 }  // namespace VCS
