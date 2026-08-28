@@ -681,6 +681,20 @@ void ImVCSWindow::DrawCamera() {
 		// The gun and the body are separate mechanisms, and conflating them cost a wrong diagnosis -
 		// the body was tracking correctly while the gun stayed pinned to a world point, which from
 		// the outside looked like the body turning the wrong way. Two controls, listed apart.
+		// The one line that says WHY, so an intermittent detach does not have to be reproduced
+		// once per candidate. Anything starting SUPPRESSED means the aim path is off and names
+		// the gate that turned it off.
+		{
+			const char *why = VCS::AimPathStatus(VCS::GetCurrentContext());
+			// PARTIAL earns the warning colour too - it means the game took the aim back and
+			// only the gun is still keeping up.
+			const bool bad = strncmp(why, "SUPPRESSED", 10) == 0 ||
+			                 strncmp(why, "PARTIAL", 7) == 0;
+			ImGui::Text("aim path:");
+			ImGui::SameLine();
+			ImGui::TextColored(bad ? kBadColor : kGoodColor, "%s", why);
+		}
+
 		ImGui::Checkbox("Point the gun at the crosshair", &s.pedAimGun);
 		if (ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("The arm IK aims at a world POSITION, so once the stick stops being fed the gun holds its bearing while the body turns under it. This moves that position onto the crosshair every frame, down the same ray the bullet takes. Only ever moves a DUMMY entity - a real ped in that slot means lock-on, and writing its position would teleport an NPC.");

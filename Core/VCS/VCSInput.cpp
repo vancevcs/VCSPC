@@ -1759,6 +1759,34 @@ bool FreeAimActive(VCSInputContext context) {
 	return !GetState().isAiming.value_or(false);
 }
 
+const char *AimPathStatus(VCSInputContext context) {
+	// Deliberately in the same order the real predicates test, so the answer names the term that
+	// actually short-circuits rather than the first one that happens to be true.
+	if (context != VCSInputContext::Aiming) {
+		return "not aiming";
+	}
+	// The three FreeAimActive gates, in its order.
+	if (LockOnModeActive()) {
+		return "SUPPRESSED: lock-on mode (L toggle, or the pad's aim trigger)";
+	}
+	if (MeleeEquipped()) {
+		return "SUPPRESSED: melee equipped (weaponIndex reads as a melee slot)";
+	}
+	if (GetState().isAiming.value_or(false)) {
+		// Partial since the gun-pointing was moved ahead of this gate: the pose keeps tracking
+		// the crosshair, only the heading write stands down. See PedAimTick.
+		return "PARTIAL: the game is locked on (IsAiming = 1) - gun still tracking";
+	}
+	// Then the two that gate the reticle specifically.
+	if (g_latchTimer > 0) {
+		return "entry latch (establishing a run before Free Aim is pressed)";
+	}
+	if (CameraAimActive(context)) {
+		return "camera aim - mouse drives CameraYaw, nub is free for WASD";
+	}
+	return "reticle - mouse drives the nub";
+}
+
 bool ReticleActive(VCSInputContext context) {
 	if (!FreeAimActive(context)) {
 		return false;

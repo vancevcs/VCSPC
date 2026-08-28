@@ -1297,6 +1297,40 @@ The sections below record how this was approached before that was known. They co
 still-correct findings about the pad layout and the flag, but `usePadStick`, `CameraInputMode`
 and the CLEO route are **not needed for free aim** and should not be reached for first.
 
+### The game takes the lock-on back, and the gun has to keep up
+
+**The symptom, because it is unmistakable once named:** mid-free-aim the character stops physically
+aiming where the crosshair is. The view still turns with the mouse, the shots still land on the
+crosshair, but the pose is stale and the only thing that moves his hands is WASD. After a while it
+fixes itself.
+
+**Confirmed cause:** `IsAiming` goes to 1. VCS re-acquires a lock-on **by itself** when a target
+wanders into range, with nothing the player did asking for it. That turns `FreeAimActive` false,
+`PedAimTick` used to return at that gate, and the gun stopped being pointed - while
+`ContextDrivesCamera` stayed *true*, so the camera carried on following the mouse and the fire hook
+carried on putting the bullet where the crosshair is. It ends when the game loses the target.
+
+**Escaping the lock-on does not work, and this is worth writing down so nobody spends the evening
+on it twice.** The obvious fix is to re-press the game's own Free Aim button on the rising edge of
+`IsAiming` - the pulse that gets you into free aim on entry, fired again. It was built, it was
+correct in shape, and it changed nothing: **the press that enters free aim from a standing start
+does not break a lock the game has already taken.**
+
+**What works is not fighting it.** `PedAimGunTick` now runs *before* the `FreeAimActive` gate, so
+the gun keeps tracking the crosshair through a lock-on the game took on its own. That is safe
+because it was never the write the gate was guarding: the gate protects the HEADING write, which
+fought the game's facing logic during melee lock-on and once came out as reversed movement, and
+that write keeps its stricter condition. The gun works by moving the entity the ped points at, and
+`CanMoveAimTarget` already refuses anything the world owns - so a real lock-on onto a person is
+left alone, and the case this rescues is the one the debugger showed: the target still the free-aim
+placeholder object, still movable, and simply no longer being moved.
+
+**The debugger names the gate now**, which is what ended this. `AimPathStatus` prints one line in
+the Camera tab - `camera aim`, `reticle`, or which specific term of `FreeAimActive` /
+`ContextDrivesCamera` is suppressing the path. Four candidates produce an identical symptom, and
+guessing between them costs a play session each time; the line costs nothing and answered it
+immediately. Reach for it before theorising about any aim complaint.
+
 ### Mouse free aim — how it actually works
 
 **This section replaces an earlier one that concluded VCS has no free aim for ordinary weapons.

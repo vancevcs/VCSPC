@@ -340,6 +340,18 @@ size_t HeldHostKeyCount();
 // once when that stops, so a real pad still works when the keyboard isn't being used.
 void ApplyAnalog(VCSInputContext context);
 
+// Why the aim path is doing what it is doing, in one short phrase, for the debugger.
+//
+// FreeAimActive and ContextDrivesCamera are several terms between them, and ANY one of them turns
+// the whole aim path off - PedAimTick stops pointing the gun, the nub goes back to WASD, and the
+// mouse is handed to the camera. In play that reads as the gun and body detaching from the
+// crosshair, with nothing on screen to say which term did it.
+//
+// Two of the answers are healthy ("camera aim", "reticle"); the rest each name the specific gate
+// that is suppressing it. Reading one line beats reproducing an intermittent bug repeatedly and
+// guessing between four candidates, which is exactly what this was written after.
+const char *AimPathStatus(VCSInputContext context);
+
 // Whether the analog stick is currently the aiming RETICLE rather than movement.
 //
 // True only in the Aiming context AND while the game reports free aim. Both halves are needed

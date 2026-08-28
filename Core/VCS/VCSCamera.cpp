@@ -1611,11 +1611,34 @@ void PedAimTick(VCSInputContext context) {
 	// states where the player's facing is not ours to drive.
 	if (!ContextDrivesCamera(context) || context != VCSInputContext::Aiming)
 		return;
-	if (!FreeAimActive(context))
-		return;
 
+	// THE GUN RUNS WHETHER OR NOT THE GAME THINKS IT IS LOCKED ON, and that ordering is the fix
+	// for a long-standing complaint rather than a tidy-up.
+	//
+	// VCS re-acquires a lock-on by itself when a target wanders into range, mid-free-aim, and
+	// nothing the player did asked for it. IsAiming goes to 1, FreeAimActive turns false, and
+	// this function used to return right here - so the gun stopped being pointed while the camera
+	// carried on following the mouse and the bullet carried on following the camera. What the
+	// player sees is the character keeping some stale pose while the crosshair moves away from
+	// him, shots still landing on the crosshair, and the whole thing fixing itself when the game
+	// loses the target again.
+	//
+	// Escaping the lock-on instead was tried first - re-press the game's own Free Aim button on
+	// the rising edge of IsAiming - and it does not work: the press that enters free aim from a
+	// standing start does not break a lock the game has already taken.
+	//
+	// Running the gun anyway is safe because PedAimGunTick is not the write the gate was guarding.
+	// That gate protects the HEADING write below, which fought the game's own facing logic during
+	// melee lock-on and once came out as reversed movement. The gun works by moving the entity the
+	// ped points at, and it already declines any target the world owns - CanMoveAimTarget refuses
+	// peds and vehicles, so a genuine lock-on onto a person is left entirely alone. The case this
+	// rescues is the one the debugger showed: the target is still the free-aim placeholder object,
+	// still movable, and simply stopped being moved.
 	PedAimGunTick();
 
+	// The heading write keeps the stricter gate, unchanged and for the reason above.
+	if (!FreeAimActive(context))
+		return;
 	if (!g_settings.pedFollowAim)
 		return;
 	if (!IsAddrSet(VCSAddr::PedHeading) || !IsAddrSet(VCSAddr::CameraYaw))
