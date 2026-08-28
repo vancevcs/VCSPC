@@ -357,6 +357,14 @@ struct AimGameResponse {
 	bool live = false;      // false = could not read the game; the caller falls back
 };
 
+// KNOWN GAP, deliberately left: this uses the X axis scale for BOTH axes, and the game does not.
+// The accessors at 0x0898de90 and 0x0898df08 multiply by CPad+0xd0 and CPad+0xd4 respectively,
+// under the same weapon-mode test, and on foot those read 1.05 and 0.50 - so Y is modelled about
+// twice as responsive as it really is.
+//
+// Not fixed here because it is not what the drive-by needed in the end (that bypasses this
+// function entirely, see driveBySensitivity) and because correcting it moves on-foot vertical aim
+// by a factor of two, which is a retune of a path that currently works rather than a bug fix.
 static AimGameResponse ReadAimResponse(float timeStep) {
 	AimGameResponse r;
 
@@ -694,6 +702,46 @@ void AimDeflectionFromMouse(float dx, float dy, float scale, bool invertY,
 		scoped = weaponMode && (*weaponMode == 7 || *weaponMode == 8);
 	}
 
+	// The drive-by bypasses the model for a reason the scoped weapons do not share, so it gets its
+	// own test rather than joining theirs: they skip it because they were already linear, this
+	// skips it because the mechanism the model inverts is not running. Both camera modes, matching
+	// DriveByAimActive - see driveBySensitivity for the 551 samples of zeroed increments that put
+	// this here.
+	bool driveBy = false;
+	if (g_settings.driveByMouseAim) {
+		const std::optional<u32> camMode = ReadAddrU32(VCSAddr::CamMode);
+		const std::optional<u32> weaponMode = ReadAddrU32(VCSAddr::WeaponCamMode);
+		driveBy = camMode && weaponMode && *camMode == 11 && *weaponMode == 11;
+	}
+
+	if (driveBy) {
+		g_aimX.Reset();
+		g_aimY.Reset();
+		const float k = g_settings.driveBySensitivity;
+
+		// Divide the game's own axis scale back out, so a sideways sweep and a vertical one cover
+		// the same ground. Guarded rather than trusted: these are read from the game and a zero
+		// would divide the aim into infinity, which is a stuck stick rather than a fast one.
+		float sx = 1.0f, sy = 1.0f;
+		if (g_settings.driveByMatchAxes) {
+			const std::optional<float> rx = ReadAddrFloat(VCSAddr::AimAxisScale);
+			const std::optional<float> ry = ReadAddrFloat(VCSAddr::AimAxisScaleY);
+			if (rx && *rx > 0.01f && *rx < 10.0f) sx = *rx;
+			if (ry && *ry > 0.01f && *ry < 10.0f) sy = *ry;
+		}
+
+		g_aimOutX = dx * k / sx;
+		g_aimOutY = -dy * k * ySign / sy;
+		if (g_aimOutX > 1.0f) g_aimOutX = 1.0f;
+		if (g_aimOutX < -1.0f) g_aimOutX = -1.0f;
+		if (g_aimOutY > 1.0f) g_aimOutY = 1.0f;
+		if (g_aimOutY < -1.0f) g_aimOutY = -1.0f;
+		g_aimSolvedFrame = g_aimFrame;
+		*outX = g_aimOutX;
+		*outY = g_aimOutY;
+		return;
+	}
+
 	if (scoped) {
 		g_aimX.Reset();
 		g_aimY.Reset();
@@ -805,7 +853,11 @@ static bool ContextDrivesCamera(VCSInputContext context) {
 	if (context == VCSInputContext::Aiming && LockOnModeActive()) {
 		return false;
 	}
-	return ContextWantsMouse(context) && !ReticleActive(context);
+	// The drive-by stands the camera down for exactly the reason free aim does, and it is worth
+	// saying plainly because the context here is InVehicle, where mouse look is otherwise right:
+	// the nub is the aim in that seat, so a delta spent on the camera turns the view and leaves
+	// the gun behind. That is the reported bug, in one line.
+	return ContextWantsMouse(context) && !ReticleActive(context) && !DriveByAimActive(context);
 }
 
 bool HandleMouseDelta(float dx, float dy) {
@@ -1004,8 +1056,10 @@ void CameraTick(VCSInputContext context) {
 	// The exception is a tick where the aim owns the delta and is deliberately HOLDING it until
 	// the game's next logic frame. Draining it here would be the same input loss the holding
 	// exists to prevent, just moved one function along.
+	// The drive-by holds the delta on the same terms the reticle does - it goes through the same
+	// model, so it has the same gap between our tick rate and the game's logic frame to bridge.
 	float dx = 0.0f, dy = 0.0f;
-	if (!ReticleActive(context) || AimModelReady()) {
+	if ((!ReticleActive(context) && !DriveByAimActive(context)) || AimModelReady()) {
 		TakeMouseDelta(&dx, &dy);
 	}
 

@@ -890,6 +890,59 @@ void ImVCSWindow::DrawCamera() {
 			"steering the camera alone splits them - it looks right and misses.\n\n"
 			"Uses the Sensitivity slider at the top, not Aim sensitivity.");
 	}
+
+	ImGui::Checkbox("Mouse aim in the passenger seat", &s.driveByMouseAim);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip(
+			"The passenger drive-by aims with the NUB, and it is a third aim mechanism: no aim "
+			"control is held, the context is InVehicle rather than Aiming, and both aim flags "
+			"read 0 throughout. So every other gate here concludes 'not aiming', the mouse goes "
+			"to the camera as it does while driving, and the gun is left to A and D.\n\n"
+			"On, the mouse takes the nub instead, through the same response model free aim uses - "
+			"which already had this camera's numbers, since mode 11 was measured with the rest.\n\n"
+			"Recognised by the weapon camera and the active camera both being mode 11. Watch the "
+			"aim path readout: it says 'drive-by' while this is live.");
+	}
+	if (s.driveByMouseAim) {
+		ImGui::SliderFloat("Drive-by sensitivity", &s.driveBySensitivity,
+			0.002f, 0.30f, "%.3f stick/count", ImGuiSliderFlags_Logarithmic);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Stick deflection per mouse count in the passenger seat. Proportional, not "
+				"modelled - measured across 551 samples of a real drive-by, BOTH camera aim "
+				"increments read exactly 0.000000 the whole time, so the mechanism the response "
+				"model inverts is simply not running in this mode.\n\n"
+				"That is what made the axes uneven: the model's rate goes as the SQUARE of the "
+				"game's axis scale, which is 2.5 on X against 0.5 on Y, so it asked for five "
+				"times less deflection sideways than vertically.");
+		}
+		ImGui::Checkbox("Mouse aim a mounted cannon", &s.cannonMouseAim);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"The fire truck's water cannon, which the game asks you to aim with the analog "
+				"stick. A and D already reach its yaw - they are the steering row, and steering "
+				"is the stick's X - but nothing drives the stick's Y in a vehicle, because W and "
+				"S are the pedals. So the cannon could turn but never rise.\n\n"
+				"This takes the Y axis ONLY, and never X, so steering cannot break. Gated on the "
+				"vehicle model rather than on any 'is it spraying' flag - IsFreeAiming looked "
+				"like one and measured out as a ~15 second timer that runs while you drive.");
+		}
+		if (s.cannonMouseAim) {
+			ImGui::SliderFloat("Cannon elevation sensitivity", &s.cannonSensitivity,
+				0.002f, 0.15f, "%.3f stick/count", ImGuiSliderFlags_Logarithmic);
+		}
+		ImGui::Checkbox("Match drive-by aim axes", &s.driveByMatchAxes);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip(
+				"Divide the game's own 2.5 / 0.5 axis scale back out, so a sideways sweep and a "
+				"vertical one cover the same distance per mouse count. One `03E9 2.5 0.5` in the "
+				"retail script sets that up - wide horizontally, damped vertically, which suits a "
+				"thumbstick and not a mouse.\n\n"
+				"Off gives the game's own balance. This assumes the game's consumer is linear in "
+				"the scaled axis, which is the one part here that is reasoned rather than "
+				"measured - so it is a switch rather than a constant.");
+		}
+	}
 	ImGui::Checkbox("Camera aim for ALL weapons (DISPROVEN - see tooltip)", &s.mouseLookInFreeAim);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(

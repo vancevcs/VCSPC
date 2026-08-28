@@ -388,6 +388,34 @@ bool FreeAimActive(VCSInputContext context);
 
 bool ReticleActive(VCSInputContext context);
 
+// Whether the player is riding shotgun with a weapon out - the passenger drive-by, which is a
+// third aim mechanism beside lock-on and free aim, and behaves like neither.
+//
+// What makes it its own case is that NOTHING the layer already asked about is true during it. The
+// player holds no aim control, because the game gives the mode for the whole ride rather than on
+// request; the context is InVehicle, not Aiming; and both IsAiming and IsFreeAiming read 0
+// throughout. So every existing gate concluded "not aiming", the mouse went to the camera as it
+// does while driving, and the nub - which is what this mode aims with - was left to A and D.
+//
+// Recognised from the camera instead: the weapon camera and the active camera both in mode 11.
+// See the definition for why it takes both, and VCSAddresses.h for the `03E9 2.5 0.5` that set
+// this up in the retail script.
+//
+// Emu thread only - it reads game memory.
+bool DriveByAimActive(VCSInputContext context);
+
+// Whether the player is in the vehicle whose mounted cannon the stick aims - the fire truck.
+//
+// A second in-vehicle stick-aim state, and it shares nothing with the drive-by: no weapon camera,
+// no axis scale, no aim flag that means anything. Only the vehicle model identifies it, which is
+// the point rather than a shortcut - see cannonMouseAim for the flag that looked like a spray
+// signal and measured out as a 15-second timer.
+//
+// This gates the stick's Y axis ONLY. X stays steering in every vehicle, always.
+//
+// Emu thread only - it reads the decoded state.
+bool CannonAimActive(VCSInputContext context);
+
 // Whether the stick applied on the most recent tick came from the mouse (the reticle) rather
 // than from WASD. Purely for the debugger, which otherwise can't tell the two apart.
 bool AnalogIsReticle();

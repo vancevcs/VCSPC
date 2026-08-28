@@ -1582,7 +1582,14 @@ void ApplyAnalog(VCSInputContext context) {
 		return;
 	}
 
-	if (ReticleActive(context)) {
+	// The drive-by joins the reticle here rather than getting a branch of its own, because it is
+	// the same statement about the nub: it is the aim, not movement, so the mouse belongs on it.
+	// Everything below - the model, the frame pacing, the clamp - applies unchanged, and the one
+	// thing that differs is already handled where it belongs, in ReadAimResponse's per-axis scale.
+	//
+	// A passenger cannot steer, so nothing is being taken away by A and D standing down here. They
+	// were only ever moving the gun because the gun is what this stick does in that seat.
+	if (DriveByAimActive(context) || ReticleActive(context)) {
 		// The reticle. In free aim the stick stops being movement and becomes "where the
 		// crosshair goes", which is what the game shoots along - so this is the one place the
 		// mouse has to end up on the stick rather than on the camera address.
@@ -1638,6 +1645,30 @@ void ApplyAnalog(VCSInputContext context) {
 		return;
 	} else {
 		g_analogIsReticle = false;
+
+		// The mounted cannon's elevation, on the stick's Y axis - the one channel a vehicle
+		// otherwise leaves dead, since W and S are the pedals and live in the button table.
+		//
+		// Taken here rather than peeked because ApplyAnalog runs BEFORE CameraTick, so a peek
+		// would return the previous frame's movement. The horizontal half is handed straight back
+		// so the camera still turns with the mouse: only the vertical is spent on the cannon,
+		// which is the axis the player has no other way to reach.
+		//
+		// Computed before the key mutex is taken - TakeMouseDelta and AddLookDelta both want the
+		// delta lock, and nesting the two in one order here would be the only place that does.
+		float cannonY = 0.0f;
+		if (CannonAimActive(context)) {
+			float mdx = 0.0f, mdy = 0.0f;
+			TakeMouseDelta(&mdx, &mdy);
+			if (mdx != 0.0f) {
+				AddLookDelta(mdx, 0.0f);
+			}
+			const VCSCameraSettings &cs = CameraSettings();
+			cannonY = -mdy * cs.cannonSensitivity * (cs.aimInvertY ? -1.0f : 1.0f);
+			if (cannonY > 1.0f) cannonY = 1.0f;
+			if (cannonY < -1.0f) cannonY = -1.0f;
+		}
+
 		// The model keeps state between frames, so it has to be dropped when aiming stops -
 		// otherwise the next free aim opens by cancelling a glide that ended long ago, and jumps.
 		//
@@ -1715,6 +1746,10 @@ void ApplyAnalog(VCSInputContext context) {
 				break;
 			}
 		}
+
+		// After the pad, because the pad's in-vehicle row assigns X and leaves Y alone - so the
+		// two do not compete, and a player on a pad still gets the cannon from the mouse.
+		y += cannonY;
 	}
 
 	const bool wantsStick = x != 0.0f || y != 0.0f;
@@ -1763,6 +1798,47 @@ void ApplyAnalog(VCSInputContext context) {
 bool ScopedWeaponActive() {
 	const std::optional<u32> mode = ReadAddrU32(VCSAddr::WeaponCamMode);
 	return mode && (*mode == 7 || *mode == 8);
+}
+
+bool DriveByAimActive(VCSInputContext context) {
+	// An aircraft has no drive-by, and on foot is the other mechanism entirely. Restricting this
+	// to InVehicle also keeps it away from the Aiming context, where the reticle already owns the
+	// stick - two aim paths on one nub is the failure ReticleActive warns about.
+	if (context != VCSInputContext::InVehicle) {
+		return false;
+	}
+	if (!CameraSettings().driveByMouseAim) {
+		return false;
+	}
+	// Measured live, in the passenger seat, mid-mission: CamMode 11, WeaponCamMode 11, and the aim
+	// axis scale sitting at exactly the 2.5 / 0.5 that the retail script's single `03E9` call sets
+	// up for a passenger drive-by - see AimAxisScale in VCSAddresses.h, which had that call
+	// decoded long before there was anything to do with it.
+	//
+	// Both modes are required rather than either, and that is the guard that matters: WeaponCamMode
+	// is a property of the WEAPON and outlives the moment it was set, so a stale 11 left behind by
+	// a drive-by that has ended must not be able to take the stick away from steering while the
+	// player is driving. The active camera being mode 11 too is what says the drive-by is now.
+	const std::optional<u32> camMode = ReadAddrU32(VCSAddr::CamMode);
+	const std::optional<u32> weaponMode = ReadAddrU32(VCSAddr::WeaponCamMode);
+	return camMode && weaponMode && *camMode == 11 && *weaponMode == 11;
+}
+
+// The fire truck, whose water cannon a mission asks the stick to aim. Read live from the occupied
+// vehicle: model 194, the same field VehicleClassForModel uses to tell a helicopter from a car.
+static const u32 kVCSCannonVehicleModel = 194;
+
+bool CannonAimActive(VCSInputContext context) {
+	if (context != VCSInputContext::InVehicle) {
+		return false;
+	}
+	if (!CameraSettings().cannonMouseAim) {
+		return false;
+	}
+	// The model, and deliberately nothing else - see cannonMouseAim for the flag that looked like
+	// a spray signal and turned out to be a 15-second timer.
+	const std::optional<u32> model = GetState().vehicleModel;
+	return model && *model == kVCSCannonVehicleModel;
 }
 
 // Whether the mouse should steer the CAMERA rather than the stick.
@@ -1838,6 +1914,16 @@ bool FreeAimActive(VCSInputContext context) {
 const char *AimPathStatus(VCSInputContext context) {
 	// Deliberately in the same order the real predicates test, so the answer names the term that
 	// actually short-circuits rather than the first one that happens to be true.
+	//
+	// The drive-by comes first because it is the one aim path that is not in the Aiming context,
+	// so the blanket "not aiming" below would otherwise be a lie about it - and this line existing
+	// is how the next person sees the mouse is on the nub without reproducing the seat.
+	if (DriveByAimActive(context)) {
+		return "drive-by - mouse drives the nub (passenger seat, cam mode 11)";
+	}
+	if (CannonAimActive(context)) {
+		return "cannon - mouse Y drives the nub's Y, steering keeps X";
+	}
 	if (context != VCSInputContext::Aiming) {
 		return "not aiming";
 	}

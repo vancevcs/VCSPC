@@ -227,6 +227,21 @@ const std::vector<Option> &Options() {
 		addBool(OptionPage::Aiming, "ScopedCameraAim", "Camera aim for sniper and RPG",
 			"Scoped weapons aim by turning the camera, which is what looking down sights is.",
 			&cam.aimScopedCamera);
+		addBool(OptionPage::Aiming, "DriveByMouseAim", "Mouse aim in the passenger seat",
+			"Aim a drive-by with the mouse. Off leaves it on A and D, as the game has it.",
+			&cam.driveByMouseAim);
+		addFloat(OptionPage::Aiming, "DriveBySensitivity", "Drive-by sensitivity",
+			"Only applies in the passenger seat, which aims proportionally rather than through the model.",
+			&cam.driveBySensitivity, 0.005f, 0.2f);
+		addBool(OptionPage::Aiming, "DriveByMatchAxes", "Match drive-by aim axes",
+			"Divide out the game's 2.5 / 0.5 axis scale, so sideways and vertical aim match.",
+			&cam.driveByMatchAxes);
+		addBool(OptionPage::Aiming, "CannonMouseAim", "Mouse aim a mounted cannon",
+			"Raise and lower the fire truck's water cannon with the mouse. Steering is untouched.",
+			&cam.cannonMouseAim);
+		addFloat(OptionPage::Aiming, "CannonSensitivity", "Cannon elevation sensitivity",
+			"Small on purpose - the cannon's vertical travel is short and clamped.",
+			&cam.cannonSensitivity, 0.002f, 0.15f);
 		addFloat(OptionPage::Aiming, "ScopedSensitivity", "Sniper and RPG sensitivity",
 			"Only applies to the two scoped weapons.",
 			&cam.aimScopedSensitivity, 0.005f, 0.2f);

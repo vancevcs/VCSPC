@@ -250,6 +250,77 @@ struct VCSCameraSettings {
 	// amplifying them - but the stick was never the best channel available for them.
 	bool aimScopedCamera = true;
 
+	// Aim the passenger drive-by with the mouse, by giving it the nub.
+	//
+	// A THIRD aim mechanism, and neither of the two above. There is no aim control to hold - the
+	// game puts you in it for as long as you are riding shotgun with a weapon - and both aim flags
+	// stay 0 the whole time, so every gate written against them reads "not aiming" and the mouse
+	// goes to the camera. Measured in the passenger seat during a mission: the camera turned and
+	// the gun did not, and the only thing that moved the gun was A and D, which are the stick.
+	//
+	// The nub IS the aim here, exactly as it is in free aim, so the fix is the same one - spend
+	// the delta on the stick rather than on the camera angle. See DriveByAimActive for how the
+	// state is recognised, and note the response model already knew this camera: mode 11 has been
+	// in its table, with its own alpha and rate, since it was first measured.
+	bool driveByMouseAim = true;
+
+	// Deflection per count of mouse movement in a drive-by. Proportional, NOT through the response
+	// model, and that is a correction rather than a shortcut.
+	//
+	// The model inverts one specific mechanism: the weapon camera's smoothed increment, CCam+0x130
+	// and +0x124, which it reads back every frame to cancel the momentum it predicted. Mode 11 was
+	// in its table of modes that own those fields, so this looked settled. Measured instead, across
+	// 551 samples of an actual drive-by: BOTH increments read exactly 0.000000 the entire time.
+	// The mode-11 aim does not go through that integrator at all, so there was nothing there to
+	// invert and the solver was answering a question the game never asked.
+	//
+	// What that cost was an axis imbalance, and the numbers say why it landed where it did. The
+	// model's rate goes as the SQUARE of the game's axis scale, and the drive-by runs 2.5 on X
+	// against 0.5 on Y - a 25x ratio, so it asked for 5x less deflection on X than on Y for the
+	// same rotation. Reported exactly that way: Y smooth, X "possible but hard".
+	//
+	// Proportional has no such term. The per-axis scale is still divided out below, so a
+	// horizontal sweep and a vertical one cover the same distance per count.
+	float driveBySensitivity = 0.045f;
+
+	// Divide the game's own aim axis scale back out, so the two axes match.
+	//
+	// The drive-by is set up by one `03E9 2.5 0.5` in the retail script - wide horizontally,
+	// damped vertically - and those land on the axis before the game consumes it. Left in, the
+	// same mouse movement travels five times further sideways than up.
+	//
+	// On by default because a mouse has no reason to inherit a thumbstick's asymmetry, and worth
+	// keeping switchable because it assumes the consumer is LINEAR in the scaled axis, which is
+	// the one thing here that is reasoned rather than measured. Off gives the game's own balance.
+	bool driveByMatchAxes = true;
+
+	// Aim a mounted cannon's ELEVATION with the mouse - the fire truck's water cannon.
+	//
+	// A second in-vehicle state where the stick is an aim, and it looks nothing like the drive-by:
+	// no weapon camera at all (`WeaponCamMode` reads 0), the camera stays in one mode throughout,
+	// and the axis scale is left at its default. The game's own hint says it outright - "while it
+	// is spraying, use the analog stick to adjust the cannon's aim".
+	//
+	// Only the Y axis is taken, and that is the whole safety argument rather than a limitation.
+	// Vertical is the half that is missing - A and D already reach the cannon's yaw, because they
+	// are the steering row and steering is the stick's X - while X is never touched, so driving
+	// this truck cannot break no matter what state the mission is in. Measured: with the stick
+	// held at full Y, exactly one field in the whole vehicle moved, the cannon's pitch.
+	//
+	// There is deliberately NO "is it spraying" test, because no trustworthy one exists.
+	// `IsFreeAiming` was the obvious candidate and was measured oscillating 0/1 on a ~15 second
+	// timer while merely driving, with the cannon stationary - gating on it would have taken the
+	// stick away from steering twice a minute. The vehicle model is the gate instead: it cannot
+	// be wrong, and being wrong here costs the player their steering.
+	bool cannonMouseAim = true;
+
+	// Deflection per count of mouse movement for the cannon's elevation. Proportional, like the
+	// drive-by and for the same reason - there is no camera increment here to model.
+	//
+	// Small because the travel is small: the pitch moved 0.25 in two seconds at FULL deflection
+	// and appears to clamp around 0.05, so this is a fine adjustment rather than a sweep.
+	float cannonSensitivity = 0.02f;
+
 	// Deflection per count of mouse movement for the above. Not radians - this path does not model
 	// the game's response, it just pushes the stick in proportion, so the units are the old ones.
 	//
