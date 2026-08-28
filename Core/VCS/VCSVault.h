@@ -236,6 +236,7 @@ struct VCSVaultDebug {
 	u64 nativeSilent = 0;         // how many it never answered at all
 	u64 nativeForced = 0;         // how many ran on a struct we filled in after it refused
 	u64 nativeStillborn = 0;      // and how many of those never engaged the climb at all
+	u64 splashesSilenced = 0;     // and how many water splashes the climb was talked out of
 
 	// Why the last vault did or didn't get the game's animation, in words. Sticky, unlike `reject`
 	// above it: that one is rewritten by the next probe within a frame of the vault ending, which
@@ -246,5 +247,20 @@ const VCSVaultDebug &VaultDebugState();
 
 // Drop any vault in progress and disarm. Called when the game state goes away underneath us.
 void VaultReset();
+
+// The game's climb-out is the one it plays in the water, so it splashes partway through - on dry
+// land as readily as in the sea, because nothing on that path ever had reason to check. These
+// three silence it for the climbs this fork asks for, and only those: a real swim to a quay still
+// sounds exactly as it always did. See kVCSPedClimbSplashCall for the site and the mechanism.
+//
+// Installed from VCS::Tick rather than from Init for the reason the fire hook is - Init runs
+// before the EBOOT is loaded - and self-guards on already-installed and on finding the expected
+// instruction, so retrying every tick costs one compare.
+void InstallClimbSplashHook();
+void RemoveClimbSplashHook();
+
+// The hook body. Referenced by the replacement table in Core/HLE/ReplaceTables.cpp, which is the
+// only reason it is not static.
+int Hook_vcs_climb_splash();
 
 }  // namespace VCS

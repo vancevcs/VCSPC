@@ -16,7 +16,11 @@
 
 #include "Core/VCS/VCSVault.h"
 
+#include "Core/HLE/HLE.h"
+#include "Core/HLE/ReplaceTables.h"
+#include "Core/MIPS/MIPS.h"
 #include "Core/VCS/VCSAddresses.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSWorld.h"
 
@@ -90,6 +94,12 @@ static u64 g_nativeSilent = 0;
 static u64 g_nativeForced = 0;
 static u64 g_nativeStillborn = 0;
 
+// The climb's water splash, and whether the hook that swallows it is in place. Counted for the
+// same reason every other native outcome is: a count stuck at zero while vaults animate is a hook
+// that never installed, which looks nothing like a hook that installed and had no work to do.
+static u64 g_splashesSilenced = 0;
+static bool g_splashHookInstalled = false;
+
 // Whether the climb we are watching is one we forced, and whether the ped ever actually entered
 // the climb state. Both exist for the same case: a forced struct the game accepts at the call and
 // then does nothing with. Without them that reads as a vault which simply never happened, and the
@@ -151,6 +161,7 @@ void VaultReset() {
 	g_debug.nativeSilent = g_nativeSilent;
 	g_debug.nativeForced = g_nativeForced;
 	g_debug.nativeStillborn = g_nativeStillborn;
+	g_debug.splashesSilenced = g_splashesSilenced;
 	g_debug.lastNative = g_lastNative;
 }
 
@@ -495,6 +506,7 @@ void VaultTick(VCSInputContext context) {
 	g_debug.nativeSilent = g_nativeSilent;
 	g_debug.nativeForced = g_nativeForced;
 	g_debug.nativeStillborn = g_nativeStillborn;
+	g_debug.splashesSilenced = g_splashesSilenced;
 	g_debug.lastNative = g_lastNative;
 	g_debug.probing = g_probeInFlight;
 
@@ -680,6 +692,81 @@ void VaultTick(VCSInputContext context) {
 			g_debug.phaseTicks = g_phaseTicks;
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE SPLASH
+//
+// The animation this whole feature wanted is the game's climb OUT OF THE WATER, and partway
+// through it the game plays a splash. On a quay that is the sound of the sea letting go of you;
+// on a fence in Little Haiti it is the sound of a bug. Nothing on that path tests for water, and
+// it never had to - before this fork there was no way to reach the climb on dry land.
+//
+// So the sound is refused rather than the code rewritten. The hook sits on the `jal` that plays
+// it and, when the climb running is one WE asked for, hands PlayOneShot a negative audio entity
+// id - which it drops on its first instruction, before it touches the queue. Everything else about
+// the call is untouched, and a genuine swim to a quay still splashes: that climb is the game's own
+// and this fork's vault knows nothing about it.
+//
+// Gating on "the vault owns this climb" rather than on "the ped is not in water" is deliberate.
+// The in-water flag is recomputed from the world every frame, and by the time the ped has cleared
+// the edge it may well have gone off already - so testing it would silence the very climb the
+// sound was written for. Whose climb it is, this fork knows for certain.
+
+// AskingGame counts as ours as well as Climbing: the answer arrives a tick or two after the game
+// has already begun the climb, and nothing says the splash cannot land inside that gap.
+static bool VaultOwnsClimb() {
+	return g_phase == VaultPhase::AskingGame || g_phase == VaultPhase::Climbing;
+}
+
+int Hook_vcs_climb_splash() {
+	if (!IsActive() || !g_settings.enabled || !VaultOwnsClimb()) {
+		return 0;
+	}
+
+	// PlayOneShot's first test on the entity is `bltz $a1` - see kVCSPedClimbSplashCall. $a1 was
+	// loaded two instructions ago and nothing touches it in the delay slot, so this is the value
+	// the call is about to receive.
+	PARAM(1) = 0xFFFFFFFF;
+	g_splashesSilenced++;
+	return 0;
+}
+
+void InstallClimbSplashHook() {
+	if (g_splashHookInstalled || !IsActive()) {
+		return;
+	}
+
+	const int index = GetReplacementFuncIndexByName("vcs_climb_splash");
+	if (index < 0) {
+		WARN_LOG(Log::HLE, "VCS: no replacement entry named vcs_climb_splash");
+		return;
+	}
+
+	// Never patch an address without first seeing the instruction that was measured there. Early
+	// ticks legitimately find nothing, because the module has not been loaded yet - so this is a
+	// "try again next tick", not a failure.
+	auto op = ReadU32(kVCSPedClimbSplashCall);
+	if (!op || *op != kVCSPedClimbSplashOp) {
+		return;
+	}
+
+	if (WriteReplaceInstructionAt(kVCSPedClimbSplashCall, index)) {
+		// The JIT may already have compiled the block this lives in, and would go on running the
+		// original instruction out of it.
+		currentMIPS->InvalidateICache(kVCSPedClimbSplashCall, 4);
+		g_splashHookInstalled = true;
+		INFO_LOG(Log::HLE, "VCS: climb splash hook installed at %08x", kVCSPedClimbSplashCall);
+	}
+}
+
+void RemoveClimbSplashHook() {
+	if (!g_splashHookInstalled) {
+		return;
+	}
+	RestoreReplacedInstruction(kVCSPedClimbSplashCall);
+	currentMIPS->InvalidateICache(kVCSPedClimbSplashCall, 4);
+	g_splashHookInstalled = false;
 }
 
 }  // namespace VCS

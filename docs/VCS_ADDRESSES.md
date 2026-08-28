@@ -468,6 +468,52 @@ ledge found and the ledge climbed could differ.
 animation.** The search is the game's, so it can decline a wall this fork's own probe was happy
 with; the written-position motion is the fallback when it does.
 
+### The splash the climb-out makes, and how it is refused
+
+The climb-out is the **swimming** pull-up, and partway through it the game plays a water splash.
+Nothing on that path tests for water, because before this fork there was no way to reach the climb
+on dry land — so every vault over a fence made the sound of someone getting out of the sea.
+
+It is one call, in the anim finish callback at `0x08905824`, on the branch taken when the climb
+stage goes 1 → 2:
+
+```
+08905914  lw    a1, 0x60(s1)      ; the ped's audio entity id
+0890591c  addiu a0, gp, 0x1e58    ; DMAudio
+08905920  jal   0x08a05f80        ; <- the call
+08905924  ori   a2, zero, 0x18    ; sound 24
+```
+
+| what | address |
+|---|---|
+| the climb-out's splash call | `0x08905920` (`jal 0x08a05f80`, opcode `0x0E2817E0`) |
+| `DMAudio::PlayOneShot(index, sound)` — a two-instruction wrapper | `0x08a05f80` |
+| `cAudioManager::PlayOneShot(this, index, sound, vol)` | `0x089b83c0` |
+| the ped one-shot queue, per audio entity | manager `+0x187a`, stride `0x38` |
+| `cAudioManager::ProcessPedOneShots` and its jump table | `0x088d4c8c`, table at `0x08b7b468`, ids `0x18`–`0xec` |
+
+**Sound 24 is the splash, established rather than assumed.** The ped code at `0x08927740` plays
+the same id and plays it *only* inside `if (ped->0xEC & 0x100)` — the in-water flag. The physics
+and vehicle code play it too (`0x088a5db8`, `0x08837b14`), which is what a general "something
+entered the water" sound looks like. The audio manager's case for it (`0x088d4dac`) is a single
+sample, `0xae` at 14000 Hz, with no surface lookup and no variants — nothing about it is
+climb-specific.
+
+**The suppression is a refusal, not a patch.** `PlayOneShot`'s first test on the entity is
+`bltz $a1`: a negative audio entity id is dropped before it touches the queue. So the hook — a
+`REPFLAG_HOOKENTER` replacement at `0x08905920`, installed by address exactly as the fire hook is
+— writes `-1` into `$a1` when the climb running is one the vault asked for, and the call runs to a
+no-op. The game's own instruction is never rewritten, and a genuine swim to a quay still splashes.
+
+Gating on *whose climb it is* rather than on the in-water flag is deliberate: the flag is
+recomputed from the world every frame, so by the time the ped has cleared the edge it may already
+have gone off, and testing it would silence the very climb the sound was written for.
+
+**Found by disassembly, offline, in one pass** — the debug string
+`set voice: voice=%d sfx=%d bank=%d addr=%x length=%d` at `0x08b7400c` is what located the audio
+module to begin with; from there the queue offset `0x187a` gave `PlayOneShot`, and listing every
+call site with its constant sound id gave both the splash and the proof of what it is.
+
 ### The weapon fire path — where the shot is actually resolved
 
 The target for the free-aim work: re3 and reVC do free aim entirely at the fire site, by

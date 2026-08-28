@@ -139,6 +139,7 @@ void Shutdown() {
 	CameraReset();
 	// Put the game's own instruction back before anything else tears down.
 	RemoveFireHook();
+	RemoveClimbSplashHook();
 	VaultReset();
 	RemoveWorldQuery();
 
@@ -173,6 +174,10 @@ void Tick() {
 	// feature. Nothing gives the block back until shutdown; a call could still be in flight.
 	if (VaultSettings().enabled) {
 		InstallWorldQuery();
+		// And the hook that keeps the climb-out's water splash off dry land. It takes nothing from
+		// the game and writes one instruction, but it is only ever about vaulting - so it goes on
+		// the same switch.
+		InstallClimbSplashHook();
 	}
 
 	// Decode first, then map - the context depends on what we just read.

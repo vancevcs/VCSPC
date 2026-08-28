@@ -1397,6 +1397,15 @@ void ImVCSWindow::DrawVault() {
 			refused, never, silent, stillborn);
 	}
 
+	// The climb-out is the game's SWIMMING one, and it splashes partway through. This counts the
+	// ones that were talked out of it - see "THE SPLASH" in Core/VCS/VCSVault.cpp. Zero while
+	// vaults are animating means the hook never installed, which is a different thing entirely
+	// from a hook with nothing to do.
+	ImGui::Text("Splashes silenced:");
+	ImGui::SameLine();
+	ImGui::TextColored(d.splashesSilenced > 0 ? kGoodColor : kUnsetColor, "%llu",
+		(unsigned long long)d.splashesSilenced);
+
 	// And why the LAST one went the way it did. Sticky, unlike the reject line above - that one is
 	// rewritten by the next probe a frame after the vault ends, which used to put this answer out
 	// of reach at exactly the moment it was wanted.

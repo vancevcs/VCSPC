@@ -34,6 +34,7 @@
 #include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/HLE/ReplaceTables.h"
 #include "Core/VCS/VCSFireHook.h"
+#include "Core/VCS/VCSVault.h"
 #include "Core/HLE/FunctionWrappers.h"
 #include "Core/HLE/sceDisplay.h"
 
@@ -1663,6 +1664,9 @@ static const ReplacementTableEntry entries[] = {
 	// matched by hash - see Core/VCS/VCSFireHook.cpp. Inert for every other game.
 	{ "vcs_weapon_raycast", &VCS::Hook_vcs_weapon_raycast, 0, REPFLAG_HOOKENTER },
 	{ "vcs_weapon_raycast_done", &VCS::Hook_vcs_weapon_raycast_done, 0, REPFLAG_HOOKENTER },
+	// And the water splash the game plays partway through its climb-out, which a vault on dry
+	// land has no business making - see Core/VCS/VCSVault.cpp. Also inert for every other game.
+	{ "vcs_climb_splash", &VCS::Hook_vcs_climb_splash, 0, REPFLAG_HOOKENTER },
 	// This is actually used in other games, not just Dissidia.
 	{ "dissidia_recordframe_avi", &Hook_dissidia_recordframe_avi, 0, REPFLAG_HOOKENTER },
 	{ "brandish_download_frame", &Hook_brandish_download_frame, 0, REPFLAG_HOOKENTER },

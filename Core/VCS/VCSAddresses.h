@@ -135,6 +135,35 @@ inline constexpr u32 kVCSPedSetClimbTarget = 0x0890F6EC;
 inline constexpr u32 kVCSPedStateOffset = 0x8B4;   // 44 while climbing out, 1 standing
 inline constexpr u32 kVCSPedClimbStageOffset = 0x1D9;   // 0, then 1..4 through the pull-up
 
+// THE SPLASH, and why a vault on dry land made one.
+//
+// The climb-out is the SWIMMING pull-up, so the animation plays a water splash partway through -
+// and nothing on that path asks whether there is any water, because until this fork existed there
+// always was. It sits in the anim finish callback at 0x08905824, on the branch taken when the
+// climb stage goes 1 -> 2, i.e. the moment the ped clears the edge:
+//
+//     08905914  lw    $a1, 0x60($s1)      ; the ped's audio entity id
+//     0890591c  addiu $a0, $gp, 0x1e58    ; DMAudio
+//     08905920  jal   0x08a05f80          ; <- kVCSPedClimbSplashCall
+//     08905924  ori   $a2, $zero, 0x18    ; sound 24
+//
+// Sound 24 is the splash, established rather than assumed: the ped code at 0x08927740 plays the
+// same id and plays it ONLY inside `if (ped->0xEC & 0x100)` - the in-water flag. The climb's call
+// has no such test. The physics and vehicle code play it too (0x088a5db8, 0x08837b14), which is
+// what a general "something entered water" sound looks like. The audio manager turns it into
+// sample 0xae at 14000 Hz, with no surface lookup and no variants.
+//
+// 0x08a05f80 is a two-instruction wrapper onto cAudioManager::PlayOneShot (0x089b83c0), whose
+// first test is `bltz $a1` - a negative audio entity id is dropped before it touches the queue.
+// That is the whole suppression mechanism: the hook hands it -1 and the call runs to a no-op, so
+// the game's own instruction is never rewritten and a genuine climb out of the water still
+// splashes. See "Vaulting" in CLAUDE.md.
+//
+// A `jal` in the middle of a function, like the fire hook's site and unlike kVCSFindGroundZOp2 -
+// nothing branches here, so no JIT block starts here and the live word really is the game's.
+inline constexpr u32 kVCSPedClimbSplashCall = 0x08905920;
+inline constexpr u32 kVCSPedClimbSplashOp = 0x0E2817E0;  // jal 0x08a05f80
+
 // The general form underneath it: ProcessVerticalLine(point1, z2, colPoint, entity, checkBuildings,
 // checkVehicles, checkPeds, checkObjects, checkDummies, ignoreSeeThrough, poly) - point in $a0, the
 // floor height in $f12, and the bools filling $a3 and $t0-$t3. Not called yet. It is the way to

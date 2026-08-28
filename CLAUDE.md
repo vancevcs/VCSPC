@@ -2460,6 +2460,41 @@ right values in them, and setting a field the game writes is not the same as doi
 game does when it writes it. The entry point was a function all along, and the way to a function
 nobody can name is to break on the field and read the stack.
 
+#### The splash, and why a vault on dry land made one
+
+**Status: fixed 2026-08-28.** The animation this whole feature wanted is the climb *out of the
+water*, and partway through it the game plays a splash. On a quay that is the sea letting go of
+you; on a fence in Little Haiti it is a bug. Nothing on that path tests for water, and nothing had
+to — before this fork there was no way to reach the climb on dry land.
+
+One call does it, in the anim finish callback at `0x08905824`, on the branch taken when the climb
+stage goes 1 → 2: `jal 0x08a05f80` at **`0x08905920`**, with sound **24** in the delay slot. See
+"The splash the climb-out makes" in [docs/VCS_ADDRESSES.md](docs/VCS_ADDRESSES.md) for the audio
+addresses and for how 24 was *established* to be the splash rather than assumed — the ped code at
+`0x08927740` plays the same id and plays it only when the in-water flag is set.
+
+**The sound is refused, not the code rewritten.** `cAudioManager::PlayOneShot` drops a negative
+audio entity id on its first instruction, so `Hook_vcs_climb_splash` — a `REPFLAG_HOOKENTER`
+replacement installed by address, exactly as the fire hook is — writes `-1` into `$a1` and lets
+the call run to nothing. That keeps the whole thing to one conditional register write, with the
+game's own instruction still in place and restored at shutdown.
+
+**It is gated on whose climb it is, not on whether the ped is in water**, and the difference
+matters. The in-water flag is recomputed from the world every frame, so by the time the ped has
+cleared the edge it may already have gone off; testing it would silence the very climb the sound
+was written for. The vault knows for certain which climbs are its own, and a genuine swim to a
+quay never goes through it. The Vault tab counts the ones it has silenced, because a count stuck
+at zero while vaults animate is a hook that never installed — which looks nothing like a hook with
+no work to do.
+
+**Where the audio lives, since nothing here had touched it before.** The retail build still
+carries the sound service's debug strings, and
+`set voice: voice=%d sfx=%d bank=%d addr=%x length=%d` at `0x08b7400c` is what located the module
+at all. From there: the ped one-shot queue at manager `+0x187a` (stride `0x38`) gave
+`PlayOneShot` at `0x089b83c0`, and listing every call site with its constant sound id gave both
+the splash and the proof of what it is. All of it offline, from a savestate, with
+`Tools/vcsstatic.py`.
+
 ### Draw distance — ported, measured, removed
 
 **Status: gone.** It was built, it worked, and it changed nothing anyone could see, so it came out
