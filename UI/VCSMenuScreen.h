@@ -28,6 +28,7 @@
 
 namespace VCS {
 struct Option;
+struct VCSListingRow;
 // Legal to forward-declare: a scoped enum has a defined underlying type even undefined.
 enum class OptionPage;
 enum class VCSKeyList;
@@ -118,15 +119,16 @@ private:
 	bool draggingValue_ = false;
 };
 
-// One line of the controls listing: the action on the left, the keys that perform it in columns
-// to the right, and a bar across the row when it is selected.
+// One line of the controls listing: the action on the left, then one column per device - what it
+// is on the keyboard, on an Xbox pad and on a PlayStation one - and a bar across the row when it
+// is selected.
 //
 // A ClickableItem purely for the highlight. There is nothing to click - bindings are not
 // editable here - but a row that does not light up under the mouse or the arrow keys reads as
 // dead, and the game's own Controls screen highlights the same way.
 class VCSBindingRow : public UI::ClickableItem {
 public:
-	VCSBindingRow(std::string_view name, const std::vector<std::string> &keys,
+	explicit VCSBindingRow(const VCS::VCSListingRow &row,
 		UI::LayoutParams *layoutParams = nullptr);
 
 	void Draw(UIContext &dc) override;
@@ -136,7 +138,11 @@ public:
 
 private:
 	std::string name_;
-	std::vector<std::string> keys_;
+	// One cell per device column, already joined into the string that gets drawn. A vector
+	// rather than an array sized by the device count, so this header does not have to pull in
+	// the input layer for one constant - the listing it is built from decides how many there
+	// are, and an empty cell is an action that device cannot do.
+	std::vector<std::string> cells_;
 };
 
 class VCSMenuScreen : public UIBaseDialogScreen {
@@ -173,18 +179,17 @@ private:
 	void AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page);
 	// True for the four pages that list bindings rather than offering anything to change.
 	static bool IsKeyListPage(VCSMenuPage page);
-	// Flip the listing between the two devices. Rebuilds the page, because on a listing page the
-	// rows themselves change; on the switch's own page nothing does, which is why the row there
-	// edits the option directly instead of coming through here.
-	void ToggleListDevice();
-	// Whether the controller caveat belongs on this page. True on the pad's card and on the page
-	// that switched to it, false everywhere else - it is a statement about what the listing
-	// describes, so it has no business on a settings page.
+	// Whether the controller caveat belongs on this page. True on the cards and on the page that
+	// leads to them, false everywhere else - it is a statement about what the listing describes,
+	// so it has no business on a settings page.
 	bool ShowingControllerNote() const;
 	static VCS::VCSKeyList ToKeyList(VCSMenuPage page);
 	// The frame the listing sits in. Sized to the rows actually on the page, so BACK lands just
 	// below it whether the page has eight rows or eighteen.
 	Bounds ListPanel() const;
+	// How tall each row on a listing page is, which depends on how many there are - the card has
+	// to fit the window, since nothing here scrolls.
+	float ListRowHeight(int rowCount) const;
 	// A row that just walks to another page. The commonest thing on this menu by far.
 	void AddPageRow(UI::ViewGroup *parent, const char *label, VCSMenuPage target);
 	void AddBackRow(UI::ViewGroup *parent);
@@ -207,9 +212,11 @@ private:
 
 	VCSMenuPage page_ = VCSMenuPage::Root;
 
-	// How many binding rows the current page drew, so DrawBackground can size the panel behind
-	// them. Zero on every page that is not a listing.
+	// How many binding rows the current page drew, and how tall each one came out, so
+	// DrawBackground can size the panel behind them. Zero rows on every page that is not a
+	// listing.
 	int listRowCount_ = 0;
+	float listRowHeight_ = 0.0f;
 
 	// Rebuilt by CreateViews. Used only to find the focused row for the helper line, so these
 	// are borrowed pointers into the view tree, never owned.

@@ -62,12 +62,6 @@ static Path SettingsPath() {
 	return GetSysDirectory(DIRECTORY_SYSTEM) / "vcs.ini";
 }
 
-// Which device the controls listing is showing. An index rather than the enum, because that is
-// what a Choice option edits and what the ini stores; ListDevice() is the one place the two
-// meanings are joined.
-static int g_listDevice = 0;
-static const char *const kListDeviceLabels[] = { "Keyboard", "Controller" };
-
 const std::vector<Option> &Options() {
 	// Function-local static, not a file-scope table, because the rows point into
 	// CameraSettings() and FireHookSettings() - themselves function-local statics. A file-scope
@@ -285,15 +279,6 @@ const std::vector<Option> &Options() {
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
 			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
 
-		// --- The controls listing ---
-		//
-		// The first non-external Choice, which is why Load/Save grew a case for one. It changes
-		// what a reference card says and nothing about the game, but persisting it is the point:
-		// a player on a pad sets it once and the card stays where they put it.
-		addChoice(OptionPage::Bindings, "ControlsListDevice", "Show controls for",
-			"Which device the controls below are listed for.",
-			&g_listDevice, kListDeviceLabels, ARRAY_SIZE(kListDeviceLabels), 0);
-
 		return opts;
 	}();
 
@@ -396,19 +381,6 @@ void SaveSettings() {
 	}
 
 	ini.Save(SettingsPath());
-}
-
-const Option *ListDeviceOption() {
-	for (const Option &opt : Options()) {
-		if (opt.page == OptionPage::Bindings) {
-			return &opt;
-		}
-	}
-	return nullptr;
-}
-
-VCSListDevice ListDevice() {
-	return g_listDevice == 1 ? VCSListDevice::Controller : VCSListDevice::Keyboard;
 }
 
 void ResetPage(OptionPage page) {

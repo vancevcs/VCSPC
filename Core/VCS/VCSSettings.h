@@ -39,11 +39,6 @@
 
 namespace VCS {
 
-// Defined in VCSInput.h, which owns the listing. Forward-declared so that every file touching a
-// setting does not also pull in the input layer - a scoped enum has a fixed underlying type, so
-// a declaration is all a signature needs.
-enum class VCSListDevice;
-
 enum class OptionType {
 	Bool,
 	Float,
@@ -59,13 +54,6 @@ enum class OptionPage {
 	Aiming,
 	Audio,
 	Graphics,
-
-	// Not a settings page - nothing about the game changes here. It holds the one row that says
-	// which device the controls listing describes, and it is in this table at all because that
-	// is what buys a row that draws, adjusts and persists without a second kind of row existing.
-	// Nothing builds a page from it: VCSMenuScreen asks for the row by name, see
-	// ListDeviceOption.
-	Bindings,
 };
 
 struct Option {
@@ -184,14 +172,5 @@ void SetInt(const Option &opt, int value);
 
 // What the right-hand column shows: "ON", "OFF", "63", or a formatted value.
 std::string ValueText(const Option &opt);
-
-// Which device the controls listing describes, and the row that changes it.
-//
-// The row is fetched rather than built into a page, because it is the one option that belongs on
-// a page made of something else - it sits above the four situations on the bindings page. Legal
-// to hold on to: Options() is a function-local static built once, so a pointer into it outlives
-// any screen.
-const Option *ListDeviceOption();
-VCSListDevice ListDevice();
 
 }  // namespace VCS

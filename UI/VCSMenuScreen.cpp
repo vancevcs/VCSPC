@@ -87,7 +87,12 @@ static constexpr int kSliderBlocks = 10;
 // beautifully and is unreadable at twenty rows - so the listing uses the UI sans, which is what
 // the game does too: its Controls screen is set in a plain condensed face, not in the logo one.
 static const FontStyle kListFont(FontFamily::SansSerif, 25, FontStyleFlags::Default);
+// The height a listing row would like, and the least it will accept. Rows shrink between the two
+// to keep the tallest card on the screen - see ListRowHeight. On Foot is the one that needs it:
+// it is twenty-odd rows and there is no scrolling here, so a row that does not fit is a binding
+// nobody can read.
 static constexpr float kListRowHeight = 40.0f;
+static constexpr float kListRowMinHeight = 28.0f;
 static constexpr float kListTop = 150.0f;      // clear of the title art, which is fixed dp
 static constexpr float kListPadding = 22.0f;
 // The band above the rows, naming the columns. Its own height rather than the panel's padding,
@@ -95,12 +100,30 @@ static constexpr float kListPadding = 22.0f;
 static constexpr float kListHeaderHeight = 46.0f;
 
 // Column positions as fractions of the screen width, because that is what this layout aligns
-// to - the name column on the left, then up to three key columns evenly spaced.
+// to - the name column on the left, then one column per device.
+//
+// Three device columns rather than one, and the card lost its device switch to pay for them. The
+// fractions are spaced to the widest thing each column has to hold: the keyboard's widest cell is
+// two controls joined ("Z / MS WHEEL UP"), the pad columns' is "D-PAD RIGHT" and the PlayStation
+// header itself, which is the longest string on the page.
 static constexpr float kListPanelInsetFrac = 0.023f;
 static constexpr float kListNameFrac = 0.047f;
-static constexpr float kListKeyFrac = 0.315f;
-static constexpr float kListKeyStepFrac = 0.088f;
+static constexpr float kListDeviceFrac[VCS::kVCSListDeviceCount] = { 0.29f, 0.515f, 0.735f };
 static constexpr size_t kListMaxKeys = 3;
+
+// Several controls in one cell are joined rather than given sub-columns of their own, which is
+// what the two-column card did. At four columns there is no width for sub-columns, and a slash is
+// how a controls card has always written "or".
+static const char *const kListKeySeparator = " / ";
+
+// What each column is a column of. The device names have to be complete words - a player looking
+// for the pad they are holding is exactly who this card is for, and "XBOX" alone would not tell
+// a PlayStation owner that the next column along is theirs.
+static const char *const kListHeaders[] = {
+	"ACTION", "KEYBOARD", "XBOX CONTROLLER", "PLAYSTATION CONTROLLER",
+};
+static_assert(ARRAY_SIZE(kListHeaders) == VCS::kVCSListDeviceCount + 1,
+	"the action column, plus one heading per device the listing knows about");
 
 static const uint32_t kListPanelColor = 0x38C8B48D;      // translucent, lifts the list off the art
 static const uint32_t kListNameColor = COLOR(0x9BA6BE);  // muted, the way the original greys labels
@@ -110,8 +133,11 @@ static const uint32_t kListHeaderColor = COLOR(0xC9B48D);
 static const uint32_t kListRuleColor = 0x40FFFFFF;       // hairline under the column names
 
 // Smaller than the rows it labels, so the header reads as a caption rather than as another
-// entry in the table.
-static const FontStyle kListHeaderFont(FontFamily::SansSerif, 20, FontStyleFlags::Default);
+// entry in the table - and smaller than it was, because the widest thing on this page is now a
+// column NAME rather than a binding. "PLAYSTATION CONTROLLER" set at 20 is wider than any cell
+// under it and was the one string that ran past the panel on a narrow window; at 18 the whole
+// band fits from about 900dp up, which is below anything this menu is laid out for.
+static const FontStyle kListHeaderFont(FontFamily::SansSerif, 18, FontStyleFlags::Default);
 
 // The one thing a controller player is owed in writing, and the reason it is a fixed line rather
 // than a row's help text: it is true of the whole card, not of whichever row has focus.
@@ -478,9 +504,22 @@ void VCSMenuItem::Draw(UIContext &dc) {
 	hitBoundsValid_ = true;
 }
 
-VCSBindingRow::VCSBindingRow(std::string_view name, const std::vector<std::string> &keys,
-	UI::LayoutParams *layoutParams)
-	: UI::ClickableItem(layoutParams), name_(name), keys_(keys) {}
+// The joining happens here rather than in Draw: how several controls read as one cell is not a
+// question that changes between frames, and the row is drawn many more times than it is built.
+VCSBindingRow::VCSBindingRow(const VCS::VCSListingRow &row, UI::LayoutParams *layoutParams)
+	: UI::ClickableItem(layoutParams), name_(row.name) {
+	for (size_t i = 0; i < VCS::kVCSListDeviceCount; i++) {
+		std::string cell;
+		const std::vector<std::string> &controls = row.controls[i];
+		for (size_t k = 0; k < controls.size() && k < kListMaxKeys; k++) {
+			if (!cell.empty()) {
+				cell += kListKeySeparator;
+			}
+			cell += controls[k];
+		}
+		cells_.push_back(cell);
+	}
+}
 
 void VCSBindingRow::GetContentDimensions(const UIContext &dc, float &w, float &h) const {
 	w = 100.0f;  // The row fills the screen; the columns inside it are placed from its width.
@@ -506,10 +545,18 @@ bool VCSBindingRow::Touch(const TouchInput &input) {
 }
 
 std::string VCSBindingRow::DescribeText() const {
+	// Read out as "action: keyboard, xbox, playstation", with the empty cells skipped rather than
+	// announced - a screen reader saying "blank" three times is the one place the blank cell
+	// stops carrying information and starts costing time.
 	std::string text = name_;
-	for (size_t i = 0; i < keys_.size() && i < kListMaxKeys; i++) {
-		text += i == 0 ? ": " : ", ";
-		text += keys_[i];
+	bool first = true;
+	for (const std::string &cell : cells_) {
+		if (cell.empty()) {
+			continue;
+		}
+		text += first ? ": " : ", ";
+		text += cell;
+		first = false;
 	}
 	return text;
 }
@@ -527,10 +574,14 @@ void VCSBindingRow::Draw(UIContext &dc) {
 	dc.DrawTextShadow(name_, g_display.dp_xres * kListNameFrac, bounds_.centerY(),
 		kListNameColor, ALIGN_VCENTER | ALIGN_LEFT);
 
-	for (size_t i = 0; i < keys_.size() && i < kListMaxKeys; i++) {
-		const float x = g_display.dp_xres * (kListKeyFrac + kListKeyStepFrac * (float)i);
-		dc.DrawTextShadow(keys_[i], x, bounds_.centerY(), kListKeyColor,
-			ALIGN_VCENTER | ALIGN_LEFT);
+	// An empty cell draws nothing at all, which is the whole point of a card with every device on
+	// it: the gap under XBOX CONTROLLER next to WASD is what says the pad walks with a stick.
+	for (size_t i = 0; i < cells_.size() && i < ARRAY_SIZE(kListDeviceFrac); i++) {
+		if (cells_[i].empty()) {
+			continue;
+		}
+		dc.DrawTextShadow(cells_[i], g_display.dp_xres * kListDeviceFrac[i], bounds_.centerY(),
+			kListKeyColor, ALIGN_VCENTER | ALIGN_LEFT);
 	}
 }
 
@@ -649,11 +700,10 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 	case VCSMenuPage::Aiming: return "aiming";
 	case VCSMenuPage::Audio: return "audio";
 	case VCSMenuPage::Graphics: return "graphics";
-	// The one heading that is not fixed: the page is the same page either way, and what it is a
-	// listing OF is the whole of what the switch changes. Both files are generated by
-	// Tools/vcsmenuart.py, so both have to be in its TITLES.
-	case VCSMenuPage::Bindings:
-		return VCS::ListDevice() == VCS::VCSListDevice::Controller ? "controller" : "keyboard";
+	// Fixed now that the card shows every device at once. It was the one heading that changed
+	// with a setting, naming the device the listing was OF, and there is no longer one device to
+	// name. Generated by Tools/vcsmenuart.py like the rest, so it has to be in its TITLES.
+	case VCSMenuPage::Bindings: return "bindings";
 	case VCSMenuPage::KeysOnFoot: return "onfoot";
 	case VCSMenuPage::KeysVehicle: return "invehicle";
 	case VCSMenuPage::KeysAircraft: return "aircraft";
@@ -668,34 +718,17 @@ void VCSMenuScreen::GoToPage(VCSMenuPage page) {
 	RecreateViews();
 }
 
-void VCSMenuScreen::ToggleListDevice() {
-	const VCS::Option *device = VCS::ListDeviceOption();
-	if (!device) {
-		return;
-	}
-	// Through SetInt rather than by assigning the variable, so this and the row on the bindings
-	// page cannot disagree about clamping or about what a change means.
-	VCS::SetInt(*device, *device->intValue == 0 ? 1 : 0);
-	RecreateViews();
-}
-
 bool VCSMenuScreen::ShowingControllerNote() const {
-	if (VCS::ListDevice() != VCS::VCSListDevice::Controller) {
-		return false;
-	}
+	// On every card now, rather than only on the pad's. The caveat used to be conditional because
+	// the listing was: a player looking at the keyboard column was not being told anything about
+	// a pad. With both pads always on screen, the sentence is true of everything the page shows.
 	return page_ == VCSMenuPage::Bindings || IsKeyListPage(page_);
 }
 
 bool VCSMenuScreen::key(const KeyInput &key) {
-	// Left and right flip the card between the two devices, so they can be compared without
-	// walking back up to the switch that owns them - which is the difference between a switch
-	// and a detour. Only on a listing page: everywhere else those keys belong to the focused
-	// row, and taking them would leave every slider on the settings pages unadjustable.
-	if ((key.flags & KeyInputFlags::DOWN) && IsKeyListPage(page_)
-		&& (key.keyCode == NKCODE_DPAD_LEFT || key.keyCode == NKCODE_DPAD_RIGHT)) {
-		ToggleListDevice();
-		return true;
-	}
+	// Left and right used to flip the card between the two devices here. Nothing claims them on a
+	// listing page any more - there is nothing left to flip - so they go back to the focused row
+	// like everywhere else in this menu.
 
 	// Back on a sub-page means "up one level", not "close the menu" - the page table's parent
 	// link, which is how reVC expresses this too.
@@ -769,22 +802,38 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 void VCSMenuScreen::AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page) {
 	using namespace UI;
 
-	const std::vector<VCS::VCSListingRow> listing =
-		VCS::KeyListing(ToKeyList(page), VCS::ListDevice());
-	for (const VCS::VCSListingRow &row : listing) {
-		parent->Add(new VCSBindingRow(row.name, row.keys,
-			new LinearLayoutParams(FILL_PARENT, kListRowHeight)));
-	}
+	const std::vector<VCS::VCSListingRow> listing = VCS::KeyListing(ToKeyList(page));
 	listRowCount_ = (int)listing.size();
+	listRowHeight_ = ListRowHeight(listRowCount_);
+	for (const VCS::VCSListingRow &row : listing) {
+		parent->Add(new VCSBindingRow(row,
+			new LinearLayoutParams(FILL_PARENT, listRowHeight_)));
+	}
 
 	// Clear of the panel, which is sized to the rows above.
 	parent->Add(new Spacer(kListPadding * 2.0f));
 	AddBackRow(parent);
 }
 
+// How tall a row on a listing page can be, given how many of them there are.
+//
+// The card does not scroll and has no second page, so a listing taller than the window is a
+// listing with bindings nobody can see - which is what a card is for. Rows therefore give up
+// height to fit, down to a floor: past that the text stops being readable and losing the last row
+// off the bottom is the better failure. The tallest card is On Foot, which is also the one a
+// player reads first.
+float VCSMenuScreen::ListRowHeight(int rowCount) const {
+	if (rowCount <= 0) {
+		return kListRowHeight;
+	}
+	const float available =
+		g_display.dp_yres - kBottomBarHeight - kListTop - kListHeaderHeight - kListPadding;
+	return std::clamp(available / (float)rowCount, kListRowMinHeight, kListRowHeight);
+}
+
 Bounds VCSMenuScreen::ListPanel() const {
 	const float inset = g_display.dp_xres * kListPanelInsetFrac;
-	const float height = kListHeaderHeight + (float)listRowCount_ * kListRowHeight + kListPadding;
+	const float height = kListHeaderHeight + (float)listRowCount_ * listRowHeight_ + kListPadding;
 	return Bounds(inset, kListTop, g_display.dp_xres - inset * 2.0f, height);
 }
 
@@ -793,6 +842,7 @@ void VCSMenuScreen::CreateViews() {
 
 	rows_.clear();
 	listRowCount_ = 0;
+	listRowHeight_ = kListRowHeight;
 
 	root_ = new AnchorLayout(new LayoutParams(FILL_PARENT, FILL_PARENT));
 
@@ -855,15 +905,9 @@ void VCSMenuScreen::CreateViews() {
 
 		AddBackRow(list);
 	} else if (page_ == VCSMenuPage::Bindings) {
-		// The switch above the four situations it applies to. An ordinary settings row on a page
-		// that is otherwise all page rows, which is the honest shape: it changes a value, and
-		// they go somewhere. Nothing on this page has to be rebuilt when it moves - the heading
-		// and the caveat are both drawn from the live value every frame - so it edits the option
-		// directly, the way every other settings row does.
-		if (const VCS::Option *device = VCS::ListDeviceOption()) {
-			rows_.push_back(list->Add(new VCSMenuItem(device,
-				new LinearLayoutParams(FILL_PARENT, kRowHeight))));
-		}
+		// Four situations and nothing else. There was a device switch above them, and losing it is
+		// the point rather than a casualty: every card now shows all three devices at once, so
+		// there is no longer a question for the player to answer before reading one.
 		AddPageRow(list, "ON FOOT", VCSMenuPage::KeysOnFoot);
 		AddPageRow(list, "IN VEHICLE", VCSMenuPage::KeysVehicle);
 		AddPageRow(list, "AIRCRAFT", VCSMenuPage::KeysAircraft);
@@ -921,15 +965,16 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 
 		dc.SetFontStyle(kListHeaderFont);
 		const float headerY = panel.y + kListHeaderHeight * 0.5f;
-		dc.DrawText("ACTION", g_display.dp_xres * kListNameFrac, headerY, kListHeaderColor,
+		// The columns name their devices rather than saying "BINDING", and on a card showing three
+		// of them at once that stops being a nicety: the controls alone cannot say which column is
+		// which - CIRCLE and LMB are obvious, D-PAD LEFT is on both pads - so the band along the
+		// top is the only thing telling a player which column is the pad in their hands.
+		dc.DrawText(kListHeaders[0], g_display.dp_xres * kListNameFrac, headerY, kListHeaderColor,
 			ALIGN_VCENTER | ALIGN_LEFT);
-		// The column names the device rather than saying "BINDING", which makes it the one place
-		// a card states what it is a card of. The buttons alone do not say it - CIRCLE and LMB
-		// are obvious, D-PAD LEFT and Q less so - and a player who flipped the switch by
-		// accident has nothing else to read.
-		dc.DrawText(VCS::ListDevice() == VCS::VCSListDevice::Controller ? "CONTROLLER" : "KEYBOARD",
-			g_display.dp_xres * kListKeyFrac, headerY, kListHeaderColor,
-			ALIGN_VCENTER | ALIGN_LEFT);
+		for (size_t i = 0; i < ARRAY_SIZE(kListDeviceFrac); i++) {
+			dc.DrawText(kListHeaders[i + 1], g_display.dp_xres * kListDeviceFrac[i], headerY,
+				kListHeaderColor, ALIGN_VCENTER | ALIGN_LEFT);
+		}
 
 		// A hairline rather than a full rule: enough to separate the caption from the data
 		// without drawing a second frame inside the first.
@@ -969,7 +1014,7 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 
 	const char *hint = "ENTER / LMB - SELECT     ESC - BACK";
 	if (IsKeyListPage(page_)) {
-		hint = "LEFT / RIGHT - DEVICE     ESC - BACK";
+		hint = "ESC - BACK";
 	} else if (focused && focused->option()) {
 		hint = focused->option()->type == VCS::OptionType::Bool
 			? "ENTER / LMB - TOGGLE     ESC - BACK"

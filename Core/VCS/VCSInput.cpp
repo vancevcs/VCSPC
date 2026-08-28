@@ -125,6 +125,21 @@ const InputKeyCode kVCSJumpKey = NKCODE_SPACE;
 const InputKeyCode kVCSPadAimButton = NKCODE_BUTTON_L2;
 const InputKeyCode kVCSPadJumpButton = NKCODE_BUTTON_X;
 
+// Recruit a gang member into your group, which is the PSP's d-pad UP pressed while targeting one.
+//
+// Not a guess and not a button-tester finding: the game says so itself. ENGLISH.GXT carries a
+// per-configuration table of control names, and for the shipping configuration `C0TGSUB` reads
+// "the up button" against the help line `H_GANG1`, "To recruit henchmen into your group, target
+// them and use ~TGSUB~". That table is the whole control scheme written down by the people who
+// made it - see "Ask the GXT what a control is called" in CLAUDE.md before probing for the next
+// one.
+//
+// G on the keyboard, which was the lock-on toggle until that moved to L and has been free since.
+// Nothing in PPSSPP's own defaults binds it, so claiming it costs nothing - the check every new
+// binding here has to pass.
+const InputKeyCode kVCSRecruitKey = NKCODE_G;
+const InputKeyCode kVCSPadRecruitButton = NKCODE_DPAD_UP;
+
 // Set on the input thread by the key above, read on the emu thread by FreeAimActive.
 static std::atomic<bool> g_lockOnMode{false};
 
@@ -443,6 +458,15 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::Aiming,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)" },
 	{ VCSInputContext::Aiming,    NKCODE_Q,                  CTRL_LEFT,      "Previous target", "Previous target", VCSKeyList::OnFoot | VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,    NKCODE_E,                  CTRL_RIGHT,     "Next target", "Next target", VCSKeyList::OnFoot | VCSKeyList::Melee },
+	// Recruit, which is d-pad UP with a henchman targeted - the game's own help line, see
+	// kVCSRecruitKey. It fills in one of the two `?` cells the PSP button table carried for
+	// years: up on foot was never nothing, it was only ever meaningful with a target.
+	//
+	// In the Aiming context and nowhere else, because targeting is the whole precondition. The
+	// gesture on a mouse is hold G, then hold aim: RecruitHeld stands the auto-free-aim pulse
+	// down for that entry, so the game keeps the lock-on it just acquired and the held UP lands
+	// on a target rather than into free aim.
+	{ VCSInputContext::Aiming,    kVCSRecruitKey,            CTRL_UP,        "Recruit gang member (hold it before aim, so the lock-on survives)", "Recruit gang member", VCSKeyList::OnFoot },
 	// Sniper zoom.
 	//
 	// Square zooms IN and Cross zooms OUT - measured, not guessed. Each PSP button was injected
@@ -604,11 +628,15 @@ const VCSPadMapping kVCSPadMappings[] = {
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_Y,      CTRL_TRIANGLE,  false, "Grab / throw / neckbreak / pull up", "Grab / throw", VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,     NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous target", "Previous target", VCSKeyList::OnFoot | VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,     NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next target", "Next target", VCSKeyList::OnFoot | VCSKeyList::Melee },
-	// Both vertical directions are deliberately dead while aiming, and for different reasons.
-	// Up would change the camera mid-fight, which nobody wants and the PSP does not offer either.
-	// Down is the game's own FREE AIM button, and the auto-free-aim pulse in ApplyMapping owns it
-	// - a player pressing it by hand at the wrong moment would cancel or double the pulse.
-	{ VCSInputContext::Aiming,     NKCODE_DPAD_UP,       0,              false, "Suppressed (no camera change mid-fight)" },
+	// Up is RECRUIT, and this row used to be a suppression on the reasoning that up would change
+	// the camera mid-fight. It would not: on foot the PSP's up is recruit-with-a-target and
+	// nothing else, so the row was suppressing the one thing the button is for. It reaches the
+	// game unchanged here - a pad aims by lock-on always, so a target is exactly what it has.
+	//
+	// Down stays dead, and for the reason it always had: it is the game's own FREE AIM button and
+	// the auto-free-aim pulse in ApplyMapping owns it, so a player pressing it by hand at the
+	// wrong moment would cancel or double the pulse.
+	{ VCSInputContext::Aiming,     kVCSPadRecruitButton, CTRL_UP,        false, "Recruit gang member (target one first)", "Recruit gang member", VCSKeyList::OnFoot },
 	{ VCSInputContext::Aiming,     NKCODE_DPAD_DOWN,     0,              false, "Suppressed (d-pad down is Free Aim, which the pulse owns)" },
 	// Zoom, and the reason VCSPadMapping has a scopedOnly column at all. These are the game's
 	// Square and Cross, which with anything but a scope in hand are Block and Heavy Hit, so
@@ -636,12 +664,15 @@ const size_t kVCSPadMappingCount = ARRAY_SIZE(kVCSPadMappings);
 struct VCSListingExtra {
 	VCSKeyList list;
 	const char *name;
-	// The two devices side by side, so a row that reads differently on each is still one row.
-	// An empty array means the action does not exist on that device and the row is simply not
-	// drawn there - which is most of what separates the two cards, since a stick is one control
-	// where WASD is four, and a few of this layer's keyboard-only inventions have no button.
-	const char *keys[3];
-	const char *padKeys[3];
+	// One control per column of the card, indexed by VCSListDevice: keyboard, Xbox, PlayStation.
+	// A null cell means the action does not exist on that device, and the cell is left blank -
+	// which is most of what separates the columns, since a few of this layer's keyboard-only
+	// inventions have no button at all and the pads have no on-foot camera.
+	//
+	// One string rather than a list, unlike the rows the mapping tables produce. A cell that
+	// really is several controls writes them out - "W / A / S / D" is one answer to "how do I
+	// walk", not four - so the list a mapping row needs would buy nothing here.
+	const char *controls[kVCSListDeviceCount];
 	// Movement belongs at the top of a page and the odd-job keys at the bottom, and neither has
 	// a place in the mapping table's order to be interleaved with. One bit is enough to say
 	// which end.
@@ -649,46 +680,53 @@ struct VCSListingExtra {
 };
 
 static const VCSListingExtra kVCSListingExtras[] = {
-	// One nub against four keys. Printing "NUB" four times over would be four ways of saying
-	// one thing, so the pad gets a row of its own and the WASD rows stay off its card.
-	{ VCSKeyList::OnFoot,    "Move",           { },          { "LEFT STICK" } },
-	{ VCSKeyList::OnFoot,    "Forward",        { "W" },      { } },
-	{ VCSKeyList::OnFoot,    "Backwards",      { "S" },      { } },
-	{ VCSKeyList::OnFoot,    "Left",           { "A" },      { } },
-	{ VCSKeyList::OnFoot,    "Right",          { "D" },      { } },
+	// One row for one action, with the four keys in the cell rather than a row each. Splitting
+	// them out gave five lines to say "you walk with these", and four of the five had an empty
+	// cell under both pads that read as a missing binding rather than as a stick.
+	{ VCSKeyList::OnFoot,    "Move",           { "W / A / S / D", "LEFT STICK", "LEFT STICK" } },
 	// Blank on the pad because VCS has no on-foot look, not because one was left out: the PSP
 	// has one stick, the game gives it to movement, and the camera follows by itself. Changing
 	// the camera on Select is the whole of a pad's control over it, and that row comes from the
 	// mapping table.
-	{ VCSKeyList::OnFoot,    "Look",           { "MOUSE" },  { "RIGHT STICK" } },
+	{ VCSKeyList::OnFoot,    "Look",           { "MOUSE", "RIGHT STICK", "RIGHT STICK" } },
 
-	{ VCSKeyList::InVehicle, "Steer",          { },          { "LEFT STICK" } },
-	{ VCSKeyList::InVehicle, "Steer left",     { "A" },      { } },
-	{ VCSKeyList::InVehicle, "Steer right",    { "D" },      { } },
-	{ VCSKeyList::InVehicle, "Look",           { "MOUSE" },  { "RIGHT STICK" } },
+	{ VCSKeyList::InVehicle, "Steer",          { "A / D", "LEFT STICK", "LEFT STICK" } },
+	{ VCSKeyList::InVehicle, "Look",           { "MOUSE", "RIGHT STICK", "RIGHT STICK" } },
 	// Glances, for shooting out of the side of a car. Not in the mapping table because on the
 	// PSP they are L trigger plus a stick direction - a button and an axis at once, which a row
-	// there cannot express. See GlanceDirection. That combination is exactly what the pad column
-	// has to print, and it is the one cell on either card that names two controls at once.
-	{ VCSKeyList::InVehicle, "Look left",      { "Q" },      { "LB" } },
-	{ VCSKeyList::InVehicle, "Look right",     { "E" },      { "RB" } },
+	// there cannot express. See GlanceDirection. That combination is exactly what the pad columns
+	// have to print, and they are the one place a bumper is named here rather than by
+	// PadButtonName - which is why the Xbox and PlayStation cells differ by hand.
+	{ VCSKeyList::InVehicle, "Look left",      { "Q", "LB", "L1" } },
+	{ VCSKeyList::InVehicle, "Look right",     { "E", "RB", "R1" } },
 	// The same two keys as the radio above, which is the game's doing rather than ours: a
 	// special vehicle reuses d-pad left and right for its own function. Listed separately
 	// because one row cannot carry both meanings, and a player in a forklift is not looking for
 	// the radio.
-	{ VCSKeyList::InVehicle, "Raise forks / turret", { "T" }, { "D-PAD RIGHT" }, true },
-	{ VCSKeyList::InVehicle, "Lower forks / turret", { "R" }, { "D-PAD LEFT" },  true },
+	{ VCSKeyList::InVehicle, "Raise forks / turret", { "T", "D-PAD RIGHT", "D-PAD RIGHT" }, true },
+	{ VCSKeyList::InVehicle, "Lower forks / turret", { "R", "D-PAD LEFT", "D-PAD LEFT" },   true },
 
 	// The one row where the mouse and the nub really are the same control: both are the axis
 	// pair the aircraft flies on.
-	{ VCSKeyList::Aircraft,  "Pitch and roll", { "MOUSE" },  { "LEFT STICK" } },
+	{ VCSKeyList::Aircraft,  "Pitch and roll", { "MOUSE", "LEFT STICK", "LEFT STICK" } },
 	// Pad only. On the keyboard the aircraft camera is the mouse, which the row above already
 	// says; on the pad it is a stick of its own and needs its own line.
-	{ VCSKeyList::Aircraft,  "Look",           { },          { "RIGHT STICK" } },
+	{ VCSKeyList::Aircraft,  "Look",           { nullptr, "RIGHT STICK", "RIGHT STICK" } },
 
 	// Melee targeting is the game's own on a pad - it picks the target and turns you to face
 	// them, and there is nothing to press.
-	{ VCSKeyList::Melee,     "Face target",    { "MOUSE" },  { } },
+	{ VCSKeyList::Melee,     "Face target",    { "MOUSE" } },
+
+	// The keyboard half of a row the pad table already owns, which is the one thing an extras row
+	// could not do until these started merging by name. Escape opens this menu and CANNOT be in
+	// kVCSKeyMappings - claiming it would withhold it from PPSSPP's mapper, which is where the
+	// pause it opens actually comes from, and the table says so in capitals. It is still what the
+	// player presses, so the card has to say it.
+	//
+	// At the end, so it merges into the pad's Menu row where that row already is rather than
+	// creating one above everything else.
+	{ VCSKeyList::OnFoot | VCSKeyList::InVehicle | VCSKeyList::Aircraft,
+	                         "Menu",           { "ESC" }, true },
 };
 
 // Short and upper case, the way the game sets them. PPSSPP's own names are the fallback and are
@@ -711,13 +749,44 @@ std::string KeyDisplayName(InputKeyCode key) {
 	return name;
 }
 
-// The pad's buttons as the card names them. Xbox names, because that is the pad this scheme is
-// laid out for - PlayStation shapes here would describe neither the controller in the player's
-// hands nor, since the buttons have moved, the console the game came from.
+// The pad's buttons as the card names them, in the two vocabularies the card prints.
 //
-// "VIEW" rather than "BACK" or "SELECT": it is what Microsoft has called that button for over a
-// decade and what is printed next to it on the pad someone is holding.
-std::string PadButtonName(InputKeyCode button) {
+// One scheme, two sets of labels. The layout does not change between them - a DualSense and an
+// Xbox pad have the same controls in the same places and differ in what is printed on the plastic
+// - so this is a naming function and nothing more. That is the whole reason both pad columns come
+// out of one mapping table.
+//
+// The Xbox names are the pad's own current ones rather than the historical ones: "VIEW" is what
+// Microsoft has called that button for over a decade and what is printed next to it. The
+// PlayStation column follows the same rule, which is why the face buttons are spelled out rather
+// than drawn - the shapes are glyphs this font does not have, and "CROSS" is what a player would
+// say aloud anyway.
+//
+// "CREATE / SHARE" names one button across two generations, because it genuinely has two names:
+// a DualSense prints CREATE and a DualShock 4 prints SHARE, and a card that picked one would be
+// wrong for half the pads it describes.
+std::string PadButtonName(InputKeyCode button, VCSListDevice device) {
+	if (device == VCSListDevice::PlayStation) {
+		switch (button) {
+		case NKCODE_BUTTON_A: return "CROSS";
+		case NKCODE_BUTTON_B: return "CIRCLE";
+		case NKCODE_BUTTON_X: return "SQUARE";
+		case NKCODE_BUTTON_Y: return "TRIANGLE";
+		case NKCODE_BUTTON_L1: return "L1";
+		case NKCODE_BUTTON_R1: return "R1";
+		case NKCODE_BUTTON_L2: return "L2";
+		case NKCODE_BUTTON_R2: return "R2";
+		case NKCODE_BUTTON_THUMBL: return "L3";
+		case NKCODE_BUTTON_THUMBR: return "R3";
+		case NKCODE_BUTTON_START: return "OPTIONS";
+		case NKCODE_BUTTON_SELECT: return "CREATE / SHARE";
+		default:
+			// The d-pad is the one group both vocabularies agree about, so it falls through to
+			// the Xbox switch rather than being written out twice.
+			break;
+		}
+	}
+
 	switch (button) {
 	case NKCODE_BUTTON_A: return "A";
 	case NKCODE_BUTTON_B: return "B";
@@ -747,38 +816,17 @@ std::string PadButtonName(InputKeyCode button) {
 	return name;
 }
 
-std::vector<VCSListingRow> KeyListing(VCSKeyList list, VCSListDevice device) {
+std::vector<VCSListingRow> KeyListing(VCSKeyList list) {
 	std::vector<VCSListingRow> rows;
 	if (list == VCSKeyList::None) {
 		return rows;
 	}
 
-	const bool pad = device == VCSListDevice::Controller;
-
-	auto addExtras = [&rows, list, pad](bool atEnd) {
-		for (const VCSListingExtra &extra : kVCSListingExtras) {
-			if (!(extra.list & list) || extra.atEnd != atEnd) {
-				continue;
-			}
-			VCSListingRow row;
-			row.name = extra.name;
-			for (const char *key : pad ? extra.padKeys : extra.keys) {
-				if (key) {
-					row.keys.push_back(key);
-				}
-			}
-			// Nothing against it on this device means the action is not on this device, so the
-			// row is not on this card either. An empty line would read as a missing binding.
-			if (!row.keys.empty()) {
-				rows.push_back(row);
-			}
-		}
-	};
-
 	// Rows sharing a name are one line with several controls against it - which is how the card
 	// shows that Fire is both the left mouse button and Backspace, or on the pad both B and RT,
-	// without either of them being written down twice.
-	auto addRow = [&rows](const char *listName, const std::string &control) {
+	// without either of them being written down twice. It is also what merges the three devices
+	// into one row per action, since all three tables use the same listName for the same thing.
+	auto addRow = [&rows](const char *listName, VCSListDevice device, const std::string &control) {
 		VCSListingRow *row = nullptr;
 		for (VCSListingRow &existing : rows) {
 			if (!strcmp(existing.name, listName)) {
@@ -787,40 +835,63 @@ std::vector<VCSListingRow> KeyListing(VCSKeyList list, VCSListDevice device) {
 			}
 		}
 		if (!row) {
-			rows.push_back(VCSListingRow{listName, {}});
+			rows.push_back(VCSListingRow{listName});
 			row = &rows.back();
 		}
+		std::vector<std::string> &column = row->controls[(size_t)device];
 		// The same control can reach one action through two contexts - Q cycles weapons on foot
 		// and targets while aiming, and the aim control appears in both the OnFoot and Aiming
 		// rows. Show it once.
-		if (std::find(row->keys.begin(), row->keys.end(), control) == row->keys.end()) {
-			row->keys.push_back(control);
+		if (std::find(column.begin(), column.end(), control) == column.end()) {
+			column.push_back(control);
+		}
+	};
+
+	// The extras go through addRow too, not straight into the list, so a row here can fill in one
+	// device's cell on a row a mapping table owns. Escape under MENU is the case that needs it -
+	// no table can hold that key - and a row with nothing on any device simply never gets created.
+	auto addExtras = [&addRow, list](bool atEnd) {
+		for (const VCSListingExtra &extra : kVCSListingExtras) {
+			if (!(extra.list & list) || extra.atEnd != atEnd) {
+				continue;
+			}
+			for (size_t i = 0; i < kVCSListDeviceCount; i++) {
+				if (extra.controls[i]) {
+					addRow(extra.name, (VCSListDevice)i, extra.controls[i]);
+				}
+			}
 		}
 	};
 
 	addExtras(false);
 
-	// Each card is built from the table that actually drives that device. Deriving the pad's card
+	// Every column is built from the table that actually drives that device. Deriving the pad's
 	// from the keyboard's table would have been possible while a pad still went through the PSP's
 	// own layout - every row knew the button its key produced - and it stopped being possible the
 	// moment the pad got a scheme of its own, because the two no longer agree about anything but
 	// the face buttons.
-	if (pad) {
-		for (size_t i = 0; i < kVCSPadMappingCount; i++) {
-			const VCSPadMapping &mapping = kVCSPadMappings[i];
-			if (!(mapping.list & list) || !mapping.listName) {
-				continue;
-			}
-			addRow(mapping.listName, PadButtonName(mapping.button));
+	//
+	// The keyboard goes first, so the card is in keyboard-table order and the handful of rows only
+	// a pad has - the fork's own menu button, the aircraft's centre view - land after it rather
+	// than interleaved somewhere neither table asked for.
+	for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
+		const VCSKeyMapping &mapping = kVCSKeyMappings[i];
+		if (!(mapping.list & list) || !mapping.listName) {
+			continue;
 		}
-	} else {
-		for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
-			const VCSKeyMapping &mapping = kVCSKeyMappings[i];
-			if (!(mapping.list & list) || !mapping.listName) {
-				continue;
-			}
-			addRow(mapping.listName, KeyDisplayName(mapping.key));
+		addRow(mapping.listName, VCSListDevice::Keyboard, KeyDisplayName(mapping.key));
+	}
+	for (size_t i = 0; i < kVCSPadMappingCount; i++) {
+		const VCSPadMapping &mapping = kVCSPadMappings[i];
+		if (!(mapping.list & list) || !mapping.listName) {
+			continue;
 		}
+		// One row of one table filling two columns, which is the point of naming the pad twice
+		// rather than tabulating it twice.
+		addRow(mapping.listName, VCSListDevice::Xbox,
+			PadButtonName(mapping.button, VCSListDevice::Xbox));
+		addRow(mapping.listName, VCSListDevice::PlayStation,
+			PadButtonName(mapping.button, VCSListDevice::PlayStation));
 	}
 
 	addExtras(true);
@@ -1405,7 +1476,12 @@ u32 ApplyMapping(VCSInputContext context) {
 		// Through LockOnModeActive rather than the raw flag: the pad is a second source of the
 		// same answer, and reading the atomic here would have armed the pulse for a pad that is
 		// meant never to leave lock-on.
-		if (CameraSettings().autoFreeAim && !LockOnModeActive() && !MeleeEquipped()) {
+		// RecruitHeld joins the gate rather than being handled anywhere near the recruit rows,
+		// because it is the same question the other two terms ask: is this player asking for the
+		// game's lock-on rather than for a crosshair. Recruiting needs a target and free aim is
+		// the state with none, so a pulse fired here would cancel the very thing the key is for.
+		if (CameraSettings().autoFreeAim && !LockOnModeActive() && !MeleeEquipped()
+			&& !RecruitHeld()) {
 			// If the player is already asking to move, spend a few ticks establishing a running
 			// state before pressing Free Aim, so the game has something worth latching. The pulse
 			// is armed when that finishes rather than now.
@@ -1846,6 +1922,10 @@ VCSInputContext GetCurrentContext() {
 
 bool JumpHeld() {
 	return IsHostKeyDown(kVCSJumpKey) || IsPadButtonDown(kVCSPadJumpButton);
+}
+
+bool RecruitHeld() {
+	return IsHostKeyDown(kVCSRecruitKey) || IsPadButtonDown(kVCSPadRecruitButton);
 }
 
 bool CameraDrivenAimHeld() {

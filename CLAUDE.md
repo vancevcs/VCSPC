@@ -159,7 +159,8 @@ debugger is the one that needs `g_frameMutex`, not this.
 **Status: working, confirmed against the running game.** Esc opens it over a paused VCS, the page
 table navigates, hover and keyboard both move the selection, left/right edits a value and the
 blocks track it, Esc walks back up the pages and then resumes, and `vcs.ini` is written on the way
-out with all 14 options.
+out with all 20 of the options this fork owns - the four that belong to `g_Config` are marked
+`external` and saved by PPSSPP instead.
 
 It imitates VCS's own front end, not Vice City's PC one, and the difference is the whole design:
 
@@ -232,33 +233,57 @@ Two more details that will bite if they are "simplified":
   It is safe to call for anything in `struct Config`; only the blocks that override
   `CanResetToDefault()` (display layout, touch controls, gestures) assert.
 
-### The controls card is two tables in one shape
+### The controls card is two tables in four columns
 
-`CONTROLS - BINDINGS` is a read-only reference card with a keyboard column and a controller one,
-and each is generated from the table that actually drives that device: `kVCSKeyMappings` for one,
-`kVCSPadMappings` for the other. Neither can drift from what pressing the thing does, which is the
-only property here worth protecting. The switch is a row on the bindings page; left and right also
-flip it from inside a card, so the two can be compared without walking back up to it. The heading
-follows the switch, which means `title_keyboard.png` and `title_controller.png` both have to exist.
+`CONTROLS - BINDINGS` is a read-only reference card: `ACTION`, then what the action is on the
+keyboard, on an Xbox pad and on a PlayStation one, all on screen at once. Each column is generated
+from the table that actually drives that device - `kVCSKeyMappings` for the keyboard,
+`kVCSPadMappings` for both pads - so no column can drift from what pressing the thing does, which
+is the only property here worth protecting.
 
-It was **one** table read twice for a while, and why that stopped working is worth recording. When
+**Two tables, three columns, and the third is not a third table.** A DualSense and an Xbox pad have
+the same controls in the same places and differ in what is printed on the plastic, so the
+PlayStation column is `PadButtonName` called with the other vocabulary. A second pad table would be
+a second copy of the same scheme waiting to disagree with the first. `CREATE / SHARE` names one
+button across two generations for the same reason - picking one would be wrong for half the pads
+it describes.
+
+**It was a switch, and losing the switch is the point.** A row on the bindings page chose which
+device the card described, and left/right flipped it from inside a card. The switch answered "what
+would I press on the device I am not holding", one device at a time, and it could never show the
+thing four columns show for free: which actions exist on one device and not on another. WASD
+against two blank pad cells, or the lock-on toggle against three, is a sentence the old card had no
+way to write. The heading stopped following the switch too - it is `title_bindings.png` now, and
+`title_keyboard.png` is gone.
+
+It was **one** table read twice before that, and why that stopped working is worth recording. When
 a pad still went through the PSP's own layout, every keyboard row already knew both halves - the
 key it binds and the PSP button that key produces - so the pad's card was the same rows with the
 other half shown, and it could not drift by construction. The moment the pad got a scheme of its
 own that stopped being true: the two devices now agree about the face buttons and about almost
-nothing else. Two tables is the honest answer, and generating each card from its own table is what
-keeps the guarantee that made the single table attractive.
+nothing else.
 
-Two rules hold it together, and both are the kind of thing a tidy-up undoes:
+Three rules hold it together, and all three are the kind of thing a tidy-up undoes:
 
-- **A row with nothing against it on this device is not printed empty, it is not printed.** A row
-  is only created once there is a control to put in it, so an action with no binding on this
-  device leaves no blank line behind rather than a line that reads as a missing binding.
-- **`kVCSListingExtras` carries two control columns**, not one. It is the handful of rows neither
-  table can hold - the sticks, mouse look, the glances, the forks - and they are the ones that can
-  drift, in both directions. An empty column there is what keeps WASD off the pad's card and the
-  left stick off the keyboard's, and it is also how one row says "MOUSE" on one and "LEFT STICK"
-  on the other without being written down twice.
+- **A blank cell is information; a blank row is not.** A row is dropped only when it has nothing on
+  *any* device. One empty cell says "not on this device", and it can only say that standing next to
+  a column where the action exists - which is exactly what the two-column card could not do, and
+  why its rule was the stricter "not on this device, not on this card".
+- **`kVCSListingExtras` carries one cell per column.** It is the handful of rows no mapping table
+  can hold - the sticks, mouse look, the glances, the forks - and they are the ones that can drift,
+  in three directions now. It is also how one row says `MOUSE` in one column and `RIGHT STICK` in
+  the next two without being written down twice.
+- **Extras merge by name, they do not append.** They go through the same `addRow` the mapping
+  tables use, so an extras row can fill in *one device's cell* on a row a mapping table owns.
+  `MENU` is the case that needs it: Escape opens this menu and can never be in `kVCSKeyMappings` -
+  claiming it would withhold it from PPSSPP's mapper, which is where that pause comes from - while
+  the pad's Start row is a real binding. One row, two sources, and neither could have written the
+  other's half.
+
+**Rows shrink to fit.** `ListRowHeight` divides the space between the panel and the hint bar by the
+row count, clamped between 28 and 40dp. Nothing on this page scrolls and there is no second page,
+so a card taller than the window is a card with bindings nobody can read. On Foot is the tallest
+and the one a player reads first.
 
 ### The page titles are art, and they have to be
 
@@ -1284,12 +1309,48 @@ writes, the CLEO plugin, the threshold theories - none of it was needed to reach
 Before inventing a mechanism for this game, open the menu and see whether the game already has
 one. The same applies to anything with an options screen.
 
+### Ask the GXT what a control is called
+
+**`ENGLISH.GXT` contains the whole control scheme, written down by the people who made the game.**
+Not the Controls *screen* - the strings that screen is built from, plus every help line that names
+a button, and they are readable offline with nothing running.
+
+The keys are `C<n><ACTION>`, one set per `CONFIGURATION` the options screen offers, so `C0*` is the
+shipping layout and `C1`-`C3` are the rearrangements. The values are English, not glyphs:
+
+| key | value | what it settles |
+|---|---|---|
+| `C0TGSUB` | `the up button` | recruit is d-pad up |
+| `C0FREE1` | `down button` | free aim is d-pad down, as the Controls screen says |
+| `C0PDLT` | `R button` | aim is R trigger |
+| `C0PDLO1` | `L button` | the "unused" L trigger is Look/Fine Aim |
+| `C0VEHN` | `down button` | horn |
+| `C0SNZI` / `C0SNZO` | `~S~` / `~X~` | sniper zoom in is Square, out is Cross |
+
+Every one of those is a fact this file records as *measured*, some of them after a day of probing.
+The help lines are the other half: `H_GANG1` is "To recruit henchmen into your group, target them
+and use ~TGSUB~", which is both the binding and its precondition in one sentence.
+
+The format is GXT2 with `TABL`/`TKEY`/`TDAT` sections; a `TKEY` entry is a 4-byte offset followed
+by an 8-byte name, and the offsets are into `TDAT`+8 as UTF-16. Forty lines of Python reads it.
+
+**Read this before the button tester, not after it.** The tester answers "what happens when I hold
+this", which is the wrong question for a control that needs a target, a modifier, or a place to be
+standing - and the two controls that cost the most time here, L trigger and d-pad up, are both of
+that kind. This is the same lesson as "Read the game's own Controls screen first", one level
+further in: the screen is a rendering of this table, and the table has entries the screen never
+shows.
+
 ### Free aim is a button
 
 `Free Aim` = **d-pad down**, bound to `S` in the Aiming context. Verified in play: with aim held,
-d-pad up does nothing, left/right cycle targets, and **down** enters free aim - after which the
-mouse moves the crosshair through the ordinary reticle path (mouse → nub), with no flag set and
-no second-stick machinery at all. It works with "Drive the game's second stick" **off**.
+left/right cycle targets and **down** enters free aim - after which the mouse moves the crosshair
+through the ordinary reticle path (mouse → nub), with no flag set and no second-stick machinery
+at all. It works with "Drive the game's second stick" **off**.
+
+**"d-pad up does nothing" was part of that same observation, and it was wrong.** Up is `Recruit`,
+and it does nothing without a gang member actually targeted - which is not a state anyone reaches
+while probing buttons. The GXT section above had it written down the whole time.
 
 Character movement is unavailable in free aim, which is expected: the nub is the aim.
 
@@ -1827,8 +1888,8 @@ single biggest source of wrong bindings, so add to this table rather than assumi
 | R trigger | **aim** (lock-on) | handbrake | **yaw right** |
 | L trigger | **switch to a nearby weapon drop** | glance modifier (L + stick direction) | **yaw left** |
 | Nub | movement | steering (X only) | **pitch (Y) and roll (X)** |
-| D-pad Up | ? | ? | special mission |
-| D-pad Down | ? | **horn** | centre view |
+| D-pad Up | **recruit gang member** (only with one targeted) | ? | special mission |
+| D-pad Down | free aim (while aiming) | **horn** | centre view |
 | D-pad Left | previous weapon | **previous radio station** | previous radio station |
 | D-pad Right | next weapon | **next radio station** | next radio station |
 | D-pad L/R *in a forklift* | — | **lower / raise the forks** | — |
@@ -1960,6 +2021,36 @@ from the camera, so `HandleHostAxis` negates nothing. That is specific to XInput
 *generic* pad defaults invert that axis, because an SDL joystick reports the opposite sign - so a
 non-XInput pad is the case to suspect. The look stick is negated exactly once, in `ApplyPadLook`,
 because a mouse's positive dy is down the screen and everything downstream expects a mouse.
+
+### Recruiting is a binding with a precondition, and the precondition is the work
+
+`Recruit gang member` is `G` on the keyboard and d-pad up on the pad, in the **Aiming** context on
+both. The binding is one row per table. What is worth writing down is the half a row cannot say.
+
+The game's own line is "target them and use the up button", and *targeted* is the whole of it: the
+press means nothing in free aim, because free aim is the state with no target. That is fine on a
+pad, which aims by lock-on always (`LockOnModeActive`), and it is exactly wrong on a mouse, where
+holding aim fires the auto-free-aim pulse and leaves the crosshair pointing at a henchman the game
+is no longer tracking.
+
+So `RecruitHeld()` joins `LockOnModeActive()` and `MeleeEquipped()` in the gate that arms that
+pulse. Holding G *before* the aim control is what buys the lock-on, and since G is also the press,
+the whole thing is one gesture rather than a ritual with the lock-on toggle in the middle of it.
+
+Two things this is not:
+
+- **Not a new mechanism.** The gate already had two terms asking the same question - is this player
+  asking for the game's assist rather than for a crosshair - and this is a third answer to it,
+  which is why it goes in the same `if` rather than anywhere near the recruit rows.
+- **Not a reason to bind `G` on foot.** There is no target outside the Aiming context either, so a
+  row there would be a control that does nothing. Nothing in PPSSPP's defaults claims `G`, so
+  holding it while walking costs nothing and reaches the held-key set regardless of whether any
+  context maps it.
+
+The pad's d-pad up was a `psp = 0` suppression before this, on the reasoning that up would change
+the camera mid-fight. It would not - on foot the PSP's up is recruit and nothing else - so the row
+was suppressing the one thing the button is for. That is the general shape of the mistake: a
+control that "does nothing" in the tester is a control whose precondition you have not met.
 
 ### Hand-to-hand combat is four buttons and five states
 

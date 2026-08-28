@@ -92,6 +92,12 @@ extern const InputKeyCode kVCSJumpKey;
 extern const InputKeyCode kVCSPadAimButton;
 extern const InputKeyCode kVCSPadJumpButton;
 
+// Recruit a gang member, on both devices, and named for exactly the reason the four above are:
+// the mapping rows press it and the auto-free-aim gate has to ask whether it is held, so the two
+// must not be able to drift. See RecruitHeld.
+extern const InputKeyCode kVCSRecruitKey;
+extern const InputKeyCode kVCSPadRecruitButton;
+
 // Which page of the read-only controls listing a row appears on, if any.
 //
 // Deliberately not the same thing as VCSInputContext, and the Aiming context is why: its rows
@@ -110,25 +116,26 @@ enum class VCSKeyList {
 };
 ENUM_CLASS_BITOPS(VCSKeyList);
 
-// Which device the controls listing describes.
+// A column of the controls listing. The card shows all three of them at once, side by side.
 //
-// One table read two ways, rather than two tables. Every row below already knows both halves -
-// the host key it is bound to and the PSP button that key produces - so the controller card is
-// the same rows with the other column shown, and it cannot drift from the keyboard one for the
-// same reason the keyboard one cannot drift from the bindings.
+// Two tables, three columns. The keyboard's rows come from kVCSKeyMappings and both pad columns
+// from kVCSPadMappings, so every column is built from the table that actually drives that device
+// and cannot drift from what pressing the thing does - the only property here worth protecting.
+// The two pad columns are one table named twice: a DualSense and an Xbox pad differ in what is
+// printed on the plastic and in nothing else, so a second pad table would be a second copy of
+// the same scheme waiting to disagree with the first.
 //
-// Two tables, one card. The keyboard's rows come from kVCSKeyMappings and the pad's from
-// kVCSPadMappings, and each card is built from the table that actually drives that device - so
-// neither can drift from what pressing the thing does, which is the only property here worth
-// protecting.
-//
-// The pad card is still the shorter of the two, and for a narrower reason than it used to be:
-// the sticks carry four actions the keyboard needs rows for, and a handful of this layer's
-// keyboard-only inventions - the lock-on toggle, the spawner - have no button at all.
+// Side by side rather than behind a switch, and the difference is not cosmetic. A switch answers
+// "what would I press on the device I am not holding" one device at a time; four columns answer
+// "what do I press" for whoever is reading, and they show the one thing a switch structurally
+// cannot - which actions exist on one device and not on another. WASD against a blank pad cell,
+// or the lock-on toggle against two blank ones, says more than either card said alone.
 enum class VCSListDevice {
 	Keyboard,
-	Controller,
+	Xbox,
+	PlayStation,
 };
+constexpr size_t kVCSListDeviceCount = 3;
 
 // One row of the mapping table: in this context, this host key produces these PSP button bits.
 // psp is a mask of the CTRL_* defines from Core/HLE/sceCtrl.h, so a single key can produce a
@@ -260,24 +267,32 @@ void ApplyPadLook(VCSInputContext context);
 // whenever a player pressed a direction on a pad.
 bool IsPadButtonDown(InputKeyCode button);
 
-// A pad button as the controls card prints it - "A", "LB", "LT", "D-PAD UP", "VIEW". Xbox names,
-// because that is the pad this scheme is laid out for and PlayStation shapes here would describe
-// neither the pad in the player's hands nor the console the game came from.
-std::string PadButtonName(InputKeyCode button);
+// A pad button as the controls card prints it - "A", "LB", "LT", "D-PAD UP", "VIEW" on an Xbox
+// pad, "CROSS", "L1", "L2", "D-PAD UP", "CREATE" on a PlayStation one. The scheme is the same
+// either way; only the labels differ, which is the whole reason one table feeds both columns.
+//
+// Passing Keyboard is a caller error and answers with the Xbox name, which is the least
+// surprising thing a mislabelled cell can say.
+std::string PadButtonName(InputKeyCode button, VCSListDevice device);
 
-// One line of the controls listing: an action, and the keys that perform it in table order.
+// One line of the controls listing: an action, and the controls that perform it on each device,
+// in table order.
 struct VCSListingRow {
 	const char *name;
-	std::vector<std::string> keys;
+	// One list per column, indexed by VCSListDevice. Empty means this device cannot do the
+	// action at all, and the cell is left blank rather than filled with a dash - on a card that
+	// shows every device at once the blank IS the information.
+	std::vector<std::string> controls[kVCSListDeviceCount];
 };
 
-// The listing for one page and one device. Built by grouping kVCSKeyMappings on listName, after
-// the handful of rows that cannot be in that table at all - see kVCSListingExtras.
+// The listing for one page, all three columns at once. Built by grouping kVCSKeyMappings and
+// kVCSPadMappings on listName, after the handful of rows that cannot be in either table - see
+// kVCSListingExtras.
 //
-// A row that has nothing to show on the requested device is left out entirely rather than
-// printed empty: on a pad that is every row this layer invented, and on the keyboard it is the
-// nub. An action with no binding is not a line in a controls card.
-std::vector<VCSListingRow> KeyListing(VCSKeyList list, VCSListDevice device);
+// A row is dropped only when it has nothing to show on ANY device, which is the four-column
+// version of the old rule rather than a relaxation of it: a blank line in one column still says
+// "not on this device", and it can only say that next to a column where the action exists.
+std::vector<VCSListingRow> KeyListing(VCSKeyList list);
 
 // A key as the listing prints it: short and upper case, the way the game's own Controls screen
 // sets them. PPSSPP's GetKeyName is the fallback; the overrides exist because "MB1" and
@@ -442,6 +457,19 @@ bool LockOnModeActive();
 // Context is the caller's business, not this function's - Space is the handbrake in a car and X is
 // too, and it is VaultTick's on-foot check that keeps a climb out of both.
 bool JumpHeld();
+
+// Whether the player is asking to recruit a gang member, on EITHER device.
+//
+// A named intent rather than a key for the reason JumpHeld is one, and it earns it twice over:
+// the recruit control is read by the mapping tables AND by the auto-free-aim gate, which has to
+// stand down while it is held.
+//
+// Recruiting needs the game to have TARGETED the henchman - its own help line is "target them and
+// use the up button" - and free aim is precisely the state with no target. So on a mouse, where
+// aiming drops straight into free aim, holding the recruit key before the aim control is what
+// buys the lock-on that makes the press mean anything. A pad already aims by lock-on always and
+// needs none of this.
+bool RecruitHeld();
 
 // Whether the player is aiming in a mode THIS LAYER steers, as opposed to one the game steers.
 //
