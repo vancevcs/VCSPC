@@ -182,6 +182,45 @@ const std::vector<Option> &Options() {
 			"Look up and down while driving, not only left and right.",
 			&cam.pitchInVehicle);
 
+		// The master switch first, then the two halves of what happens after you stop moving the
+		// mouse. Ticks are the emulator's ~60Hz, which is the unit the camera code counts in; the
+		// help text gives seconds because that is the unit the player is actually judging.
+		addBool(OptionPage::Mouse, "ReturnLook", "Return the view to the game",
+			"Off keeps the view exactly where you leave it and never gives the camera back - "
+			"no drift back behind you on foot, and no swing back behind the car when driving.",
+			&cam.returnLook);
+		addInt(OptionPage::Mouse, "LookHoldFrames", "Hold the view for",
+			"How long the camera stays exactly where you left it after you stop moving the mouse. "
+			"45 ticks is about three quarters of a second.",
+			&cam.lookHoldFrames, 5, 300, 5, 45);
+		enabledBy(&cam.returnLook);
+		addInt(OptionPage::Mouse, "LookReleaseFrames", "Return to the follow camera over",
+			"How long the camera takes to drift back to the game's own view afterwards. Raise it "
+			"for a slower, gentler return; 0 hands the camera back in a single frame, which is the "
+			"snap this setting exists to remove.",
+			&cam.lookReleaseFrames, 0, 300, 5, 45);
+		enabledBy(&cam.returnLook);
+		addBool(OptionPage::Mouse, "ReturnBehindPlayer", "Return the view behind you",
+			"Where the camera drifts back to on foot: behind your character, rather than staying "
+			"wherever you left it pointing. Vehicles are unaffected - the game returns those by "
+			"itself.",
+			&cam.returnBehindPlayer);
+		enabledBy(&cam.returnLook);
+		addFloat(OptionPage::Mouse, "ReturnBehindTrim", "Trim where it returns to",
+			"Nudges the resting view left or right, in degrees, if it does not settle quite behind "
+			"you.",
+			&cam.returnBehindTrimDeg, -45.0f, 45.0f, "%.1f deg");
+		enabledBy(&cam.returnLook);
+		addBool(OptionPage::Mouse, "HoldUntilMoving", "Keep the view until you move",
+			"Standing still, the camera stays exactly where you left it. It returns behind you "
+			"once you start walking, which is when the game moves its own camera anyway.",
+			&cam.holdUntilMoving);
+		enabledBy(&cam.returnLook);
+		addBool(OptionPage::Mouse, "RecenterOnGlance", "Glance keys recentre the view",
+			"In a car, Q or E - or both together - put the view back behind the car. The way to "
+			"ask for the default view when the automatic return is off.",
+			&cam.recenterOnGlance);
+
 		// --- Controller ---
 		//
 		// Four rows, and the first is the important one: the scheme this fork lays out for a pad

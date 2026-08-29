@@ -106,10 +106,83 @@ The non-obvious part is *why it writes every frame*. The game runs its own camer
 eases yaw back toward its follow target, so writing only when the mouse moves accomplishes nothing
 — the game undoes each nudge in between (measured: 135 successful writes, zero net rotation).
 `VCSCamera` therefore keeps its own `g_desiredYaw`, anchors it to the game's value when a look
-starts, and re-asserts it every frame for `kHoldFrames` (~0.75s) after the last movement. That
-outpaces the smoothing while the player is looking around, then releases so the normal
-follow-camera returns. Don't "simplify" this back into a read-modify-write; it will silently stop
-working.
+starts, and re-asserts it every frame for `lookHoldFrames` (~0.75s) after the last movement. That
+outpaces the smoothing while the player is looking around. Don't "simplify" this back into a
+read-modify-write; it will silently stop working.
+
+**Releasing that override is its own problem, and used to be a cliff.** The game goes on computing
+its own camera underneath ours the whole time - mode 15 builds Beta from the player's heading and
+never reads a look axis - so the tick the hold expired handed the player, in one frame, however far
+the two had diverged. Reported as *"about a second after I stop, it snaps back to roughly where it
+started"*, and the "roughly" was the game's follow logic having drifted meanwhile. The hold now
+fades out instead: across `lookReleaseFrames` the written value walks to the game's live value on a
+smoothstep, stepping once per **game logic frame**, and the last step writes exactly what it read -
+so the tick we stop writing is a non-event by construction. The walk is deliberately blind to *why*
+the two differ, which is what makes it correct without having to settle whether the follow camera
+had adopted our value: if it had, every step is a no-op and the camera just stays put. The proper
+fix, once mode 15's follow TARGET is identified, is to write that instead and never need a handback.
+
+**Pitch and yaw do not come back the same way, and the asymmetry decides where the walk aims.**
+Reported in play once the fade was in: pitch always returns to -4.6 deg, yaw does not return behind
+the player at all. So the game springs pitch back to a baseline by itself and simply keeps whatever
+yaw it finds - which means a walk toward the game's *live* yaw is a walk toward the value we
+ourselves last wrote, and correctly does nothing. Yaw therefore gets an explicit target instead:
+`PedHeading - PI/2`, the inverse of the `heading = camYaw + PI/2` that `PedAimTick` already ships
+(`returnBehindPlayer`, on by default). **On foot only** - a vehicle returns behind the car on its
+own, `PedHeading` there belongs to someone sitting in a seat, and that camera is the spring this
+fork spent a long time learning not to fight. Pitch keeps fading to the game's live value, because
+that is the half the game was already getting right.
+
+**The quarter turn was right, and the thing it is right about is narrower than assumed.** Aiming the
+walk at `PedHeading - PI/2` still left a 15-35 degree snap, which looked like a wrong constant - the
+known `Beta`-to-`Front` gap is only 4.42 degrees, so it could not be that, and the range was too wide
+for one constant slightly off. So a learner went in to measure the offset instead of deriving it:
+`CameraYaw - PedHeading`, sampled only while the player walks in a straight line with the camera at
+rest and mouse look not driving, low-passed (`learnFollowOffset`, with `returnBehindTrimDeg` as a
+hand override). All three sampling gates earn their place - standing still would measure where the
+player last left the view rather than where the camera wants to be, and a mid-turn sample would
+measure the camera's trailing lag.
+
+**It settled on exactly -90.000 degrees over 1671 samples.** The derived value was correct, and the
+hypothesis that sent the learner in was wrong. What the same session measured is the finding:
+standing still after the walk, the camera sat at **-59.2 degrees** off the heading - 30.8 degrees
+from where the handback had just put it, which is the whole of the reported snap. So there is no
+single "behind the player": the follow camera holds `heading - 90` **while walking** and something
+else entirely once the player stops, and no value handed over at a standstill is the one it wants.
+
+Hence `holdUntilMoving` (on by default): standing still, the handback simply does not run and the
+view stays where the player left it, which is what San Andreas does anyway. The walk fires on the
+first frame of movement, when the game's own recentring is live and provably heading for the same
+`-90` the walk aims at. The proper fix remains mode 15's own stored Beta - write that and the
+handback stops being a negotiation. `ReleaseTrace` on the Camera tab is the instrument for
+identifying it: it records the camera's offset from the heading for 24 game frames after we let go,
+which separates a stored value being restored (one frame) from a spring easing somewhere (several).
+
+**And above all of it, `returnLook` - now OFF by default.** One switch that says never hand the
+camera back at all: the hold does not expire, the view stays where the player left it indefinitely,
+and the automatic return stops applying. It is the honest end of the road the three changes above
+were walking down. The handback exists to give the game its camera back politely, and once the
+measurements showed the game has no single resting position to hand it back TO, a player who would
+rather it never took the camera back has nothing left to be polite about. The write discipline is
+unchanged, which is what keeps an indefinite hold from being a longer exposure to the vehicle pitch
+runaway - pitch is still asserted once per game logic frame and still clamped to the anchor window.
+
+**With no automatic return there has to be a deliberate one**, so the vehicle glance keys - Q, E, or
+both - walk the view back behind the car and then hand the camera over (`recenterOnGlance`, on). That
+also repairs something the indefinite hold broke: a glance is *the game's own* look mechanic, L
+trigger plus a stick direction, so a permanently asserted `CameraYaw` painted straight over it and
+the glance appeared to do nothing. Ending the hold gives it the camera back from the position it
+expects to start at. The walk targets `heading + offset` directly rather than the game's live yaw,
+for the reason the on-foot return does - it lands on a value the game agrees with instead of
+negotiating with a camera that is holding our own number. Note the one thing NOT measured here:
+whether `PedHeading` tracks the car while driving. The Camera tab's live offset now updates in every
+context so it can be checked - drive straight with the view behind and it should read -90.
+
+**The transferable part is the shape of the error, which this file has now recorded four times.** The
+measurement said "15-35 degrees off", the inference said "so the constant is wrong", and the constant
+was exactly right - the offset was measured against a state (walking) that did not hold at the moment
+that mattered (standing still). A quantity that is only valid in some states is not a constant, and
+asking *when* it was measured is a different question from asking whether it was measured correctly.
 
 **Two FOV reference constants, on purpose.** `AimAxisStep` scales by `FOV / 80` and `FOVLookScale`
 scales by `FOV / 70`, and the difference is not an oversight to be tidied away. The 80 is *the

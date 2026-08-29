@@ -72,9 +72,133 @@ static bool g_haveAnchorPitch = false;
 static VCSInputContext g_lastContext = VCSInputContext::Unknown;
 static int g_holdFrames = 0;
 
-// About three quarters of a second at 60fps. Long enough to cover the gaps between mouse
-// events without leaving the camera locked after the player stops looking around.
-static const int kHoldFrames = 45;
+// The handback. See "Handing the camera back" in the header for what it is and why the old cliff
+// had to go; these are the four values it runs on.
+//
+//   g_releaseFrames  steps left in the walk, counted in GAME logic frames rather than in ticks
+//   g_releaseTotal   what it started from, so the ease curve knows where along itself it is
+//   g_releaseYaw     what is actually being written while it runs, and therefore what is on screen
+//   g_releasePitch   ditto for pitch
+//
+// g_desiredYaw is deliberately NOT touched by any of this. It stays where the player left it, so
+// the debugger goes on showing what was asked for rather than what the fade is doing with it, and
+// a stroke that resumes mid-handback can re-anchor to the screen without the intent having moved.
+static int g_releaseFrames = 0;
+static int g_releaseTotal = 0;
+static float g_releaseYaw = 0.0f;
+static float g_releasePitch = 0.0f;
+// The game logic frame the handback last stepped on. Separate from the pitch write's own frame
+// tracker on purpose: that one only advances on ticks where pitch was actually asserted, so reusing
+// it would make the walk step every tick in any state that does not drive pitch.
+static u32 g_lastHandbackFrame = 0xFFFFFFFF;
+// What the walk is aiming at, and where that came from. For the debugger only - the walk itself
+// re-reads the target every step rather than trusting these.
+static float g_handbackTargetYaw = 0.0f;
+static bool g_handbackBehindPlayer = false;
+
+// --- Where the follow camera actually sits, measured ---
+//
+// See learnFollowOffset in the header. This is CameraYaw minus PedHeading, sampled only while the
+// player walks in a straight line with the camera at rest and us not driving it.
+static float g_followOffset = 0.0f;
+static u64 g_followSamples = 0;
+// The raw instantaneous value and the speed that gates it, kept purely so the debugger can show
+// what the learner is seeing rather than only what it concluded.
+static float g_followOffsetLive = 0.0f;
+static float g_followSpeed = 0.0f;
+// The previous sample, and the game frame it came from. A sample is only differenced against the
+// frame immediately before it - anything else spans an interval we were driving through, where
+// both values were ours rather than the game's.
+static float g_followPrevHeading = 0.0f;
+static float g_followPrevYaw = 0.0f;
+static u32 g_followPrevFrame = 0xFFFFFFFF;
+
+// The derived fallback: a camera exactly opposite the character's facing. PedAimTick inverts
+// heading = camYaw + PI/2, so this is that same quarter turn, run the other way.
+static const float kFollowOffsetDerived = -kTwoPi * 0.25f;
+
+// Squared speed, in the velocity fields' own per-frame units, above which the player counts as
+// walking. About 0.02 per frame, which is roughly a third of a walk - low enough to catch the
+// approach to a stop, high enough that drift and physics jitter do not read as movement.
+static const float kFollowMoveSpeedSq = 0.0004f;
+
+// Radians per game frame under which heading and camera count as still. 0.01 is 0.57 degrees a
+// frame, about 17 degrees a second - a straight line, not a turn.
+static const float kFollowStillEps = 0.01f;
+
+// Samples needed before the learned value is used instead of the derived one. Twenty is under a
+// second of straight walking, and enough that one bad frame cannot move the answer far.
+static const u64 kFollowMinSamples = 20;
+
+// How much of each sample to take. Low, because the samples are cheap and plentiful and the value
+// is supposed to be a constant - if it is not, that is worth seeing as a number that will not
+// settle rather than as a fast-moving one that always looks confident.
+static const float kFollowLearnRate = 0.1f;
+
+// --- What the game does the moment we let go ---
+//
+// See ReleaseTrace in the header. Armed by the final step of a handback, filled one game frame at a
+// time afterwards, and read by the debugger.
+static const int kReleaseTraceFrames = 24;
+static float g_releaseTrace[kReleaseTraceFrames] = {};
+static int g_releaseTraceCount = 0;
+static bool g_releaseTraceArmed = false;
+static float g_releaseTraceWritten = 0.0f;
+static u32 g_releaseTraceFrame = 0xFFFFFFFF;
+
+// Whether the walk currently running was asked for by a glance, and must therefore aim at the
+// vehicle's own default bearing rather than at whatever the game's camera is holding.
+static bool g_recentreToHeading = false;
+
+// Why the hold is parked open instead of expiring, or nullptr when it is running normally. A
+// string rather than a flag because there are now two reasons and they are not interchangeable:
+// one is a setting and one is a state, and a debugger that cannot tell them apart is no help at
+// the moment somebody is wondering why the camera will not move.
+static const char *g_parkedReason = nullptr;
+
+// The offset the handback should aim at, trim included.
+static float FollowOffset() {
+	const float base = (g_settings.learnFollowOffset && g_followSamples >= kFollowMinSamples) ?
+		g_followOffset : kFollowOffsetDerived;
+	return base + g_settings.returnBehindTrimDeg * kTwoPi / 360.0f;
+}
+
+// The two clamps the frame settings need. A hold of zero would mean mouse look never wrote at all;
+// a release of zero is meaningful - it is the old cliff - so only the hold has a floor of 1.
+static int HoldFrames() {
+	const int frames = g_settings.lookHoldFrames;
+	return frames < 1 ? 1 : (frames > 600 ? 600 : frames);
+}
+
+static int ReleaseFrames() {
+	const int frames = g_settings.lookReleaseFrames;
+	return frames < 0 ? 0 : (frames > 600 ? 600 : frames);
+}
+
+// The game stores yaw in [0, 2PI), and feeding it anything outside that makes the camera snap.
+static float WrapYaw(float yaw) {
+	yaw = std::fmod(yaw, kTwoPi);
+	return yaw < 0.0f ? yaw + kTwoPi : yaw;
+}
+
+// The difference between two headings, the SHORT way round. A gap of 350 degrees is a gap of -10,
+// and a fade that believes otherwise takes the long way round the compass to get nowhere.
+static float ShortestAngle(float delta) {
+	delta = std::fmod(delta + kTwoPi * 0.5f, kTwoPi);
+	if (delta < 0.0f) {
+		delta += kTwoPi;
+	}
+	return delta - kTwoPi * 0.5f;
+}
+
+// Flat at both ends, so the handback neither starts with a jerk nor stops with one. A linear fade
+// is continuous in position and discontinuous in velocity, and the eye reads that second
+// discontinuity as a smaller version of the same snap.
+static float SmoothStep(float t) {
+	if (t <= 0.0f) return 0.0f;
+	if (t >= 1.0f) return 1.0f;
+	return t * t * (3.0f - 2.0f * t);
+}
 
 // How far pitch may travel from wherever the game had it when the look started - about 40
 // degrees each way. Deliberately RELATIVE, so no baseline has to be known or assumed; an
@@ -1045,6 +1169,206 @@ static float YawKickStep(VCSInputContext context, float yawStep) {
 	return step;
 }
 
+// Watch what the game does with the camera when it is left alone, and remember the one number that
+// describes it. Emu thread only; call on ticks where we are NOT driving.
+//
+// Every gate here is refusing a sample rather than taking one, which is the right bias: the cost of
+// a missed sample is a slightly slower learner, and the cost of a bad one is a handback that aims
+// somewhere the game does not agree with - the exact failure this exists to fix.
+// Is the player actually walking? The same speed gate the learner uses, and deliberately the same
+// number: the two questions are "is the game moving its camera" and "is the game moving its camera",
+// so they had better not disagree about what moving means.
+//
+// An unreadable velocity counts as MOVING. Holding the camera forever because a field went missing
+// is the worse failure of the two - the player would have no way to get the follow camera back.
+static bool PlayerIsMoving() {
+	const std::optional<float> velX = ReadAddrFloat(VCSAddr::PedVelX);
+	const std::optional<float> velY = ReadAddrFloat(VCSAddr::PedVelY);
+	if (!velX || !velY) {
+		return true;
+	}
+	return (*velX * *velX + *velY * *velY) >= kFollowMoveSpeedSq;
+}
+
+// Record what the camera does on the frames after a handback ends. Emu thread only, on ticks where
+// we are not driving - which is exactly when the game has it.
+static void TraceRelease() {
+	if (!g_releaseTraceArmed || g_releaseTraceCount >= kReleaseTraceFrames) {
+		return;
+	}
+	const std::optional<u32> gameFrame = ReadAddrU32(VCSAddr::FrameCounter);
+	if (gameFrame) {
+		if (*gameFrame == g_releaseTraceFrame) {
+			return;
+		}
+		g_releaseTraceFrame = *gameFrame;
+	}
+	const std::optional<float> yaw = ReadAddrFloat(VCSAddr::CameraYaw);
+	const std::optional<float> heading = ReadAddrFloat(VCSAddr::PedHeading);
+	if (!yaw || !heading) {
+		return;
+	}
+	// Stored relative to the heading rather than absolutely, so a trace taken while the player
+	// drifts is still comparable frame to frame - and so it reads in the same units as the offset
+	// the walk was aiming at.
+	g_releaseTrace[g_releaseTraceCount++] = ShortestAngle(*yaw - *heading);
+}
+
+static void SampleFollowOffset(VCSInputContext context) {
+	// Note there is no context test up here, on purpose. The LIVE offset is worth showing in any
+	// camera - it is how anyone can check whether PedHeading tracks the car, which is the one
+	// assumption the glance recentre rests on and the one this fork has not measured. Only the
+	// LEARNING is on foot, and its gate is further down where the samples are actually taken.
+
+	// Once per game logic frame, and only against the frame immediately before it. An unreadable
+	// counter means we cannot tell one frame from the next, so there is no honest difference to
+	// take and the learner simply stands down.
+	const std::optional<u32> gameFrame = ReadAddrU32(VCSAddr::FrameCounter);
+	if (!gameFrame || *gameFrame == g_followPrevFrame) {
+		return;
+	}
+	const bool consecutive = *gameFrame == g_followPrevFrame + 1;
+
+	const std::optional<float> yaw = ReadAddrFloat(VCSAddr::CameraYaw);
+	const std::optional<float> heading = ReadAddrFloat(VCSAddr::PedHeading);
+	const std::optional<float> velX = ReadAddrFloat(VCSAddr::PedVelX);
+	const std::optional<float> velY = ReadAddrFloat(VCSAddr::PedVelY);
+	if (!yaw || !heading) {
+		g_followPrevFrame = 0xFFFFFFFF;
+		return;
+	}
+
+	const float dHeading = consecutive ? ShortestAngle(*heading - g_followPrevHeading) : 0.0f;
+	const float dYaw = consecutive ? ShortestAngle(*yaw - g_followPrevYaw) : 0.0f;
+	g_followPrevHeading = *heading;
+	g_followPrevYaw = *yaw;
+	g_followPrevFrame = *gameFrame;
+
+	g_followOffsetLive = ShortestAngle(*yaw - *heading);
+	g_followSpeed = (velX && velY) ? std::sqrt(*velX * *velX + *velY * *velY) : 0.0f;
+	if (!consecutive || !velX || !velY) {
+		return;
+	}
+	// From here down it is a SAMPLE rather than a reading, and a sample only means anything in the
+	// camera the offset was defined against.
+	if (!g_settings.learnFollowOffset || context != VCSInputContext::OnFoot) {
+		return;
+	}
+
+	const float speedSq = *velX * *velX + *velY * *velY;
+	if (speedSq < kFollowMoveSpeedSq) {
+		return;
+	}
+	if (std::fabs(dHeading) > kFollowStillEps || std::fabs(dYaw) > kFollowStillEps) {
+		return;
+	}
+
+	// First clean sample is taken whole - starting the average at the derived value would make the
+	// learner spend its first second walking away from an answer it never measured.
+	if (g_followSamples == 0) {
+		g_followOffset = g_followOffsetLive;
+	} else {
+		// ShortestAngle normalises as well as differences, so the average cannot wind up past a
+		// half turn even though it is being nudged around a circle.
+		g_followOffset = ShortestAngle(g_followOffset +
+			ShortestAngle(g_followOffsetLive - g_followOffset) * kFollowLearnRate);
+	}
+	g_followSamples++;
+}
+
+// One step of the handback, run on the ticks after the hold expires.
+//
+// It closes a FRACTION OF THE REMAINING GAP rather than interpolating between two fixed endpoints,
+// because the far endpoint moves: the game goes on computing its own camera the whole time we are
+// walking toward it. Reparameterising the smoothstep against the gap that is actually left keeps
+// the curve's shape - flat at both ends - while tracking a target that is still changing, and the
+// final step closes whatever remains in full. That last part is the guarantee that matters: the
+// tick where we stop writing has already written the game's own value, so there is no step left
+// anywhere in the sequence for the player to feel.
+//
+// It also means the walk is a no-op if the game had adopted our value after all. The gap is then
+// zero on every step, nothing moves, and the camera simply stays where the player put it - so this
+// is correct without having had to settle which of the two the follow camera actually does.
+static void StepHandback(VCSInputContext context) {
+	// At the GAME's rate, not ours. We tick at ~60Hz against its 30fps logic, so stepping on every
+	// tick would run the walk at double speed and, worse, put two of our writes between the game's
+	// own updates - the exact double-write that wound up the vehicle pitch integrator. An unreadable
+	// frame counter falls back to stepping every tick, which is the same fallback the pitch assert
+	// takes and is wrong in the same harmless direction: a faster fade, not a snap.
+	const std::optional<u32> gameFrame = ReadAddrU32(VCSAddr::FrameCounter);
+	if (gameFrame) {
+		if (*gameFrame == g_lastHandbackFrame) {
+			return;
+		}
+		g_lastHandbackFrame = *gameFrame;
+	}
+
+	const int total = g_releaseTotal > 0 ? g_releaseTotal : 1;
+	const int before = g_releaseFrames;
+	const int after = before - 1;
+	g_releaseFrames = after;
+
+	// The walk is about to write for the last time, so arm the trace: everything the camera does
+	// from the next game frame on is the game's, and that is the thing nobody has measured yet.
+	if (after <= 0) {
+		g_releaseTraceArmed = true;
+		g_releaseTraceCount = 0;
+		g_releaseTraceFrame = 0xFFFFFFFF;
+	}
+
+	const float eBefore = SmoothStep(1.0f - (float)before / (float)total);
+	const float eAfter = SmoothStep(1.0f - (float)after / (float)total);
+	const float room = 1.0f - eBefore;
+	float k = room > 1e-4f ? (eAfter - eBefore) / room : 1.0f;
+	if (after <= 0 || k > 1.0f) {
+		k = 1.0f;
+	}
+
+	// WHERE THE WALK IS GOING, which is not the same question as how fast it gets there.
+	//
+	// Behind the character when we can have it - see returnBehindPlayer - and the game's own live
+	// yaw otherwise. The fallback is not a degraded mode: in a vehicle it is the right answer, and
+	// on foot with no readable player it is the only safe one, since a target we cannot compute is
+	// worse than a target that does nothing.
+	std::optional<float> targetYaw;
+	g_handbackBehindPlayer = false;
+	// A glance recentre aims at the heading in ANY camera - that is the whole request - while the
+	// automatic return only does so on foot, where the offset was measured.
+	if (g_recentreToHeading ||
+			(g_settings.returnBehindPlayer && context == VCSInputContext::OnFoot)) {
+		const std::optional<float> heading = ReadAddrFloat(VCSAddr::PedHeading);
+		if (heading) {
+			// The offset the follow camera was measured holding - or the derived quarter turn until
+			// the learner has enough samples. See SampleFollowOffset.
+			targetYaw = WrapYaw(*heading + FollowOffset());
+			g_handbackBehindPlayer = true;
+		}
+	}
+	if (!targetYaw) {
+		targetYaw = ReadAddrFloat(VCSAddr::CameraYaw);
+	}
+
+	// Yaw goes the short way round; pitch does not wrap and must not be treated as though it did.
+	if (targetYaw) {
+		g_handbackTargetYaw = *targetYaw;
+		g_releaseYaw = WrapYaw(g_releaseYaw + ShortestAngle(*targetYaw - g_releaseYaw) * k);
+	}
+	// Same validity test the anchor uses: the vehicle entry can leave several radians in this field,
+	// and fading toward a value that is not a pitch would be a snap with extra steps.
+	const std::optional<float> livePitch = ReadAddrFloat(VCSAddr::CameraPitch);
+	if (livePitch && std::fabs(*livePitch) <= kMaxPlausiblePitch) {
+		g_releasePitch += (*livePitch - g_releasePitch) * k;
+	}
+
+	// What we are handing over, in the trace's own units, so the first row of the trace can be read
+	// against it directly rather than against a number in a different space.
+	if (g_releaseTraceArmed) {
+		const std::optional<float> heading = ReadAddrFloat(VCSAddr::PedHeading);
+		g_releaseTraceWritten = heading ?
+			ShortestAngle(g_releaseYaw - *heading) : g_releaseYaw;
+	}
+}
+
 void CameraTick(VCSInputContext context) {
 	g_driving = false;
 
@@ -1076,6 +1400,9 @@ void CameraTick(VCSInputContext context) {
 	// with both off nothing fills the accumulator and there is nothing here to apply.
 	if ((!g_settings.enabled && !PadSettings().enabled) || !ContextDrivesCamera(context)) {
 		g_holdFrames = 0;
+		// Nothing to hand back if we are not allowed to write - a menu opening is not a moment to
+		// keep fading a value into the game's camera.
+		g_releaseFrames = 0;
 		g_lastContext = context;
 		return;
 	}
@@ -1086,6 +1413,10 @@ void CameraTick(VCSInputContext context) {
 	// whose pitch baseline is about 1.5 radians away from the vehicle one.
 	if (context != g_lastContext) {
 		g_holdFrames = 0;
+		// The handback walks toward the value the OLD camera was computing. A new camera has its own
+		// baseline - about 1.5 rad away, between on foot and a vehicle - so continuing the walk would
+		// fade toward a number that no longer means anything.
+		g_releaseFrames = 0;
 		g_lastContext = context;
 		// A new camera means a new baseline, and it is the only thing that may move the anchor.
 		g_haveAnchorPitch = false;
@@ -1095,6 +1426,14 @@ void CameraTick(VCSInputContext context) {
 		g_yawKickSign = 0.0f;
 		g_yawKickAgainst = 0.0f;
 		g_yawKickLead = 0.0f;
+	}
+
+	// Learn from the game while it still has the camera. This has to run BEFORE anything below
+	// claims a stroke, because the one thing that makes a sample worth having is that the value
+	// being read is the game's own and not ours.
+	if (g_holdFrames == 0 && g_releaseFrames == 0) {
+		SampleFollowOffset(context);
+		TraceRelease();
 	}
 
 	// The game runs its own camera smoothing: it eases yaw back toward wherever its follow logic
@@ -1153,11 +1492,29 @@ void CameraTick(VCSInputContext context) {
 		if (g_holdFrames == 0) {
 			// Starting a fresh look - anchor to wherever the game currently has the camera, so
 			// we never snap from a stale value.
-			const std::optional<float> current = ReadAddrFloat(VCSAddr::CameraYaw);
-			if (!current) {
-				return;
+			//
+			// EXCEPT mid-handback, where the game's value IS the stale one: it is exactly what the
+			// old cliff used to snap to, so anchoring to it would deliver that same snap on the
+			// first frame of the player's next movement instead of a second after their last. What
+			// is on screen during the walk is g_releaseYaw, so that is where the stroke continues
+			// from, and the takeover is invisible wherever the fade had got to.
+			const bool midHandback = g_releaseFrames > 0;
+			g_releaseFrames = 0;
+			// Stop tracing: from here the camera is ours again, and a trace that kept filling would
+			// be recording our own writes as though they were the game's.
+			g_releaseTraceArmed = false;
+			// The mouse outranks a recentre that is still finishing - it is a newer instruction from
+			// the same player.
+			g_recentreToHeading = false;
+			if (midHandback) {
+				g_desiredYaw = g_releaseYaw;
+			} else {
+				const std::optional<float> current = ReadAddrFloat(VCSAddr::CameraYaw);
+				if (!current) {
+					return;
+				}
+				g_desiredYaw = *current;
 			}
-			g_desiredYaw = *current;
 			// A new stroke re-reads where the aim actually is, so the intent never starts from a
 			// stale value the game has since moved.
 			g_haveIntentPitch = false;
@@ -1176,7 +1533,8 @@ void CameraTick(VCSInputContext context) {
 			//
 			// Both are gated on the value actually looking like a pitch - see kMaxPlausiblePitch.
 			// Syncing desired to a 5 rad transient would be just as wrong as anchoring to it.
-			const std::optional<float> pitch = ReadAddrFloat(VCSAddr::CameraPitch);
+			const std::optional<float> pitch = midHandback ?
+				std::optional<float>(g_releasePitch) : ReadAddrFloat(VCSAddr::CameraPitch);
 			if (pitch && std::fabs(*pitch) <= kMaxPlausiblePitch) {
 				g_desiredPitch = *pitch;
 				if (!g_haveAnchorPitch) {
@@ -1447,7 +1805,7 @@ void CameraTick(VCSInputContext context) {
 			g_haveIntentYaw = false;
 			g_desiredYaw += yawStep + YawKickStep(context, yawStep);
 		}
-		g_holdFrames = kHoldFrames;
+		g_holdFrames = HoldFrames();
 	}
 
 	// RETRACT THE LEAD ONCE, on the first still frame after a stroke.
@@ -1501,16 +1859,64 @@ void CameraTick(VCSInputContext context) {
 		g_yawKickLead = 0.0f;
 	}
 
-	if (g_holdFrames <= 0) {
-		return;
-	}
-	g_holdFrames--;
-
 	// The game stores yaw in [0, 2PI). Feeding it a value outside that range makes the camera
 	// snap, so wrap rather than clamp - this is a heading, it genuinely is circular.
-	g_desiredYaw = std::fmod(g_desiredYaw, kTwoPi);
-	if (g_desiredYaw < 0.0f) {
-		g_desiredYaw += kTwoPi;
+	g_desiredYaw = WrapYaw(g_desiredYaw);
+
+	// Hold at full authority, then WALK the camera back to the game rather than dropping it.
+	//
+	// Everything above this line deals in what the player asked for; this is the only place that
+	// decides how much of it to assert. The three states are exhaustive - holding, handing back,
+	// done - and only the last one stops writing, by which point it has nothing left to say.
+	float writeYaw = g_desiredYaw;
+	float writePitch = g_desiredPitch;
+	if (g_holdFrames > 0) {
+		g_holdFrames--;
+		if (g_holdFrames == 0) {
+			// PARK THE HOLD OPEN rather than expiring, for either of two reasons - the player has
+			// switched the return off entirely, or they are standing still and holdUntilMoving is
+			// on. One tick at a time rather than a flag, so the question is re-asked every tick and
+			// the walk starts on the first one where the answer changes.
+			//
+			// Deliberately re-entering the hold rather than pausing the walk: the walk's whole
+			// promise is that its last step lands on the game's own value, and a walk that can be
+			// suspended halfway is one that can be left parked between two values it was supposed
+			// to be interpolating.
+			//
+			// A GLANCE OVERRIDES BOTH REASONS, because it is the player asking for the default view
+			// in as many words - see recenterOnGlance. Checked first for exactly that reason: a
+			// deliberate request outranks a setting that says "not on your own" and a state that
+			// says "not yet".
+			const bool glanceRecentre = g_settings.recenterOnGlance &&
+				context == VCSInputContext::InVehicle && GlanceButtonMask(context) != 0;
+			if (glanceRecentre) {
+				g_parkedReason = nullptr;
+			} else if (!g_settings.returnLook) {
+				g_parkedReason = "the return is switched off";
+			} else if (g_settings.holdUntilMoving && context == VCSInputContext::OnFoot &&
+					!PlayerIsMoving()) {
+				g_parkedReason = "the player is standing still";
+			} else {
+				g_parkedReason = nullptr;
+			}
+			if (g_parkedReason) {
+				g_holdFrames = 1;
+			} else {
+				g_recentreToHeading = glanceRecentre;
+				// The hold has just run out. Arm the walk from exactly where it leaves the camera,
+				// so this end of it is a non-event too.
+				g_releaseTotal = ReleaseFrames();
+				g_releaseFrames = g_releaseTotal;
+				g_releaseYaw = g_desiredYaw;
+				g_releasePitch = g_desiredPitch;
+			}
+		}
+	} else if (g_releaseFrames > 0) {
+		StepHandback(context);
+		writeYaw = g_releaseYaw;
+		writePitch = g_releasePitch;
+	} else {
+		return;
 	}
 
 	// Pitch has to be re-asserted every frame too - more so than yaw, in fact: a one-shot pitch
@@ -1542,16 +1948,16 @@ void CameraTick(VCSInputContext context) {
 	const bool assertPitch = havePitch && g_haveAnchorPitch &&
 		(!inVehicleOfAnyKind || newGameFrame);
 	if (assertPitch) {
-		WriteAddrFloat(VCSAddr::CameraPitch, g_desiredPitch);
+		WriteAddrFloat(VCSAddr::CameraPitch, writePitch);
 		if (gameFrame) {
 			g_lastPitchFrame = *gameFrame;
 		}
 	}
 
-	g_driving = WriteAddrFloat(VCSAddr::CameraYaw, g_desiredYaw);
+	g_driving = WriteAddrFloat(VCSAddr::CameraYaw, writeYaw);
 	if (g_driving) {
 		g_writes++;
-		g_lastWritten = g_desiredYaw;
+		g_lastWritten = writeYaw;
 	} else {
 		g_writeFails++;
 	}
@@ -1824,6 +2230,22 @@ void CameraReset() {
 	g_pendingDy = 0.0f;
 	g_driving = false;
 	g_holdFrames = 0;
+	g_releaseFrames = 0;
+	g_releaseTotal = 0;
+	g_releaseYaw = 0.0f;
+	g_releasePitch = 0.0f;
+	g_lastHandbackFrame = 0xFFFFFFFF;
+	// The offset belongs to one game's camera, so a fresh session re-measures it rather than
+	// inheriting a number that was true of whatever ran last.
+	g_followOffset = 0.0f;
+	g_followSamples = 0;
+	g_followOffsetLive = 0.0f;
+	g_followSpeed = 0.0f;
+	g_followPrevFrame = 0xFFFFFFFF;
+	g_releaseTraceArmed = false;
+	g_releaseTraceCount = 0;
+	g_parkedReason = nullptr;
+	g_recentreToHeading = false;
 	g_desiredYaw = 0.0f;
 	g_desiredPitch = 0.0f;
 	g_yawKickSign = 0.0f;
@@ -1845,6 +2267,34 @@ void CameraHoldState(float *desiredYaw, float *desiredPitch, float *anchorPitch,
 	*anchorPitch = g_anchorPitch;
 	*holdFrames = g_holdFrames;
 	*contextName = VCSInputContextName(g_lastContext);
+}
+
+int CameraReleaseFrames() {
+	return g_releaseFrames;
+}
+
+void ReleaseTrace(const float **trace, int *count, float *written) {
+	if (trace) *trace = g_releaseTrace;
+	if (count) *count = g_releaseTraceCount;
+	if (written) *written = g_releaseTraceWritten;
+}
+
+const char *CameraParkedReason() {
+	return g_parkedReason;
+}
+
+void FollowOffsetState(float *used, float *live, u64 *samples, float *speed) {
+	if (used) *used = FollowOffset();
+	if (live) *live = g_followOffsetLive;
+	if (samples) *samples = g_followSamples;
+	if (speed) *speed = g_followSpeed;
+}
+
+float CameraHandbackTargetYaw(bool *behindPlayer) {
+	if (behindPlayer) {
+		*behindPlayer = g_handbackBehindPlayer;
+	}
+	return g_handbackTargetYaw;
 }
 
 void CameraWriteStats(u64 *writes, u64 *fails, float *lastWritten) {
