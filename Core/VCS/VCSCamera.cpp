@@ -264,6 +264,12 @@ static float g_yawKickAgainst = 0.0f;
 // than was added would leave the difference in the lever permanently - a slow drift that would look
 // like the kick being wrong rather than like the bookkeeping being wrong.
 static float g_yawKickLead = 0.0f;
+// Front's yaw as the kick last saw it, and how many ticks it has sat still. Deliberately NOT the
+// g_lastFrontYaw below: that one belongs to the closed-loop deadband solve and is only updated on
+// ticks where that solve runs at all, so it is stale exactly when this needs it fresh.
+static float g_kickFrontYaw = 0.0f;
+static bool g_haveKickFront = false;
+static int g_kickRestTicks = 0;
 static float g_intentYaw = 0.0f;
 static bool g_haveIntentYaw = false;
 static const float kIntentEpsilon = 0.002f;
@@ -1426,6 +1432,8 @@ void CameraTick(VCSInputContext context) {
 		g_yawKickSign = 0.0f;
 		g_yawKickAgainst = 0.0f;
 		g_yawKickLead = 0.0f;
+		g_haveKickFront = false;
+		g_kickRestTicks = 0;
 	}
 
 	// Learn from the game while it still has the camera. This has to run BEFORE anything below
@@ -1526,6 +1534,8 @@ void CameraTick(VCSInputContext context) {
 			g_yawKickSign = 0.0f;
 			g_yawKickAgainst = 0.0f;
 			g_yawKickLead = 0.0f;
+			g_haveKickFront = false;
+			g_kickRestTicks = 0;
 
 			// Desired always re-syncs to live, so a stroke never snaps from a stale value. The
 			// ANCHOR does not: it is the fixed origin of the clamp window for as long as we stay in
@@ -1857,6 +1867,65 @@ void CameraTick(VCSInputContext context) {
 		g_yawKickSign = 0.0f;
 		g_yawKickAgainst = 0.0f;
 		g_yawKickLead = 0.0f;
+		g_haveKickFront = false;
+		g_kickRestTicks = 0;
+	}
+
+	// RE-ARM THE KICK when the game's own aim comes to rest, so the next stroke breaks it loose
+	// again instead of inheriting a sign with nothing behind it.
+	//
+	// The lead releases the moment the view breaks loose - that is the measurement the kick is built
+	// on - so once the aim has stopped there is no lead in front of it. The SIGN outlives the radians,
+	// and a stroke that finds a stale sign either gets no kick at all (same direction: `dir == sign`
+	// takes the early return, and the player spends a deadband) or two of them (reversal: the flip
+	// costs `want - lead` = 2*kick, measured in play at 0.34 out for 0.04 of hysteresis in). One
+	// staleness, both faults. See aimYawKickRearmTicks.
+	//
+	// FRONT NOT MOVING is the test, not the mouse being still, and that distinction is the whole
+	// correction over the build that counted still mouse ticks and made this worse: a slow sweep has
+	// whole ticks with no mouse counts in it, and re-arming on one of those stacks a second kick on
+	// the one already working. Front stops when the AIM has arrived, which is the actual question.
+	//
+	// A DIFFERENCE between consecutive ticks, used once, to answer yes or no. Nothing is solved from
+	// the read and nothing is written, so this is not the closed loop the file warns about - and
+	// because it never uses Front's absolute value, the quadrant constant between Beta's space and
+	// Front's cannot get it wrong.
+	if (context == VCSInputContext::Aiming && g_yawKickSign != 0.0f &&
+		g_settings.aimYawKickRearmTicks > 0) {
+		const std::optional<float> fx = ReadFloat(kVCSCam0 + kVCSCamFrontOffset);
+		const std::optional<float> fy = ReadFloat(kVCSCam0 + kVCSCamFrontOffset + 4);
+		if (fx && fy && (*fx != 0.0f || *fy != 0.0f)) {
+			const float frontYaw = std::atan2(*fy, *fx);
+			// Short way round, or a stroke across the wrap point reads as most of a turn and the
+			// aim never looks still.
+			float moved = std::fmod(frontYaw - g_kickFrontYaw + kTwoPi * 0.5f, kTwoPi);
+			if (moved < 0.0f) moved += kTwoPi;
+			moved -= kTwoPi * 0.5f;
+			const bool aimStill = g_haveKickFront && std::fabs(moved) <= kFrontMovedEps;
+			g_kickFrontYaw = frontYaw;
+			g_haveKickFront = true;
+			// Both halves: the player has stopped asking AND the aim has stopped arriving. Mouse
+			// alone is the mistake described above; Front alone would count the ticks at the start
+			// of a stroke where the fresh kick has not broken the aim loose yet, and re-arm on top
+			// of the very kick it is waiting for.
+			if (aimStill && dx == 0.0f) {
+				g_kickRestTicks++;
+			} else {
+				g_kickRestTicks = 0;
+			}
+			if (g_kickRestTicks >= g_settings.aimYawKickRearmTicks) {
+				// Bookkeeping only. The radians already folded into the lever stay exactly where
+				// they are - moving them is the retract, and the retract is the one thing here
+				// measured to snap.
+				g_yawKickSign = 0.0f;
+				g_yawKickAgainst = 0.0f;
+				g_yawKickLead = 0.0f;
+				g_kickRestTicks = 0;
+			}
+		}
+	} else {
+		g_kickRestTicks = 0;
+		g_haveKickFront = false;
 	}
 
 	// The game stores yaw in [0, 2PI). Feeding it a value outside that range makes the camera
@@ -1981,9 +2050,10 @@ void PedAimStats(bool *driving, float *desiredHeading, u64 *writes) {
 	if (writes) *writes = g_pedAimWrites;
 }
 
-void YawKickState(float *side, float *againstIt) {
+void YawKickState(float *side, float *againstIt, int *restTicks) {
 	if (side) *side = g_yawKickSign;
 	if (againstIt) *againstIt = g_yawKickAgainst;
+	if (restTicks) *restTicks = g_kickRestTicks;
 }
 
 void AimAxisStats(float *desiredYaw, float *liveYaw, float *desiredPitch, float *livePitch) {
@@ -2251,6 +2321,9 @@ void CameraReset() {
 	g_yawKickSign = 0.0f;
 	g_yawKickAgainst = 0.0f;
 	g_yawKickLead = 0.0f;
+	g_kickFrontYaw = 0.0f;
+	g_haveKickFront = false;
+	g_kickRestTicks = 0;
 	g_anchorPitch = 0.0f;
 	g_haveAnchorPitch = false;
 	g_lastContext = VCSInputContext::Unknown;

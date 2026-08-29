@@ -749,15 +749,91 @@ struct VCSCameraSettings {
 	// How far, in radians of intent, the mouse must travel AGAINST the current lead before it moves
 	// to the other side.
 	//
-	// This is the one thing standing between the kick and the snap it replaces. Mouse deltas flip
-	// sign between frames constantly inside an ordinary stroke - a hand is not a stepper motor - and
-	// flipping the lead on each of those would inject 2*kick every time, which is the limit cycle
-	// again with a different trigger. Requiring sustained travel the other way means only a
-	// deliberate reversal pays it.
+	// ZERO, settled in play, and it is the fix for the dead zone that outlived three builds of
+	// looking for it somewhere else: hold aim, sweep, stop without releasing, sweep again - and the
+	// view refuses to follow until the mouse has spent a chunk of travel on nothing.
 	//
-	// A quarter of the kick, so a reversal is recognised well before the player has spent a whole
-	// deadband wondering why the view stopped following.
-	float aimYawKickHysteresis = 0.04f;
+	// The argument for having a threshold was that mouse deltas flip sign between frames constantly
+	// inside an ordinary stroke - a hand is not a stepper motor - and flipping the lead on each of
+	// those would inject 2*kick every time. That is a real mechanism. What it does not do is justify
+	// THIS shape of guard, because of a detail that only shows up when you follow what the lever is
+	// doing during the spend:
+	//
+	//   The threshold does not prevent the reversal cost. It DELAYS it. The 2*kick flip happens
+	//   either way - all the travel buys is when. And during the spend the lever is still moving,
+	//   because yawStep is added regardless of what YawKickStep returns; it is the AIM that is not
+	//   moving, since an aim that has come to rest has no lead in front of it and the lever has to
+	//   cross a whole deadband before the game will follow. So the player pushes, the lever moves,
+	//   nothing happens on screen, and then it all arrives at once.
+	//
+	// Watched in the debugger, at default: 0.04 of intent goes in and 0.34 comes out - the settings
+	// read back exactly, 0.04 being this and 0.332 being 2*aimYawKick. Not a coincidence to explain,
+	// an arithmetic identity to act on.
+	//
+	// At zero the flip lands on the first frame of the reversal, which is a frame the player is
+	// already moving on, and 2*kick is exactly what an aim at rest needs to break loose. That is the
+	// header comment above aimYawKick predicting its own best case and the guard preventing it.
+	//
+	// If the chatter the threshold was built for ever does appear - it would be a low-speed
+	// phenomenon, a slow sweep wobbling around the sign - do not bring this back. A travel threshold
+	// taxes every genuine reversal to catch a wobble; filter the sign, or require the reversal to be
+	// sustained in TIME, and leave the deliberate one free.
+	float aimYawKickHysteresis = 0.0f;
+
+	// How many ticks THE GAME'S OWN AIM must sit still before the kick is re-armed, so the next
+	// stroke pays for it again.
+	//
+	// ZERO - THIS WAS NOT THE FAULT, and it is here as the negative result rather than as a feature.
+	// The dead zone it was built for is the aimYawKickHysteresis spend above, and setting that to 0
+	// fixes it outright with this switched off.
+	//
+	// The kick is one-shot per stroke direction and its sign then sits there for as long as aim is
+	// held. That is right for the frames inside a stroke and wrong the moment the player pauses
+	// without letting go, because the lead the sign claims to be holding does not survive the pause -
+	// "it releases the instant the view breaks loose" is the measurement this was built on, and by
+	// the time the aim has stopped the lead has been spent. The sign outlives the radians.
+	//
+	// Both halves of the reported fault come out of that one staleness, and they are worth writing
+	// down together because they look like two different bugs:
+	//
+	//   Push the SAME way again. `dir == sign`, so YawKickStep takes its early return and adds
+	//   nothing. There is no lead standing in front of an aim that has come to rest, so the player
+	//   spends a whole deadband getting it moving. That is the dead zone.
+	//
+	//   Push the OTHER way. The hysteresis eats 0.04 rad of intent, and then the flip costs
+	//   `want - lead` = 2 * kick = 0.332 in one frame. The aim needed one kick and got two.
+	//   MEASURED IN PLAY at 0.04 in and 0.34 out, both directions, which is what turned this from a
+	//   theory into an arithmetic check.
+	//
+	// So the test is whether the AIM has stopped, not whether the mouse has. An earlier build counted
+	// still mouse ticks and was worse, for a reason worth keeping: a slow sweep produces whole ticks
+	// with no mouse counts in them, so it re-armed mid-stroke and added a second kick on top of the
+	// one already working. Front moving is the difference between "the player is being gentle" and
+	// "the aim has arrived", and only the game can answer that.
+	//
+	// Reading Front here is not the closed loop this file warns about. Nothing is solved from it and
+	// nothing is written: it is a DIFFERENCE between consecutive ticks, used once, to answer a yes/no
+	// question. That also makes it immune to the quadrant constant between Beta's space and Front's,
+	// which an absolute offset would have to get right.
+	//
+	// Three ticks would be the value if it were ever wanted - a settle confirmation rather than a
+	// guess about the physics, since one tick of Front under the epsilon can happen mid-glide.
+	//
+	// TWO BUILDS WENT INTO THIS AND BOTH WERE REPORTED WORSE, which is worth recording in order:
+	//
+	//   The first counted still MOUSE ticks. Worse immediately, and the reason generalises: a slow
+	//   sweep produces whole ticks with no mouse counts in it, so it re-armed mid-stroke and stacked
+	//   a second kick on the one already working.
+	//
+	//   The second is what is written above - Front not moving AND the mouse still. That is the right
+	//   test if this question is ever the right question. It was not; the delay was never a missing
+	//   kick, so a better way of deciding when to add one could not help.
+	//
+	// The reasoning that produced it still looks sound, and that is exactly why it is being kept
+	// switchable instead of deleted: a parked sign genuinely does outlive the radians behind it. It
+	// simply is not what anyone was feeling. Do not rebuild it from scratch on the strength of that
+	// argument alone - it has already been built twice.
+	int aimYawKickRearmTicks = 0;
 
 	// Drop the kick once, on the first still frame after a yaw stroke.
 	//
@@ -921,10 +997,12 @@ void AimLastDeflection(float *x, float *y);
 // against the setting, or its mirror records rotation that never happened.
 float AimChannelLimit();
 
-// Which side the open-loop yaw kick is parked on (-1, 0, +1) and how far the mouse has travelled
-// against it since the last flip. Exported so the debugger can show the chatter the reversal
-// threshold exists to prevent, rather than leaving it to be felt in play.
-void YawKickState(float *side, float *againstIt);
+// Which side the open-loop yaw kick is parked on (-1, 0, +1), how far the mouse has travelled
+// against it since the last flip, and how many ticks the game's aim has been at rest. Exported so
+// the debugger can show the chatter the reversal threshold exists to prevent, rather than leaving it
+// to be felt in play - and, with the rest count, whether the re-arm is firing when the aim actually
+// stops or partway through a slow stroke.
+void YawKickState(float *side, float *againstIt, int *restTicks);
 
 // The factor scaleByFOV is currently applying to the direct angle writes, clamps included, or 1.0
 // when it is off or the FOV does not read as a believable one. Exported so the debugger can show

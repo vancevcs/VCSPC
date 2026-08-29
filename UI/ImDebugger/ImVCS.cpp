@@ -639,7 +639,11 @@ void ImVCSWindow::DrawCamera() {
 			}
 			ImGui::SliderFloat("Yaw kick reversal threshold (rad)", &s.aimYawKickHysteresis, 0.0f, 0.2f, "%.3f");
 			if (ImGui::IsItemHovered()) {
-				ImGui::SetTooltip("How far the mouse must travel AGAINST the current lead before it moves to the other side. Mouse deltas flip sign constantly inside a stroke, and flipping the lead on each would inject 2*kick every time - the limit cycle again with a different trigger. Too low and a steady stroke chatters; too high and a genuine reversal feels sticky.");
+				ImGui::SetTooltip("KEEP 0. How far the mouse must travel AGAINST the current lead before it moves to the other side - and it does not prevent the reversal cost, it only delays it. During the spend the lever moves but the aim does not, because an aim at rest has no lead in front of it, so you push and nothing happens and then it all arrives at once. That is the dead zone after a pause: watched in the debugger, 0.04 of intent in and 0.34 out, which is this setting and 2*aimYawKick read back exactly. At 0 the flip lands on the first frame of the reversal, which is a frame you are already moving on.");
+			}
+			ImGui::SliderInt("Yaw kick re-arm (ticks at rest)", &s.aimYawKickRearmTicks, 0, 30, "%d ticks");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("KEEP 0 - this was not the fault. How long the game's aim must sit still (Front not moving, mouse not moving) before the next stroke pays for the kick again, on the theory that a parked sign outlives the lead behind it. It does, but the dead zone people were feeling is the reversal threshold above, and setting that to 0 fixes it with this off. Two builds went into this and both were reported worse - the first counted still MOUSE ticks and re-armed inside slow sweeps, stacking a second kick on the one already working. Kept switchable so it is not rebuilt from the argument a third time.");
 			}
 			ImGui::Checkbox("Retract the yaw kick when a stroke ends", &s.aimYawKickRetract);
 			if (ImGui::IsItemHovered()) {
@@ -647,13 +651,18 @@ void ImVCSWindow::DrawCamera() {
 			}
 			{
 				float kickSign = 0.0f, kickAgainst = 0.0f;
-				VCS::YawKickState(&kickSign, &kickAgainst);
+				int kickRest = 0;
+				VCS::YawKickState(&kickSign, &kickAgainst, &kickRest);
 				// The two numbers that say whether the kick is behaving. Sign should sit at +1 or -1
 				// for the whole of a one-way stroke and return to 0 when you stop; if it oscillates
 				// while you hold a steady sweep, the reversal threshold is too low and that is the
 				// chatter to catch before it is felt.
-				ImGui::TextDisabled("   yaw kick: side %+.0f   travelled against it %.4f / %.3f",
-					kickSign, kickAgainst, s.aimYawKickHysteresis);
+				// The rest count is what to watch when tuning the re-arm. It should climb only while
+				// you have genuinely stopped and the view has settled; reaching the threshold during
+				// a sweep you think is continuous is the slow-stroke case the tooltip warns about,
+				// and shows up as a kick arriving partway through.
+				ImGui::TextDisabled("   yaw kick: side %+.0f   travelled against it %.4f / %.3f   at rest %d / %d",
+					kickSign, kickAgainst, s.aimYawKickHysteresis, kickRest, s.aimYawKickRearmTicks);
 			}
 			ImGui::SliderFloat("Aim pitch deadband (rad)", &s.aimPitchDeadband, 0.0f, 0.4f, "%.3f");
 			if (ImGui::IsItemHovered()) {
