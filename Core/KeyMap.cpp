@@ -151,13 +151,25 @@ void UpdateNativeMenuKeys() {
 	SingleInputMappingFromPspButton(CTRL_LEFT, &leftKeys, true);
 	SingleInputMappingFromPspButton(CTRL_RIGHT, &rightKeys, true);
 
-#if PPSSPP_PLATFORM(ANDROID)
-	// Hardcode DPAD on Android
+	// Hardcode the DPAD on every platform, not only on Android.
+	//
+	// Everything above names a device: a mapping is (deviceId, keyCode), and the defaults were
+	// written for XInput slot 0 and DInput pad 0. A pad that enumerates anywhere else - a second
+	// controller, a wireless receiver that took slot 0 first, a virtual pad from Steam or
+	// DS4Windows - produces the same NKCODE_DPAD_UP from device 21, matches nothing here, and so
+	// cannot move the focus in ANY PPSSPP menu. The stick on that same pad works, because
+	// UI::AxisEvent recognises DEVICE_ID_XINPUT_0..3 by device CLASS and then synthesises its
+	// fake d-pad keys as DEVICE_ID_KEYBOARD - which is mapped. So the stick navigates and the
+	// d-pad is dead, from one pad, and nothing in the UI explains why.
+	//
+	// The four NKCODE_DPAD_* codes are only ever produced by an actual d-pad or by the arrow
+	// keys, so admitting them from any device says no more than the fallback IsDPadKey already
+	// takes when nothing at all is mapped (Common/UI/View.cpp). It is what Android has always
+	// done, and the reason given there was never Android-specific.
 	upKeys.push_back(InputMapping(DEVICE_ID_ANY, NKCODE_DPAD_UP));
 	downKeys.push_back(InputMapping(DEVICE_ID_ANY, NKCODE_DPAD_DOWN));
 	leftKeys.push_back(InputMapping(DEVICE_ID_ANY, NKCODE_DPAD_LEFT));
 	rightKeys.push_back(InputMapping(DEVICE_ID_ANY, NKCODE_DPAD_RIGHT));
-#endif
 
 	// Push several hard-coded keys before submitting to native.
 	const InputMapping hardcodedConfirmKeys[] = {
@@ -171,9 +183,12 @@ void UpdateNativeMenuKeys() {
 	for (size_t i = 0; i < ARRAY_SIZE(hardcodedConfirmKeys); i++) {
 		InsertIntoVector(&confirmKeys, hardcodedConfirmKeys[i]);
 	}
-	if (!HasMainButtonMapping(confirmKeys)) {
-		confirmKeys.push_back(InputMapping(DEVICE_ID_ANY, confirmWithCross ? NKCODE_BUTTON_A : NKCODE_BUTTON_B));
-	}
+	// Unconditionally, rather than only when nothing else is bound. The face button has the same
+	// slot problem the d-pad above does, and it arrives as the second half of it: a pad that can
+	// finally move the highlight but cannot press the row is no better off. The condition this
+	// replaces asked whether SOME device had a main button bound, which is true of the defaults
+	// and says nothing about the device in the player's hands.
+	InsertIntoVector(&confirmKeys, InputMapping(DEVICE_ID_ANY, confirmWithCross ? NKCODE_BUTTON_A : NKCODE_BUTTON_B));
 
 	const InputMapping hardcodedCancelKeys[] = {
 		InputMapping(DEVICE_ID_KEYBOARD, NKCODE_ESCAPE),
@@ -184,9 +199,10 @@ void UpdateNativeMenuKeys() {
 	for (size_t i = 0; i < ARRAY_SIZE(hardcodedCancelKeys); i++) {
 		InsertIntoVector(&cancelKeys, hardcodedCancelKeys[i]);
 	}
-	if (!HasMainButtonMapping(cancelKeys)) {
-		confirmKeys.push_back(InputMapping(DEVICE_ID_ANY, confirmWithCross ? NKCODE_BUTTON_A : NKCODE_BUTTON_B));
-	}
+	// The cancel half of the same thing - and the other button, into the other list. The line
+	// this replaces pushed a CONFIRM key onto confirmKeys under a test of cancelKeys, so the
+	// cancel fallback it was meant to be has never existed on any platform.
+	InsertIntoVector(&cancelKeys, InputMapping(DEVICE_ID_ANY, confirmWithCross ? NKCODE_BUTTON_B : NKCODE_BUTTON_A));
 
 	const InputMapping hardcodedInfoKeys[] = {
 		InputMapping(DEVICE_ID_KEYBOARD, NKCODE_S),

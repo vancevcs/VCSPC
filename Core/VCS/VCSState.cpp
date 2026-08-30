@@ -115,6 +115,20 @@ bool WeaponSlotIsMelee(u32 slot) {
 	return slot <= 1;
 }
 
+bool WeaponTypeIsBinoculars(u32 type) {
+	// 39, and read out of the game's own script rather than guessed. The mission that hands the
+	// binoculars over checks `has_char_got_weapon $PLAYER_CHAR weapon 39` and then immediately
+	// does `set_current_char_weapon $PLAYER_CHAR to 39` (scm/MAIN.txt, BRY_B3_18510), which pins
+	// the id to the item by the game's own account of what it just gave you.
+	//
+	// Confirmed live: with the binoculars in hand the overlay reads weaponType 39 in slot 9.
+	//
+	// The ID and not the slot, unlike the melee test above. Slot 9 is the last slot rather than
+	// the binocular slot - whatever else lands there would answer yes - and this question is
+	// asked about a specific ITEM with specific handling, not about a category.
+	return type == 39;
+}
+
 void UpdateState(VCSState *state) {
 	state->Clear();
 
