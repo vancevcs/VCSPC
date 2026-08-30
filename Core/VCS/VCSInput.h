@@ -226,9 +226,10 @@ struct VCSPadMapping {
 
 	u32 psp;
 
-	// Only sent while a scoped weapon is up. This exists for the zoom bumpers: zoom is the game's
-	// Square and Cross, which with anything else in hand are Block and Heavy Hit, so an ungated
-	// row would have a bumper throwing punches every time it was pressed unscoped.
+	// Only sent while a scoped weapon or the binoculars are up. This exists for the zoom bumpers:
+	// zoom is the game's Square and Cross, which with anything else in hand are Block and Heavy
+	// Hit, so an ungated row would have a bumper throwing punches every time it was pressed
+	// unscoped.
 	bool scopedOnly;
 
 	// Engineering note, for the debugger's mapping table - same job as VCSKeyMapping's.
@@ -321,6 +322,18 @@ bool HandleHostKey(const KeyInput &key);
 // Lower-level host key state, used by HandleHostKey and by the debugger window's key simulator.
 // Keys not in the mapping table for the current context are recorded but have no effect.
 void SetHostKeyDown(InputKeyCode key, bool down);
+
+// Mouse wheel notches since the last call, and zeroed by it.
+//
+// COUNTED rather than polled, which the rest of this layer does not need to do. A wheel notch is
+// a key down and a key up in the same instant - by the time the emu tick asks whether the key is
+// held, it is not - so the only way to see one is to record it as it arrives. Filled on the input
+// thread, drained on the emu thread; atomics, for the reason the held-key set has a mutex.
+void TakeWheelNotches(int *up, int *down);
+
+// Every notch ever seen, never consumed. Purely for the debugger: it separates "the wheel does not
+// reach this layer" from "it does and the button is wrong".
+int WheelNotchesSeen();
 
 // Clears all held keys. Called on init/shutdown, and worth calling on focus loss later so keys
 // don't stick.
@@ -514,8 +527,10 @@ bool CameraDrivenAimHeld();
 // latched run is left to carry the player, and releasing them all is what applies the brake.
 bool MovementKeysHeld();
 
-// Whether a scoped weapon (sniper, RPG - weapon camera modes 7 and 8) is equipped. Those aim by
-// moving the camera, because down a scope the camera direction is the firing direction.
+// Whether a scoped weapon (sniper, RPG - weapon camera modes 7 and 8) or the binoculars are
+// equipped. Those aim by moving the camera, because down a scope the camera direction is the
+// firing direction - and the binoculars are the same camera with nothing to fire. See the
+// definition for why the binoculars are matched on the weapon id instead.
 bool ScopedWeaponActive();
 
 }  // namespace VCS

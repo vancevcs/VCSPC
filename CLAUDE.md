@@ -50,6 +50,8 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
   VCSFireHook.h/cpp free aim resolved at the fire site, by rewriting the raycast's target
   VCSWorld.h/cpp    calls the game's own collision code, via a program written into PSP memory
   VCSVault.h/cpp    ledge detection and the pull-up, built on that query
+  VCSCheats.h/cpp   the game's own button-combo cheats, typed by a sequencer on the game's clock
+  VCSFrontEnd.h/cpp a bridge into the GAME's pause menu - its map, its save list - and the Menu gate
   VCSGame.h/cpp     lifecycle + per-frame tick; the only entry point the rest of PPSSPP sees
   VCSSettings.h/cpp the player-facing option table, and the only thing that persists any of it
 
@@ -357,6 +359,290 @@ Three rules hold it together, and all three are the kind of thing a tidy-up undo
 row count, clamped between 28 and 40dp. Nothing on this page scrolls and there is no second page,
 so a card taller than the window is a card with bindings nobody can read. On Foot is the tallest
 and the one a player reads first.
+
+### The cheat menu types the combination, and that is the whole design
+
+**Status: built, builds clean, NOT yet verified against the running game.** The 36 combinations come
+from published cheat lists, not from the game's own table - see below for what that means and how to
+fix a row that turns out wrong.
+
+VCS has no cheat entry screen: every cheat is an eight-press pad combination entered during ordinary
+play. `CHEATS` on the pause menu's root page leads to five group pages (Player, Vehicles,
+Pedestrians, World, Multiplayer), and clicking a row queues it and closes the menu.
+
+**Closing the menu is part of activating the cheat, not a courtesy.** This screen pauses the
+emulator, so nothing can be typed while it is up; the row queues an index and sends `DR_CANCEL`, and
+`CheatTick` starts pressing on the first tick after the game resumes. Anything else built on this
+menu that has to reach the running game - the map bridge, save loading - wants the same shape.
+
+**Why not call the game's handlers.** 36 addresses we have not hunted, against sequences we already
+have; and a cheat is not only its effect - entering one flags the save, prints the game's own
+confirmation, and toggles flags other systems read. Typing the combination gets all of that by
+construction. A wrong sequence costs one row; a wrong address costs a crash.
+
+**It steps on `FrameCounter`, not on vblanks**, for the reason the camera handback does. The game
+samples the pad once per logic frame at 30Hz while `VCS::Tick` runs at 60, and neither rate holds
+during streaming - so a press held for a fixed number of *vblanks* is a press held for an
+unpredictable number of *samples*, and one missed sample in the middle of an eight-press combination
+fails it silently. Two game frames held, two released; the gap is what keeps `Circle, Circle` from
+reading as one long press. A whole combination takes about a second, and there is no deadline to
+beat: GTA's cheat matchers keep a rolling history of presses rather than a timed window.
+
+**`VCSCheats` presses nothing.** It decides what the mask should be; `ApplyMapping` applies it,
+through the same `held & ~wanted` release discipline everything else there uses. That keeps one
+function as the only thing in this fork touching sceCtrl, and it is why the clear mask is not simply
+"everything": on the first frame the player may still be holding the key that produces the
+combination's first press.
+
+**The player's controls stand down for the duration**, buttons and stick both, exactly as they do
+during a vault. A held W is a Cross, and a Cross between two presses is a ninth press.
+
+**A row that does nothing is a transcription error, not a broken feature.** The OSD says
+`Cheat: FULL HEALTH` when the sequence starts and the game prints its own confirmation when it
+lands, so our message with nothing following it is the symptom, and the fix is one line in
+`kCheats`. The authoritative version is in the EBOOT - the matcher lives near whatever writes the
+flag `02A4 are_any_car_cheats_activated` reads - and mining it would replace the table with measured
+data. Worth doing; it was not worth blocking a working menu on.
+
+### The map and the save list, reached through the game's own front end
+
+**Status: working, measured live against the running game.** `MAP`, `BRIEF`, `STATS` and `GAME`
+sit on the pause root, and the game's own menu chrome is stripped off all of them. There is
+deliberately no save row - VCS saves by walking into the save icon at a safe house, so a menu row
+would be a second way to do something the world already has a place for. Controls, audio and
+display are left off for the same kind of reason: this fork has its own pages for all three, and a
+second way in that edited the game's copies would be two settings screens quietly disagreeing.
+
+`GAME` is one row rather than three because `NEW GAME`, `LOAD GAME` and `DELETE SAVE DATA` are
+entries *on* that page - the game says so itself, see the widget names below.
+
+VCS keeps its map, stats, briefs and save list on the pause menu Start opens, and this fork took
+Start for its own menu - so all of it became unreachable, which is a straight loss against retail.
+`MAP`, `LOAD GAME` and `SAVE GAME` on the pause root give it back. They queue and close, the same
+shape a cheat row uses and for the same reason: this screen pauses the emulator.
+
+`FrontEndMenuManager` is at `0x08bc9100`, found through `0261 has_save_game_finished` rather than
+by scanning - see "Reaching the game's own front end" in [docs/VCS_ADDRESSES.md](docs/VCS_ADDRESSES.md).
+Three fields are in the table: `MenuActive` (+0x20), `MenuPage` (+0x1c, a SIGNED index into an
+eleven-entry page vector, -1 when closed), and `SaveMenuRequest` (`gp+0x1076`).
+
+**It presses Start; it does not set `MenuActive`.** Opening that menu is not one boolean - the game
+builds page objects, stops the world, takes the pad - and a flag set from outside claims all of it
+happened. The address table's job here is to *watch*, which is what turns the walk from a timed
+guess into a closed loop. Same doctrine as the cheat menu and the vault: drive the mechanic.
+
+**And it tabs; it does not write `MenuPage` either**, one level down on the same argument. A page
+almost certainly does work on entry - the map builds a texture, the save list enumerates the memory
+stick - so the walk presses the game's own navigation and watches the index until it arrives.
+
+**The tabs are a GRID, and finding that out is what made the walk work.** Measured live over the
+WebSocket debugger, pressing a button and reading `MenuPage`:
+
+| | 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| top row | map | brief | **game** | stats | controls |
+| bottom row | audio (5) | display (6) | multiplayer (7) | | |
+
+D-pad **right cycles within one row and wraps inside it** - `0,1,2,3,4,0` and `5,6,7,5` - while up
+and down switch rows. So a walk built on "press next enough times", which is what a ring would
+want, spins forever from the wrong row exactly half the time. The walk instead remembers which
+pages it has seen since the last row change and presses **down** when it lands on one twice. That
+is blind to how many rows there are and to which page is where; the target index is the only thing
+it knows, which is the only thing it was told.
+
+**LOAD GAME is not a page of its own** - it is an entry on the `game` tab, so the load target is
+2. And the menu opens on 0, which is why the map row usually arrives having pressed nothing.
+
+**R trigger was the first guess and it moves nothing here**, which cost one round. Every other GTA
+pause menu tabs with the shoulders, and the game says otherwise on screen: the legend in the corner
+draws `move` against the four d-pad glyphs. The prior beat the evidence that was already rendered.
+
+**A request has to be accepted while the menu is already up**, and that is not a refinement. Opening
+the map leaves the bridge handed over with the menu still open, so asking for LOAD GAME next arrives
+in `Done` rather than `Idle` - and the first build only took requests in `Idle`, so the second row
+did nothing when pressed and then something surprising later. Reported as "load game does nothing".
+
+**The failure mode was chosen before the feature was.** With a page number wrong the walk runs out
+of presses and stops, leaving the player in the game's menu a tab or two from where they asked -
+and the debugger's Front End tab separates the two causes: a page that never moves means the
+navigation control is wrong, a page that moves but never matches means the number is.
+
+### The front end is a named widget tree, and that is how the chrome comes off
+
+**The retail build kept the debug names.** Every widget's first field points at its own ASCII name,
+so the front end prints itself:
+
+```
+MASTER      Background  Map_t  Brief_t  Game_t  Stats_t  Controls_t  Audio_t  Display_t  Multiplayer_t
+MAP_PAGE    Map_AE  MapTitle
+GAME_PAGE   LoadGame_MI  NewGame_MI  DeleteGame_MI  GameTitle  Reset_MI
+BUTTONS0-3  Move  Select  back  placemarker  down_but  up_but  x_but  circ_but  square_but ...
+```
+
+Three things are hidden while the menu is up, and **all three are data writes** - `+0x20` on a
+widget is a `visible` byte that the page draw checks and skips on, so there is no code to patch,
+no JIT block marker to work around, and undoing it is writing the old value back:
+
+| what | how |
+|---|---|
+| the tab strip | the root page's `*_t` widgets, `visible = 0` |
+| the button-hint row | every child of every `BUTTONS*` group, `visible = 0` |
+| the black band under both | every backdrop's height stretched to 400 |
+
+**That last row is the one that was diagnosed wrong twice, and the correction is the useful part.**
+With the strip and the hints gone the bottom of the screen stayed black. The first explanation was
+"something is painting over it" - disproved by shrinking the backdrop to 240x120 and watching it
+obediently shrink into the corner, so the rect really does drive the draw. The second was "the map
+is laid out 480x224 to leave room for the strip, so those 48 rows are a hole" - which fixed the map
+page and did nothing for Brief, Stats or Game, because they have no full-screen widget to grow.
+
+**The real answer: the front end lays itself out in 480x272 - the PSP's framebuffer - and what is
+actually displayed here is about 330 rows.** Measured two ways off one widget: a backdrop at h=272
+covered 82% of the frame (implying 332) and at h=120 covered 37% (implying 324). So the band was
+never a gap the strip left behind, and nothing the game draws was ever going to reach it. `MASTER`'s
+`Background` at the game's own idea of full-screen stops 60 rows short of the screen it is on.
+
+`backdropHeight` is therefore **400 - deliberately too big rather than measured**. Drawing off the
+bottom costs nothing, an exact value would have to be derived from display settings the player can
+change, and a backdrop that stops one row short is the entire bug returning.
+
+**Grown by name, and that list is short on purpose**: `Background`, `Map_AE`, `WRAPPER`. A rule
+like "any full-width widget" would also match `Reset_MI`, which is a 480-wide *menu row* on the
+Game page - stretching that would turn one entry into the whole page.
+
+### Left and right stop switching tabs
+
+`lockMenuTabs` drops `CTRL_LEFT`/`CTRL_RIGHT` in the `Menu` context. It follows from hiding the
+strip rather than being a separate opinion: with the tabs drawn, tabbing is navigation the player
+can see; with them hidden it moves you to an unmarked page for no visible reason, and this fork's
+menu is what picks the page now.
+
+Claimed and dropped rather than unbound, which is the inverse-Escape-trap discipline applied at
+runtime - an unclaimed arrow key falls through to PPSSPP's own mapper, which sends the very d-pad
+direction being suppressed. Up and down are untouched: they are how `LOAD GAME` is selected on the
+Game page.
+
+**Matched by name, never by index.** The first working version used widget indices, and they were
+right by luck - the eight tabs happened to be children 1..8 in that run. `EndsWith(name, "_t")` and
+`strncmp(name, "BUTTONS")` cannot drift the way an index can, and they cost a string compare on a
+tree that is walked once per menu open rather than once per frame.
+
+**Applied on the edge, not every frame.** The game writes these fields when it builds a page and
+never afterwards - confirmed by poking them and watching them stick - so re-asserting them every
+tick would be the shape of mistake the camera pitch runaway already taught. `RestoreChrome` runs on
+the way out and on shutdown, so turning the setting off, or taking a savestate with the menu open,
+cannot leave the front end missing its furniture.
+
+### Writing the page index froze the game, and the reason is a second field
+
+`jumpDirectlyToPage` writes `MenuPage` instead of pressing the game's next-tab control until the
+index matches. It removes the visible riffle through Controls/Audio/Display, it was shipped on, and
+**it froze the game the first time someone pressed Enter on the Game page.**
+
+```
+Invalid exec address 00000000 pc=00000000 ra=08ae22c8
+```
+
+```
+08ae22a8  lw    $a0, 0x30($s0)     ; the page's SELECTED widget
+08ae22b0  lw    $a2, 0x24($a0)     ; its function table
+08ae22bc  lw    $a2, 4($a2)        ; the method - read as 0
+08ae22c0  jalr  $a2                ; <- ra=08ae22c8 is here
+```
+
+A page keeps its selection in `+0x30`, and writing `+0x1c` moves what is DRAWN without moving that.
+So the Game page was on screen with a widget from the page you came from still selected, and Enter
+made a virtual call through an object of the wrong type - which is why it survived two pointer
+reads and died on the third. A null `+0x30` would have faulted on the *first* read; this got to the
+third, which is what says "wrong type" rather than "missing".
+
+**The verify-a-frame-later guard did not catch it and could not have.** It was added for exactly
+this class of failure - the game reconciling the index on its next frame - and it was the wrong
+guard: the index really did hold. Nothing was ever going to disagree about `+0x1c`, because `+0x1c`
+was never the problem.
+
+The setting stays, defaulted off, with the field named in its comment. The fast path is still the
+right idea; it needs to move the selection with the page.
+
+**The flicker is fixed the safe way instead.** `hidePagesWhileWalking` turns every page's widgets
+off for the duration of the walk and back on when it ends - `visible` bytes only, the same
+mechanism as the chrome, and it changes nothing about what the front end thinks is selected. The
+backdrop stays up, so a walk reads as a brief pause rather than as four pages riffling past.
+
+Every exit from a walk restores them - `Finish`, `GoIdle` and `RestoreChrome` all call
+`ShowPagesAgain` - because a walk that ends any other way leaves the entire front end invisible.
+
+### The front end has two levels of focus, and that one flag explains three bugs
+
+`MenuUseRoot` (`FrontEndMenuManager + 0x1e`) reads **1 while the TAB STRIP has focus and 0 once you
+are inside the page**. Measured on the Game page, not inferred:
+
+| | useRoot | page |
+|---|---|---|
+| tabbed to it | **1** | 2 |
+| after one Cross | **0** | 2 |
+| after a second Cross | 0 | **10** - CONFIRM_PAGE, the "lose unsaved progress" prompt |
+
+Three separate complaints were all this flag:
+
+- **"I have to press another Enter to control the options."** A page tabbed to arrives with the
+  strip still holding focus. `Arrive` now sends that Cross itself.
+- **"Cross dismisses the map legend."** Same press. The legend belongs to the strip-level view of
+  the map, so descending into the page is what puts it away - it was never a legend-specific
+  mechanism, which is why generalising it cost nothing.
+- **"The map cannot be panned."** The d-pad only pans once you are inside the page; at strip level
+  it changes tab. An earlier hunt for the pan variables held a direction at strip level, watched
+  the page index change, and concluded there were no pan variables.
+
+**The guard on that press is not tidiness.** Sent while already inside the page, Cross does not
+descend - it activates the selected entry, which on the Game page is `LOAD GAME`. `MenuOnTabStrip`
+defaults to *true* when unreadable, so an unreadable flag makes the press conditional rather than
+automatic.
+
+### Dragging the map, and why this one writes state
+
+`Map_AE + 0xc0` / `+0xc4` are what the map is centred on - symmetric x/y, found by descending into
+the page and holding each direction (right moved x by -166.69 over the same interval down moved y).
+`MapDragTick` adds the mouse delta to them while the left button is held.
+
+This is the only part of the front-end work that writes game state instead of pressing a control,
+and it earns the exception on the same grounds `VCSCamera` writes angles directly: **a held
+direction is a RATE and a mouse gives a DISPLACEMENT**, and no input the game accepts means "pan by
+this many units". Everything else here had a button that meant what we wanted; this does not.
+
+Plus rather than minus, because a drag is the opposite verb to a d-pad press: holding right moves
+the VIEW right (x decreases), while dragging right brings the CITY right.
+
+The mouse reaches it because `ContextWantsMouse` now claims the delta in the `Menu` context while
+`ContextDrivesCamera` refuses it - claimed but not steered, taken away from PPSSPP's own
+mouse-to-analog path and spent on the map. `MapDragTick` runs from `FrontEndTick`, which is before
+`CameraTick` in `VCSGame::Tick`, and that ordering is what lets it take the delta before the camera
+drains it.
+
+### Escape means "put this away", not "open another menu"
+
+With the game's own menu up, Escape closes it rather than pushing this fork's menu over the top.
+That is the last piece of the two-menus-feel-like-one problem: the pages are reached FROM our menu,
+so stacking ours on them again is how a player ends up pressing RESUME and landing back on a tab.
+Handled in `EmuScreen::sendMessage`'s `REQUEST_GAME_PAUSE` arm, which is the one place every
+Escape, pad Start and Windows-menu pause funnels through.
+
+### The Menu context finally triggers, and not the way it was tried before
+
+`ResolveContext` returns `Menu` when `MenuActive` is set, which closes the TODO that has sat in it
+since the beginning. Everything downstream was already written for it: the Menu rows in
+`kVCSKeyMappings` map WASD to the d-pad, and `ContextWantsMouse` already excluded Menu, so the
+mouse is left alone in menus without a line being changed.
+
+**`GameState` was the wrong question, and that is the transferable part.** It was hunted twice as a
+general "what is the game doing" enum and never found - a 192KB sweep gave 1249 candidates and a
+correlation run ruled out the best cluster. The input layer never wanted the enum. It wanted one
+bit, "is a menu up", and that bit is a field of the menu's own object, reachable from a script
+command in twenty minutes. Ask what the caller needs before hunting for the thing it was called.
+
+This is also **not** the reverted `FrameCounter`-stall shortcut from `03c1f3cfe0`. That inferred
+the menu from the game's logic being stopped, which is also true during loading screens and
+cutscenes - a superset that catches the game mid-play. This reads the menu's own flag.
 
 ### The page titles are art, and they have to be
 
@@ -2003,7 +2289,14 @@ the axis half, called from `NativeAxis` the way `HandleHostKey` is called from `
 
 The shape of it: triggers aim and fire on foot and are the pedals in a car, the right stick looks,
 the bumpers glance in a vehicle and yaw in the air and zoom a scope, the d-pad carries weapons
-across and view controls down, Start opens *this* menu while View opens the game's.
+across and stays the PSP's own vertically, the stick clicks carry the view controls that used to
+be there, Start opens *this* menu while View opens the game's.
+
+The vertical d-pad pair was view controls until it turned out that the game's menus - pause, map,
+stats, save - read the PSP d-pad, so a pad could move sideways through a menu and not up or down.
+The keyboard never showed it, because arrow keys are not in `kVCSKeyMappings` and reach the PSP
+d-pad through PPSSPP's mapper; a claimed pad control has nowhere to fall through to. Needs no menu
+detection, which is the point - see the `Menu` context note further down.
 
 Five things are worth knowing before changing any of it.
 
@@ -2418,10 +2711,14 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
   nobody has held each button in one, so "Space does nothing" is inference rather than a
   measurement.
 
-- **`Menu` context never triggers.** Needs `GameState`, which was hunted for and NOT found: a 192KB
-  sweep of the globals gave 1249 candidates from two rounds, and a proper correlation run over the
-  most promising cluster (around `IsFreeAiming`, where the boolean-shaped ones landed) ruled it out.
-  Until it is found, a paused game gets gameplay bindings.
+- **SOLVED: the `Menu` context triggers now.** It is gated on `MenuActive`, the front end's own
+  flag - see "The Menu context finally triggers" above. The account below is kept because the dead
+  end in it is still worth knowing about, and because the *reason* it was a dead end is the lesson.
+
+  It needed `GameState`, which was hunted for and NOT found: a 192KB sweep of the globals gave 1249
+  candidates from two rounds, and a proper correlation run over the most promising cluster (around
+  `IsFreeAiming`, where the boolean-shaped ones landed) ruled it out. What was never asked is
+  whether the context needed a general game-state enum at all. It did not - it needed one bit.
 
   **Do not "solve" this by watching `FrameCounter` stall.** It was tried, shipped, and broke the
   controls. The game's logic also stops during loading screens, cutscenes and frame-rate hitches,

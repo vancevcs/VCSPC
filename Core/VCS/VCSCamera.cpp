@@ -950,6 +950,11 @@ static bool ContextWantsMouse(VCSInputContext context) {
 	case VCSInputContext::InAircraft:
 	case VCSInputContext::Aiming:
 		return true;
+	case VCSInputContext::Menu:
+		// Claimed so the map can be DRAGGED with it - see MapDragTick. Claiming is not steering:
+		// ContextDrivesCamera says no for this context, so the delta is taken away from PPSSPP's
+		// own mouse-to-analog path and spent on the map instead of on a view nobody can see.
+		return true;
 	default:
 		return false;
 	}
@@ -981,6 +986,10 @@ static bool ContextWantsMouse(VCSInputContext context) {
 // drives anything or not, so nothing accumulates and dumps into the camera on the way out.
 static bool ContextDrivesCamera(VCSInputContext context) {
 	if (context == VCSInputContext::Aiming && LockOnModeActive()) {
+		return false;
+	}
+	// The game's own menu is up: there is no view to turn, and the delta belongs to the map drag.
+	if (context == VCSInputContext::Menu) {
 		return false;
 	}
 	// The drive-by stands the camera down for exactly the reason free aim does, and it is worth

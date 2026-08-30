@@ -235,6 +235,40 @@ inline constexpr u32 kVCSWeaponRecordTypeOffset = 0x04;
 //
 // The numbering matches re3's eEntityType, anchored by that ped test: 6 >> 1 == 3 == ENTITY_TYPE_PED.
 // So 1 building, 2 vehicle, 3 ped, 4 object, 5 dummy.
+// --- The front end's widget layout ---
+//
+// Read off the live objects rather than guessed: `Map_AE` measured x=0 y=0 w=480 h=224, a tab
+// label x=138 y=248 w=110 h=28 - which is the bottom strip - and `Background` 0,0,480,272.
+//
+// `Visible` is the one that matters most: the page draw at 0x08ae20c8 does `lbu +0x20` on each
+// widget and skips it entirely when zero, so hiding a widget is a byte, not a code patch.
+inline constexpr u32 kVCSWidgetName = 0x00;     // pointer to the widget's ASCII debug name
+inline constexpr u32 kVCSWidgetX = 0x0c;
+inline constexpr u32 kVCSWidgetY = 0x10;
+inline constexpr u32 kVCSWidgetW = 0x14;
+inline constexpr u32 kVCSWidgetH = 0x18;
+inline constexpr u32 kVCSWidgetAlpha = 0x1c;    // float
+inline constexpr u32 kVCSWidgetVisible = 0x20;  // u8; zero means the draw loop skips it
+inline constexpr u32 kVCSWidgetsBegin = 0x24;   // a page/group's own widget vector
+inline constexpr u32 kVCSWidgetsEnd = 0x28;
+
+// The PSP framebuffer, which is what the front end lays itself out in - and NOT what is actually
+// displayed here, which measures about 330 rows. That gap is the whole reason a backdrop sized to
+// the game's own idea of the screen still leaves a black band. See VCSFrontEnd's backdropHeight.
+inline constexpr int kVCSScreenHeight = 272;
+
+// How many of the eleven pages are on the tab strip: map(0) brief(1) game(2) stats(3) controls(4)
+// audio(5) display(6) multiplayer(7). The remaining three - MP_ERROR_PAGE, MEMCARD_FULL_PAGE,
+// CONFIRM_PAGE - are dialogs pushed on top, and are not tabbed to.
+inline constexpr int kMenuTabPages = 8;
+
+// Where MAP_PAGE's `Map_AE` widget keeps what the map is centred on. Found by descending into the
+// page and holding a direction: right moved +0xc0 by -166.69 and down moved +0xc4 by the same, so
+// they are a symmetric x/y pair in map units. Nothing moves while the tab strip still has focus,
+// which is why an earlier search for this found nothing at all.
+inline constexpr u32 kVCSMapPanX = 0xc0;
+inline constexpr u32 kVCSMapPanY = 0xc4;
+
 inline constexpr u32 kVCSEntityPositionOffset = 0x30;
 inline constexpr u32 kVCSEntityFlagsOffset = 0x48;
 inline constexpr u32 kVCSEntityTypeMask = 0x0e;
@@ -365,6 +399,31 @@ enum class VCSAddr {
 	AimAxisScale,      // CPad+0xd0. The game scales the axis by this in weapon camera modes.
 	AimAxisScaleY,     // CPad+0xd4. The Y counterpart, written alongside it by opcode 03E9.
 	WeaponCamMode,     // CCamera+0x7b8. Decides whether AimAxisScale applies at all.
+
+	// --- The game's own front end ---
+	//
+	// `FrontEndMenuManager` is a fixed global, so these are absolute rather than based: the object
+	// does not move, only the page objects it points at do. See "Reaching the game's own front
+	// end" in docs/VCS_ADDRESSES.md for how it was found.
+	// The front end's object tree, for finding widgets by NAME. See "The front end is a named
+	// widget tree" in docs/VCS_ADDRESSES.md - every widget carries a pointer to its own debug
+	// name, which the retail build kept, so nothing here has to be identified by index.
+	MenuRootPage,      // The chrome page - MASTER: the backdrop and the eight tab labels.
+	MenuPagesBegin,    // Vector of the eleven content pages: MAP_PAGE, GAME_PAGE, ...
+	MenuPagesEnd,
+	MenuOverlaysBegin, // Vector of the four BUTTONS groups - the button-hint bar.
+	MenuOverlaysEnd,
+
+	// The map marker the player drops - the destination half of a GPS route.
+	BlipManager,       // Pointer to the radar's blip store; everything below hangs off it.
+	WaypointActive,    // Nonzero while a marker is placed.
+	WaypointX,         // Its world position. Same units as the player's own.
+	WaypointY,
+
+	MenuUseRoot,       // 1 while the tab strip has focus, 0 once you are inside the page.
+	MenuActive,        // Nonzero while the game's own pause menu is up. The Menu context's gate.
+	MenuPage,          // s8. Which of its pages is showing; -1 when the menu is closed.
+	SaveMenuRequest,   // Set to 1 to ask the front end to open the save menu. It clears it itself.
 
 	Count,
 };
@@ -556,6 +615,47 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// `03E9 1.4 0.0`, zeroing Y because it supplies Y itself.
 	{ VCSAddr::AimAxisScaleY, "AimAxisScaleY", VCSAddrType::Float, 0x08bde6e4,    kNoBase,              "CPad+0xd4. Y counterpart of AimAxisScale; opcode 03E9 writes both" },
 	{ VCSAddr::WeaponCamMode, "WeaponCamMode", VCSAddrType::U16,   0x08bc85e8,    kNoBase,              "CCamera+0x7b8, PlayerWeaponMode.Mode. AimAxisScale applies only when this is 45 or 11" },
+
+	// FrontEndMenuManager is at 0x08bc9100, reached from `0261 has_save_game_finished`
+	// (0x089def04), which materialises it with `lui 0x8bd / addiu -0x6f00` and passes it to the
+	// one-instruction getter at 0x0882e9b4 - `lbu $v0, 0x20($a0)`. That getter's result is OR'd
+	// with SaveMenuRequest to answer "is the front end busy", which is what identifies +0x20 as
+	// the menu's own active flag rather than as any other boolean in the object.
+	{ VCSAddr::MenuRootPage,  "MenuRootPage",  VCSAddrType::U32,   0x08bc9100,    kNoBase,              "FrontEndMenuManager+0x00. The MASTER page: backdrop plus the eight *_t tab labels" },
+	{ VCSAddr::MenuPagesBegin, "MenuPagesBegin", VCSAddrType::U32,  0x08bc9104,    kNoBase,              "FrontEndMenuManager+0x04. begin() of the page vector - eleven entries" },
+	{ VCSAddr::MenuPagesEnd,  "MenuPagesEnd",  VCSAddrType::U32,   0x08bc9108,    kNoBase,              "FrontEndMenuManager+0x08. end() of the page vector" },
+	{ VCSAddr::MenuOverlaysBegin, "MenuOverlaysBegin", VCSAddrType::U32, 0x08bc9110, kNoBase,            "FrontEndMenuManager+0x10. begin() of the BUTTONS groups - the hint bar" },
+	{ VCSAddr::MenuOverlaysEnd, "MenuOverlaysEnd", VCSAddrType::U32, 0x08bc9114,   kNoBase,              "FrontEndMenuManager+0x14. end() of the BUTTONS groups" },
+	// FrontEndMenuManager+0x1e. Measured, not inferred: on the Game page it reads 1, one Cross
+	// takes it to 0 while the page index stays 2, and a second Cross then activates LOAD GAME and
+	// pushes CONFIRM_PAGE. So 1 is "the tab strip has focus" and 0 is "you are inside the page" -
+	// which is why a page tabbed to needs one more press before its entries respond, and why that
+	// press must never be sent when this already reads 0.
+	// gp + 0x16dc. Reached from `00C3 add_blip_for_coord` (handler 0x08a7913c), which collects
+	// three floats and then calls 0x0880e450 with `*(gp + 0x16dc)` as its first argument - the
+	// blip store - taking back an index or -1.
+	{ VCSAddr::BlipManager,   "BlipManager",   VCSAddrType::U32,   0x08bb343c,    kNoBase,              "gp+0x16dc. The radar's blip store. Read 0x08e8ed40" },
+	// The map marker's own slot, +0x990 into that store, measured by placing one marker, moving
+	// the map, placing a second, and diffing: only this entry's fields moved. Both markers landed
+	// in the SAME slot, which is what says it is the marker's own rather than the next one free.
+	//
+	//   +0x04  active     0 with no marker, 4 with one
+	//   +0x10  world X    read 1150.000 against a player at -1093.58
+	//   +0x14  world Y    read -549.915
+	//   +0x24  scale      1.0        +0x2c  alpha  0xff
+	{ VCSAddr::WaypointActive, "WaypointActive", VCSAddrType::U32, 0x994,         VCSAddr::BlipManager, "BlipManager+0x994. Nonzero while a map marker is placed" },
+	{ VCSAddr::WaypointX,     "WaypointX",     VCSAddrType::Float, 0x9a0,         VCSAddr::BlipManager, "BlipManager+0x9a0. Marker world X, same units as the player position" },
+	{ VCSAddr::WaypointY,     "WaypointY",     VCSAddrType::Float, 0x9a4,         VCSAddr::BlipManager, "BlipManager+0x9a4. Marker world Y" },
+	{ VCSAddr::MenuUseRoot,   "MenuUseRoot",   VCSAddrType::U8,    0x08bc911e,    kNoBase,              "FrontEndMenuManager+0x1e. 1 = focus on the tab strip, 0 = inside the page" },
+	{ VCSAddr::MenuActive,    "MenuActive",    VCSAddrType::U8,    0x08bc9120,    kNoBase,              "FrontEndMenuManager+0x20. 1 while the game's own pause menu is up. Read 0 in gameplay" },
+	// +0x1c is a SIGNED byte index into the page vector at +0x04 (begin) / +0x08 (end) - the
+	// getter at 0x0882e950 does `lb +0x1c / lw +0x04 / sll 2 / addu / lw`, and falls back to the
+	// root page at +0x00 when +0x1e is set. Eleven pages in the gameplay savestate, and the index
+	// reads -1 there, which is the closed state. Read as U8; the caller casts.
+	{ VCSAddr::MenuPage,      "MenuPage",      VCSAddrType::U8,    0x08bc911c,    kNoBase,              "FrontEndMenuManager+0x1c, SIGNED. Page index into the 11-entry vector at +0x04. -1 = closed" },
+	// gp + 0x1076. `0260 activate_save_menu` (0x089dee68) writes 1 here; the front end's update
+	// reads it at 0x0882e23c/0x0882e284 and clears it at 0x0882e290 as it opens the save menu.
+	{ VCSAddr::SaveMenuRequest, "SaveMenuRequest", VCSAddrType::U8, 0x08bb2dd6,   kNoBase,              "gp+0x1076. Write 1 to ask for the save menu; the front end clears it when it opens" },
 };
 
 static_assert(ARRAY_SIZE(kVCSAddresses) == (size_t)VCSAddr::Count,

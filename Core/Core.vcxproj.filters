@@ -237,6 +237,12 @@
     <ClCompile Include="VCS\VCSCamera.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
+    <ClCompile Include="VCS\VCSCheats.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSFrontEnd.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
     <ClCompile Include="VCS\VCSFireHook.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -1555,6 +1561,12 @@
       <Filter>HLE\Libraries</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSCamera.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSCheats.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSFrontEnd.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSFireHook.h">

@@ -430,8 +430,12 @@ add_library(Core STATIC
 	# GTA: Vice City Stories input overhaul (fork-specific)
 	VCS/VCSAddresses.h
 	VCS/VCSCamera.cpp
+	VCS/VCSCheats.cpp
+	VCS/VCSFrontEnd.cpp
 	VCS/VCSFireHook.cpp
 	VCS/VCSCamera.h
+	VCS/VCSCheats.h
+	VCS/VCSFrontEnd.h
 	VCS/VCSFireHook.h
 	VCS/VCSGame.cpp
 	VCS/VCSGame.h

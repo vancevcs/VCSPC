@@ -21,6 +21,8 @@
 #include "Core/HLE/sceCtrl.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSCheats.h"
+#include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
@@ -100,6 +102,8 @@ void Init() {
 	ResetHostKeys();
 	ClearSharedState();
 	CameraReset();
+	CheatReset();
+	FrontEndReset();
 
 	g_discID = g_paramSFO.GetDiscID();
 
@@ -137,6 +141,10 @@ void Shutdown() {
 	ResetHostKeys();
 	ClearSharedState();
 	CameraReset();
+	// A combination half typed into a game that is going away is not worth finishing, and the
+	// queue must not survive into the next boot.
+	CheatReset();
+	FrontEndReset();
 	// Put the game's own instruction back before anything else tears down.
 	RemoveFireHook();
 	RemoveClimbSplashHook();
@@ -192,6 +200,16 @@ void Tick() {
 	// instead of a jump. Reversed, every vault would begin with a hop.
 	WorldQueryTick();
 	VaultTick(context);
+
+	// Advance any cheat combination the menu queued. BEFORE ApplyMapping for the same reason
+	// VaultTick is: it decides on this tick whether it owns the pad, and the mapping has to
+	// already know that so it can send the game the sequencer's press instead of the player's
+	// keys. Reversed, the first press of every combination would go out with a held W beside it.
+	CheatTick();
+
+	// And the bridge into the game's own front end, on the same terms and in the same place: it
+	// decides on this tick whether it owns the pad, and ApplyMapping has to already know.
+	FrontEndTick();
 
 	ApplyMapping(context);
 

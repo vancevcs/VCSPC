@@ -1043,3 +1043,180 @@ nothing looks identical whether the value is well hidden or absent.
 
 Everything works with any subset filled in. Unset entries read as `nullopt`, display as `unset`,
 and keep the input layer in passthrough.
+
+### Reaching the game's own front end — `FrontEndMenuManager`, and the `GameState` question answered sideways
+
+The map, the stats, the briefs and the save list all live on the pause menu Start opens, and this
+fork took Start. Getting them back needed a handle on the front end, and the whole thing fell out
+of the script command table in about twenty minutes with nothing running — no correlation, no
+scanning, and no gameplay to reach first.
+
+**The way in is `0261 has_save_game_finished`.** Its handler is `0x089def04`, resolved the usual
+way (`u32(0x08b846e0 + 0x261*8 + 4)`), and it opens by materialising a global and calling a
+one-instruction function with it:
+
+```
+089def0c  lw     $a1, 0x1e08($gp)
+089def10  lui    $s1, 0x8bd
+089def14  addiu  $s1, $s1, -0x6f00     ; 0x08bc9100
+...
+089def40  jal    0x882e9b4             ; -> lbu $v0, 0x20($a0)
+089def44  move   $a0, $s1
+089def48  lbu    $a0, 0x1076($gp)
+089def4c  or     $a0, $v0, $a0         ; menu up OR save requested -> not finished
+```
+
+So **`FrontEndMenuManager` is `0x08bc9100`**, and the thing OR'd with the save-menu request to
+answer "is the front end busy" is **`+0x20`, its own active flag**. That last step is what makes
+the identification sound rather than plausible: the object has plenty of booleans, and only one of
+them is the one this predicate means.
+
+**`0260 activate_save_menu` (`0x089dee68`) gives the other half.** It writes `1` to `gp+0x1076`
+(`0x08bb2dd6`) and returns; the front end's own update polls it, at `0x0882e23c` and `0x0882e284`,
+and **clears it at `0x0882e290`** on the way into the save menu. So that byte is an inbox, not a
+state — which is exactly why writing it from the host is legitimate where writing `MenuActive`
+would not be.
+
+**The page vector, from the accessor at `0x0882e950`:**
+
+```
+0882e950  lbu  $a1, 0x1e($a0)      ; "use the root page"
+0882e954  beqz -> 0x882e964
+0882e960  lw   $v0, ($a0)          ;   yes: the root page at +0x00
+0882e964  lb   $a1, 0x1c($a0)      ; SIGNED index
+0882e968  lw   $a0, 4($a0)         ; page vector begin, at +0x04
+0882e96c  sll  $a1, $a1, 2
+0882e974  lw   $v0, ($a0)          ; -> pages[index]
+```
+
+Read out of the gameplay savestate, that is `+0x04 = 0x09a64440`, `+0x08 = 0x09a6446c` — a
+`begin`/`end` pair `0x2c` bytes apart, so **eleven pages** — with `+0x1c` reading `-1` and `+0x20`
+reading `0`, which is the closed state and confirms both fields at once. The eleven pointers are
+eleven distinct objects with eleven distinct vtables, i.e. eleven page classes.
+
+**Which index is which was left to a live measurement**, and it took two minutes: the page objects
+and their vtables are heap addresses (`0x09a6xxxx`, `0x09a9xxxx`), per-run and unbakeable, so only
+the index is stable and nothing static read here names one. Chasing it through eleven constructors
+would have been the expensive way to learn this:
+
+| | 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| top row | map | brief | **game** | stats | controls |
+| bottom row | audio (5) | display (6) | multiplayer (7) | | |
+
+Measured by pressing one button over the WebSocket debugger and reading `MenuPage` after each -
+`input.buttons.send` plus a `memory.read` of `0x08bc911c`, about thirty lines of Python.
+
+**The tabs are a grid, not a ring.** D-pad right cycles inside one row and wraps there -
+`0,1,2,3,4,0` and `5,6,7,5` - while up/down changes row. Eleven pages against eight tabs, so three
+of the objects in the vector are not on the strip at all: sub-pages the tabs push.
+
+**LOAD GAME is an entry on the `game` tab, not a page**, which is why the load target is 2 rather
+than something further out. And the menu opens on 0, so the map row usually arrives having pressed
+nothing at all.
+
+**R trigger moves nothing**, worth recording because it was the first thing tried and every other
+GTA pause menu tabs with the shoulders. The game says otherwise on screen - the legend draws `move`
+against the four d-pad glyphs - so the prior beat evidence already rendered in the frame being
+looked at.
+
+Two things worth carrying from this:
+
+- **`GameState` was the wrong question for eight months.** It was hunted as a general "what is the
+  game doing" enum, twice, and never found; a 192KB sweep gave 1249 candidates and a proper
+  correlation run ruled the best cluster out. But the input layer never wanted the enum — it wanted
+  one bit, "is a menu up", and that bit is a field of the menu's own object with a script command
+  pointing straight at it. **Ask what the caller actually needs before hunting for the thing it
+  was described as.**
+- **A predicate is better identification than a name.** `+0x20` is not "the boolean at +0x20 that
+  looked right"; it is the value the game itself ORs with the save request to decide whether the
+  front end is busy. A field identified by what a known function *concludes* from it cannot be the
+  wrong field in the way a correlated one can.
+
+### The front end is a named widget tree, and the retail build kept the names
+
+The single most useful thing found in this game so far, and it was three reads away from
+`FrontEndMenuManager` the whole time.
+
+**Every widget's first field is a pointer to its own ASCII name.** Not a vtable - a name, shipped
+in the retail build. Walking the tree prints itself:
+
+```
+MASTER      Background  Map_t  Brief_t  Game_t  Stats_t  Controls_t  Audio_t  Display_t  Multiplayer_t
+MAP_PAGE    Map_AE  MapTitle
+GAME_PAGE   LoadGame_MI  NewGame_MI  DeleteGame_MI  GameTitle  Reset_MI
+BUTTONS0-3  down_but  up_but  x_but  circ_but  square_but  left_but  right_but
+            Move  Select  back  placemarker
+```
+
+So `GAME_PAGE` holding `LoadGame_MI` is not an inference about which tab loads a save - it is the
+game saying so. Anything else wanted out of this front end is now a tree walk and a string compare
+rather than a hunt.
+
+**The layout, read off the live objects rather than guessed:**
+
+| offset | | |
+|---|---|---|
+| `+0x00` | name | pointer to ASCII |
+| `+0x0c`..`+0x18` | x, y, w, h | ints, in 480x272 screen space |
+| `+0x1c` | alpha | float |
+| `+0x20` | **visible** | u8 |
+| `+0x24`/`+0x28` | children | `begin`/`end` of a widget vector |
+
+`Visible` is the one that matters. The page draw at `0x08ae20c8` is:
+
+```
+08ae2130  lw   $s3, ($a2)        ; widget = widgets[i]
+08ae2134  lbu  $a2, 0x20($s3)    ; widget->visible
+08ae2138  bnez $a2, 0x8ae2148    ; drawn
+08ae2140  b    0x8ae21f0         ; skipped entirely
+```
+
+**So hiding part of the front end is a byte, not a code patch** - no `jal` to nop, no JIT
+block-marker problem, no icache invalidation, and it reverts by writing the old value back.
+
+`CMenuManager::Draw` (`0x0882e518`) makes three separate draws, which is what makes this
+selective at all: the root page (`+0x00`), then the overlay group `overlays[+0x1d]`, then the
+content page `pages[+0x1c]`. Chrome and content are siblings, not parent and child.
+
+#### Three wrong turns getting here, all worth keeping
+
+**The searches that found nothing were reading the wrong key.** `memory.search` answers with
+`matches`, not `addresses`, so two sweeps for the tab strings came back empty and were written off
+as "the text is not in RAM". It was; the block sits at `0x0989exxx`. A control search for a string
+at a *known* address is what caught it - and the general rule is that a search returning zero hits
+proves nothing until it has found something you already know is there.
+
+**Memory breakpoints under the JIT are silent, exactly as this document already warned.** A read
+breakpoint on the tab strings never fired, and neither did one on `MenuPage`, which the highlight
+demonstrably reads every frame. Switching `CPUCore` to the interpreter made both fire immediately,
+and `hle.backtrace` then gave the entire chain from the string read up into `CMenuManager::Draw` in
+one shot. **The breakpoint is worth the CPU switch**; guessing at draw code is not.
+
+**Nop'ing the whole root-page draw was too coarse, and the way it failed was informative.** It
+removed the tab labels *and* the backdrop, which left the map ghosting over its own previous frames
+- and that told us the root page is backdrop-plus-chrome rather than a container, which is what
+made the per-widget flag the right lever instead.
+
+#### The menu is laid out for a screen shorter than the one it is on
+
+Hiding the eight `*_t` widgets and the `BUTTONS*` children left a black band across the bottom, and
+it took **three explanations** to get right.
+
+1. *Something is painting over it.* Disproved by shrinking `MASTER`'s `Background` to 240x120 and
+   watching it move obediently into the top-left corner - the rect drives the draw, so nothing is
+   covering anything.
+2. *`Map_AE` is 480x224 to leave room for the strip, so the bottom 48 rows are a reserved hole.*
+   Growing it to 272 did fix the map page, which is exactly why this one was believed. It did
+   nothing for Brief, Stats or Game - those pages have no full-screen widget to grow.
+3. **The front end lays itself out in 480x272, the PSP's framebuffer, and the display here is about
+   330 rows.** Measured twice off one widget: `Background` at h=272 covered 82% of the frame,
+   implying 332; at h=120 it covered 37%, implying 324. Two independent numbers, one conclusion.
+
+So the band is **screen the menu does not know exists**, and no value the game itself would ever
+write reaches it. Setting the backdrops to 400 - deliberately over, not measured - covers it.
+
+The transferable part is that (2) was *confirmed by a successful fix* and still wrong. Growing
+`Map_AE` worked because a bigger rectangle covers more screen, not because 224 meant anything, and
+the page where the theory was tested was the one page that could not distinguish the two
+explanations. **A fix that works on the case you tested is not evidence for the reason you gave.**

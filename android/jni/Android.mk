@@ -708,6 +708,8 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceCcc.cpp \
   $(SRC)/Core/HLE/sceCtrl.cpp.arm \
   $(SRC)/Core/VCS/VCSCamera.cpp.arm \
+  $(SRC)/Core/VCS/VCSCheats.cpp.arm \
+  $(SRC)/Core/VCS/VCSFrontEnd.cpp.arm \
   $(SRC)/Core/VCS/VCSFireHook.cpp.arm \
   $(SRC)/Core/VCS/VCSGame.cpp.arm \
   $(SRC)/Core/VCS/VCSInput.cpp.arm \

@@ -772,6 +772,8 @@ SOURCES_CXX += \
 	       $(COREDIR)/HLE/sceChnnlsv.cpp \
 	       $(COREDIR)/HLE/sceCtrl.cpp \
 	       $(COREDIR)/VCS/VCSCamera.cpp \
+	       $(COREDIR)/VCS/VCSCheats.cpp \
+	       $(COREDIR)/VCS/VCSFrontEnd.cpp \
 	       $(COREDIR)/VCS/VCSFireHook.cpp \
 	       $(COREDIR)/VCS/VCSGame.cpp \
 	       $(COREDIR)/VCS/VCSInput.cpp \

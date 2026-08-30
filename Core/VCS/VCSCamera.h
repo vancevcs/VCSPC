@@ -109,7 +109,13 @@ struct VCSCameraSettings {
 	// not do this; reported as working "99% of the time", and enabled on that basis. The complete fix
 	// is to drive the game's own control input rather than the position, as aimResponseModel does for
 	// aiming, which needs mode 18's pitch writers at 0x089a1xxx reverse-engineered. See CLAUDE.md.
-	bool pitchInVehicle = true;
+	// OFF: still experimental and it does not behave the way it reads. The vehicle camera is
+	// the spring this fork spent a long time learning not to fight, and pitching it is the
+	// part of that fight still unresolved - so the default is the behaviour that works.
+	//
+	// Worth being deliberate about because the Mouse page no longer has a row for it: with
+	// the row gone, this default IS the setting for every player.
+	bool pitchInVehicle = false;
 
 	// How far below the entry angle, NUMERICALLY, vehicle pitch may travel - in radians. Note the
 	// sign convention: more negative is looking UP, so this is the upward-look allowance, and the
@@ -349,7 +355,11 @@ struct VCSCameraSettings {
 	// distinction matters: the game's own curve is a signed square nobody chose, which crushes slow
 	// movement and cannot be tuned because it is a shape. This one is chosen, bounded, and applied
 	// to the wanted rotation rather than to the stick, so it never eats the low end.
-	float aimAccel = 0.012f;
+	// Zero: strictly linear. Extra gain on fast movement is the first thing a PC player turns
+	// off, and the row that tuned it is no longer on the Aiming page - so the default has to
+	// be the value someone would have chosen, not the one the aim model happened to be
+	// measured at. Still bound in the debugger's Camera tab for anyone who wants it back.
+	float aimAccel = 0.0f;
 
 	// Ceiling on that multiplier. The aim channel saturates, and past that point extra gain only
 	// fills the carry - which arrives late and reads as the aim running away. 2.5x is about where

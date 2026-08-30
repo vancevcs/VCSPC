@@ -48,6 +48,17 @@ TITLES = {
     "invehicle": "In Vehicle",
     "aircraft": "Aircraft",
     "melee": "Melee Combat",
+    "cheats": "Cheats",
+    "player": "Player",
+    "vehicles": "Vehicles",
+    "pedestrians": "Pedestrians",
+    "world": "World",
+    "options": "Options",
+    "controllersetup": "Controller Setup",
+    "mousesettings": "Mouse Settings",
+    "keybindings": "Key Bindings",
+    "audiosetup": "Audio Setup",
+    "displaysetup": "Display Setup",
 }
 
 # Brush Script MT is the closest thing Windows ships to the logo script. Freestyle Script is the

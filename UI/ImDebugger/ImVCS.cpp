@@ -34,6 +34,7 @@
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSState.h"
+#include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSVault.h"
 #include "Core/VCS/VCSWorld.h"
 
@@ -1432,6 +1433,95 @@ void ImVCSWindow::DrawCamera() {
 // standing in front of a wall watching the four heights is the only way to tell which of the two
 // dozen reasons applies - the answer never arrived, the footing was never found, the wall is
 // outside the band, or the far side has nothing to stand on.
+// The game's own pause menu, and the two numbers the map and load rows are waiting on.
+//
+// This tab exists to be READ, once. Open the game's menu (the MAP row does it, or Start on a pad
+// with this fork's scheme off), tab across to the map and to the page that holds LOAD GAME, and
+// write down what `Page` says at each. Those are `mapPage` and `loadPage`, and until they are set
+// the two menu rows open the game's menu and stop there.
+//
+// The live `Page` row is also the only way to tell the two failure modes apart: a page that never
+// moves while tabbing means the tab control is wrong, and a page that moves but never arrives
+// means the target number is.
+void ImVCSWindow::DrawFrontEnd() {
+	VCS::VCSFrontEndSettings &s = VCS::FrontEndSettings();
+
+	const bool active = VCS::GameMenuActive();
+	ImGui::Text("Menu active : %s", active ? "YES" : "no");
+	ImGui::Text("Page        : %d", VCS::GameMenuPage());
+	ImGui::Text("Bridge      : %s%s", VCS::FrontEndStatus(),
+		VCS::FrontEndDriving() ? "  (driving the pad)" : "");
+	ImGui::Text("Mask        : 0x%08x", VCS::FrontEndButtonMask());
+	// Zero while the menu is up means the tree walk matched nothing, which is what a build whose
+	// widget names differ would look like - as opposed to the setting simply being off.
+	ImGui::Text("Chrome hidden: %d widget(s)", VCS::HiddenChromeCount());
+	{
+		const std::optional<u32> wpOn = VCS::ReadAddrAsU32(VCS::VCSAddr::WaypointActive);
+		const std::optional<float> wx = VCS::ReadAddrFloat(VCS::VCSAddr::WaypointX);
+		const std::optional<float> wy = VCS::ReadAddrFloat(VCS::VCSAddr::WaypointY);
+		if (wpOn && *wpOn && wx && wy) {
+			ImGui::Text("Waypoint    : %.1f, %.1f", *wx, *wy);
+		} else {
+			ImGui::Text("Waypoint    : none");
+		}
+	}
+	ImGui::Text("Wheel notches: %d   (zoom mask 0x%08x)",
+		VCS::WheelNotchesSeen(), VCS::MapZoomButtonMask());
+	ImGui::Text("Page has items: %s", VCS::MenuPageHasItems() ? "yes (up/down select)"
+		: "no (up/down locked)");
+	ImGui::Text("Focus       : %s", VCS::MenuOnTabStrip() ? "tab strip" : "inside the page");
+
+	ImGui::Separator();
+	ImGui::TextWrapped("Tabs are a grid: map(0) brief(1) game(2) stats(3) controls(4) on the top "
+		"row, audio(5) display(6) multiplayer(7) below. D-pad right cycles within a row, up/down "
+		"switches rows. Page reads -1 while the menu is closed.");
+	ImGui::Separator();
+
+	ImGui::InputInt("Map page", &s.mapPage);
+	ImGui::InputInt("Brief page", &s.briefPage);
+	ImGui::InputInt("Game page", &s.gamePage);
+	ImGui::InputInt("Stats page", &s.statsPage);
+	ImGui::Checkbox("Hide the game's menu chrome", &s.hideMenuChrome);
+	ImGui::Checkbox("Fill the backdrop past the screen", &s.fillMenuBackdrop);
+	ImGui::InputInt("Backdrop height", &s.backdropHeight);
+	ImGui::Checkbox("Lock tab switching (arrows)", &s.lockMenuTabs);
+	ImGui::Checkbox("Hide pages while walking", &s.hidePagesWhileWalking);
+	ImGui::Checkbox("Jump straight to the page (FREEZES - see header)", &s.jumpDirectlyToPage);
+	ImGui::Checkbox("Enter the page on arrival (taps Cross)", &s.enterPageOnArrival);
+	ImGui::InputInt("Enter frames", &s.enterFrames);
+	ImGui::Checkbox("Drag the map with the mouse", &s.mapDrag);
+	ImGui::InputFloat("Map drag speed", &s.mapDragSpeed);
+	ImGui::Checkbox("Zoom the map with the wheel", &s.mapZoomWithWheel);
+	ImGui::InputInt("Zoom press frames", &s.zoomInFrames);
+	ImGui::Checkbox("Place a marker (Space, or a click)", &s.mapWaypoint);
+	ImGui::InputFloat("Click slop", &s.waypointClickSlop);
+	ImGui::Checkbox("Extra Cross on the first map open", &s.extraCrossOnFirstMap);
+	ImGui::InputInt("Hold frames", &s.holdFrames);
+	ImGui::InputInt("Gap frames", &s.gapFrames);
+	ImGui::InputInt("Open timeout frames", &s.openTimeoutFrames);
+	ImGui::InputInt("Max tab presses", &s.maxTabPresses);
+
+	ImGui::Separator();
+	if (ImGui::Button("Open menu")) {
+		VCS::RequestGameMenu(VCS::FrontEndTarget::Menu);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Go to map")) {
+		VCS::RequestGameMenu(VCS::FrontEndTarget::Map);
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Go to game")) {
+		VCS::RequestGameMenu(VCS::FrontEndTarget::Game);
+	}
+	ImGui::SameLine();
+	// No menu row asks for this - saving is done at a safe house's save icon. The button stays
+	// because SaveMenuRequest is a real, documented capability and this is the only thing that
+	// exercises it.
+	if (ImGui::Button("Save menu")) {
+		VCS::RequestSaveMenu();
+	}
+}
+
 void ImVCSWindow::DrawVault() {
 	VCS::VCSVaultSettings &s = VCS::VaultSettings();
 	const VCS::VCSVaultDebug &d = VCS::VaultDebugState();
@@ -1692,6 +1782,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Camera")) {
 			DrawCamera();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Front End")) {
+			DrawFrontEnd();
 			ImGui::EndTabItem();
 		}
 		if (ImGui::BeginTabItem("Vault")) {

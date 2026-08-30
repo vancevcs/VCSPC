@@ -32,6 +32,8 @@ struct VCSListingRow;
 // Legal to forward-declare: a scoped enum has a defined underlying type even undefined.
 enum class OptionPage;
 enum class VCSKeyList;
+enum class CheatGroup;
+enum class FrontEndTarget;
 }
 
 // The pause menu for the VCS front end, in the shape GTA uses: a left-hand column of large
@@ -65,6 +67,14 @@ enum class VCSMenuPage {
 	KeysVehicle,
 	KeysAircraft,
 	KeysMelee,
+
+	// The cheat menu. One page per group rather than one long list, because there are 36 of them
+	// and nothing on this menu scrolls - the same constraint that sizes the bindings cards.
+	Cheats,
+	CheatsPlayer,
+	CheatsVehicles,
+	CheatsPedestrians,
+	CheatsWorld,
 };
 
 // The same screen serves two jobs, because they differ only in what the root page offers and in
@@ -91,6 +101,10 @@ public:
 	const VCS::Option *option() const { return option_; }
 	std::string_view help() const;
 
+	// The hint line for a row that has no Option behind it. A settings row gets its help from the
+	// table; an action row - a cheat, a page jump - has nowhere else to carry one.
+	void SetHelp(std::string_view help) { help_ = help; }
+
 protected:
 	// A toggle row flips its value on click. Float rows are edited through the bar and the
 	// arrow keys instead, so this leaves them alone.
@@ -115,6 +129,7 @@ private:
 	mutable bool hitBoundsValid_ = false;
 
 	std::string label_;
+	std::string help_;
 	const VCS::Option *option_ = nullptr;
 	bool draggingValue_ = false;
 };
@@ -177,6 +192,12 @@ private:
 
 	void AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page);
 	void AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page);
+	// One row per cheat in this page's group. Clicking one queues it and closes the menu, because
+	// nothing can be typed into a paused game - see Core/VCS/VCSCheats.h.
+	void AddCheatRows(UI::ViewGroup *parent, VCSMenuPage page);
+	// True for the five pages that list cheats, false for the index page above them.
+	static bool IsCheatPage(VCSMenuPage page);
+	static VCS::CheatGroup ToCheatGroup(VCSMenuPage page);
 	// True for the four pages that list bindings rather than offering anything to change.
 	static bool IsKeyListPage(VCSMenuPage page);
 	// Whether the controller caveat belongs on this page. True on the cards and on the page that
@@ -192,6 +213,10 @@ private:
 	float ListRowHeight(int rowCount) const;
 	// A row that just walks to another page. The commonest thing on this menu by far.
 	void AddPageRow(UI::ViewGroup *parent, const char *label, VCSMenuPage target);
+	// A row that asks for the GAME's own front end - its map, its save list. Like a cheat row it
+	// queues and closes, because nothing reaches a paused game. See Core/VCS/VCSFrontEnd.h.
+	void AddGameMenuRow(UI::ViewGroup *parent, const char *label, VCS::FrontEndTarget target,
+		const char *help);
 	void AddBackRow(UI::ViewGroup *parent);
 	// True for the leaf pages that are a list of settings rather than a list of pages.
 	static bool IsOptionPage(VCSMenuPage page);

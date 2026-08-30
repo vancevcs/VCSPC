@@ -158,6 +158,29 @@ const std::vector<Option> &Options() {
 			opts.push_back(opt);
 		};
 
+		// WHAT IS NOT ON THESE TWO PAGES, AND WHY
+		//
+		// Mouse and Aiming carried 23 rows between them, and most were not preferences. Two kinds
+		// were cut, and the test for each is the same: would a player have an OPINION about it?
+		//
+		//   Calibration to match GTA on PC.  Vertical look speed is 1.9x because that is what III
+		//   and Vice City use; mouse acceleration and its cap are the aim model's own tuning,
+		//   measured rather than chosen. Numbers like these are how the fork hits the feel it is
+		//   aiming for, and a player moving them is drifting away from it, not expressing a taste.
+		//
+		//   Corrections that should simply be on.  Scaling sensitivity with zoom, matching the
+		//   drive-by axes, camera aim for scoped weapons, the mouse-native response curve - each
+		//   undoes something the game does for a thumbstick. Off is not an alternative style, it
+		//   is the bug back.
+		//
+		// What survives is what a player really does have a view on: how fast it moves, which way
+		// up it is, and the two switches that change what the mouse DOES - free aim, and whether
+		// you can walk while aiming.
+		//
+		// Every cut row keeps its compiled default, and each of those defaults is already the
+		// PC-like value - checked one at a time, not assumed. The settings still exist, vcs.ini
+		// still holds them, and the debugger's Camera tab still binds every one; they are off the
+		// PLAYER's page, not out of the fork.
 		// --- Mouse ---
 
 		addBool(OptionPage::Mouse, "MouseEnabled", "Mouse control",
@@ -166,21 +189,8 @@ const std::vector<Option> &Options() {
 		addFloat(OptionPage::Mouse, "LookSensitivity", "Look sensitivity",
 			"How far the camera turns per unit of mouse movement.",
 			&cam.sensitivity, 0.0005f, 0.02f);
-		addBool(OptionPage::Mouse, "InvertLookX", "Invert look horizontally",
-			"", &cam.invertX);
 		addBool(OptionPage::Mouse, "InvertLookY", "Invert look vertically",
 			"", &cam.invertY);
-		addFloat(OptionPage::Mouse, "VerticalLookSpeed", "Vertical look speed",
-			"Up and down, as a multiple of left and right. 1.9x is what GTA III and Vice City "
-			"use on PC.",
-			&cam.verticalGain, 0.25f, 4.0f, "%.2fx");
-		addBool(OptionPage::Mouse, "ScaleSensitivityByFOV", "Scale sensitivity with zoom",
-			"Slows the mouse as the game narrows the view, so a movement covers the same "
-			"distance on screen however far it is zoomed in.",
-			&cam.scaleByFOV);
-		addBool(OptionPage::Mouse, "PitchInVehicle", "Vertical look in vehicles",
-			"Look up and down while driving, not only left and right.",
-			&cam.pitchInVehicle);
 
 		// The master switch first, then the two halves of what happens after you stop moving the
 		// mouse. Ticks are the emulator's ~60Hz, which is the unit the camera code counts in; the
@@ -189,37 +199,14 @@ const std::vector<Option> &Options() {
 			"Off keeps the view exactly where you leave it and never gives the camera back - "
 			"no drift back behind you on foot, and no swing back behind the car when driving.",
 			&cam.returnLook);
-		addInt(OptionPage::Mouse, "LookHoldFrames", "Hold the view for",
-			"How long the camera stays exactly where you left it after you stop moving the mouse. "
-			"45 ticks is about three quarters of a second.",
-			&cam.lookHoldFrames, 5, 300, 5, 45);
-		enabledBy(&cam.returnLook);
-		addInt(OptionPage::Mouse, "LookReleaseFrames", "Return to the follow camera over",
-			"How long the camera takes to drift back to the game's own view afterwards. Raise it "
-			"for a slower, gentler return; 0 hands the camera back in a single frame, which is the "
-			"snap this setting exists to remove.",
-			&cam.lookReleaseFrames, 0, 300, 5, 45);
-		enabledBy(&cam.returnLook);
-		addBool(OptionPage::Mouse, "ReturnBehindPlayer", "Return the view behind you",
-			"Where the camera drifts back to on foot: behind your character, rather than staying "
-			"wherever you left it pointing. Vehicles are unaffected - the game returns those by "
-			"itself.",
-			&cam.returnBehindPlayer);
-		enabledBy(&cam.returnLook);
-		addFloat(OptionPage::Mouse, "ReturnBehindTrim", "Trim where it returns to",
-			"Nudges the resting view left or right, in degrees, if it does not settle quite behind "
-			"you.",
-			&cam.returnBehindTrimDeg, -45.0f, 45.0f, "%.1f deg");
-		enabledBy(&cam.returnLook);
-		addBool(OptionPage::Mouse, "HoldUntilMoving", "Keep the view until you move",
-			"Standing still, the camera stays exactly where you left it. It returns behind you "
-			"once you start walking, which is when the game moves its own camera anyway.",
-			&cam.holdUntilMoving);
-		enabledBy(&cam.returnLook);
-		addBool(OptionPage::Mouse, "RecenterOnGlance", "Glance keys recentre the view",
-			"In a car, Q or E - or both together - put the view back behind the car. The way to "
-			"ask for the default view when the automatic return is off.",
-			&cam.recenterOnGlance);
+		// The five rows that used to sit here - hold time, return time, return-behind-you, its trim,
+		// and keep-until-moving - are gone from the menu on purpose. They are the tuning FOR the
+		// switch above, and a page that offers five ways to shape a behaviour the player has most
+		// likely turned off is five rows of noise around the one row that matters.
+		//
+		// The settings themselves are untouched: VCSCameraSettings still owns them, vcs.ini still
+		// persists whatever is in them, and the debugger's Camera tab still binds every one. This
+		// removes them from the PLAYER's page, not from the fork.
 
 		// --- Controller ---
 		//
@@ -251,42 +238,15 @@ const std::vector<Option> &Options() {
 			&cam.aimSensitivity, 0.00005f, 0.008f);
 		addBool(OptionPage::Aiming, "InvertAimY", "Invert aim vertically",
 			"", &cam.aimInvertY);
-		addFloat(OptionPage::Aiming, "MouseAcceleration", "Mouse acceleration",
-			"Extra gain on fast movements. Zero keeps the response perfectly linear.",
-			&cam.aimAccel, 0.0f, 0.05f);
-		addFloat(OptionPage::Aiming, "AccelerationCap", "Acceleration cap",
-			"Ceiling on that gain. Past the aim channel's own limit, more only arrives late.",
-			&cam.aimAccelMax, 1.0f, 5.0f, "%.1fx");
 		addBool(OptionPage::Aiming, "FreeAim", "Free aim",
 			"Shoot where the mouse points, instead of the game locking on to a target for you.",
 			&cam.autoFreeAim);
 		addBool(OptionPage::Aiming, "MoveWhileAiming", "Move while aiming",
 			"Walk with WASD with a weapon raised. Patches game code while it is on.",
 			&cam.moveInFreeAim);
-		addBool(OptionPage::Aiming, "ScopedCameraAim", "Camera aim for sniper and RPG",
-			"Scoped weapons aim by turning the camera, which is what looking down sights is.",
-			&cam.aimScopedCamera);
-		addBool(OptionPage::Aiming, "DriveByMouseAim", "Mouse aim in the passenger seat",
-			"Aim a drive-by with the mouse. Off leaves it on A and D, as the game has it.",
-			&cam.driveByMouseAim);
-		addFloat(OptionPage::Aiming, "DriveBySensitivity", "Drive-by sensitivity",
-			"Only applies in the passenger seat, which aims proportionally rather than through the model.",
-			&cam.driveBySensitivity, 0.005f, 0.2f);
-		addBool(OptionPage::Aiming, "DriveByMatchAxes", "Match drive-by aim axes",
-			"Divide out the game's 2.5 / 0.5 axis scale, so sideways and vertical aim match.",
-			&cam.driveByMatchAxes);
-		addBool(OptionPage::Aiming, "CannonMouseAim", "Mouse aim a mounted cannon",
-			"Raise and lower the fire truck's water cannon with the mouse. Steering is untouched.",
-			&cam.cannonMouseAim);
-		addFloat(OptionPage::Aiming, "CannonSensitivity", "Cannon elevation sensitivity",
-			"Small on purpose - the cannon's vertical travel is short and clamped.",
-			&cam.cannonSensitivity, 0.002f, 0.15f);
 		addFloat(OptionPage::Aiming, "ScopedSensitivity", "Sniper and RPG sensitivity",
 			"Only applies to the two scoped weapons.",
 			&cam.aimScopedSensitivity, 0.005f, 0.2f);
-		addBool(OptionPage::Aiming, "AimResponseModel", "Mouse-native aim response",
-			"Undoes the game's stick response curve. Off is the old thumbstick feel.",
-			&cam.aimResponseModel);
 
 		// --- Audio ---
 		//

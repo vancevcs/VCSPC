@@ -81,6 +81,7 @@ using namespace std::placeholders;
 #include "UI/BackgroundAudio.h"
 #include "UI/GamepadEmu.h"
 #include "UI/PauseScreen.h"
+#include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSSettings.h"
 #include "UI/VCSMenuScreen.h"
@@ -547,6 +548,13 @@ void EmuScreen::sendMessage(UIMessage message, const char *value) {
 	// External commands, like from the Windows UI.
 	// This happens on the main thread.
 	if (message == UIMessage::REQUEST_GAME_PAUSE && screenManager()->topScreen() == this) {
+		// With the GAME's own menu up - the map, the briefs, its Game page - Escape means "put
+		// this away", not "open a second menu on top of the first". Those pages are reached from
+		// the VCS menu, so stacking ours over them is how one menu came to feel like two.
+		if (VCS::GameMenuActive()) {
+			VCS::RequestCloseGameMenu();
+			return;
+		}
 		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 	} else if (message == UIMessage::REQUEST_GAME_STOP) {
 		// We will push MainScreen in update().
@@ -1450,7 +1458,18 @@ void EmuScreen::update() {
 
 	if (pauseTrigger_) {
 		pauseTrigger_ = false;
-		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
+		// With the GAME's own menu up - the map, the briefs, its Game page - Escape means "put
+		// this away", not "open a second menu on top of the first". Those pages are reached from
+		// the VCS menu, so stacking ours over them is how one menu came to feel like two.
+		//
+		// This is the path Escape and pad Start actually take: VIRTKEY_PAUSE sets pauseTrigger_
+		// and it is consumed here. The REQUEST_GAME_PAUSE arm in sendMessage is a different
+		// route - the Windows menu, mostly - and carries the same check.
+		if (VCS::GameMenuActive()) {
+			VCS::RequestCloseGameMenu();
+		} else {
+			screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
+		}
 	}
 
 	if (!PSP_IsInited())
