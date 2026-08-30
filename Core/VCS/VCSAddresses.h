@@ -266,6 +266,34 @@ inline constexpr int kMenuTabPages = 8;
 // page and holding a direction: right moved +0xc0 by -166.69 and down moved +0xc4 by the same, so
 // they are a symmetric x/y pair in map units. Nothing moves while the tab strip still has focus,
 // which is why an earlier search for this found nothing at all.
+// The path node array, straight out of 0x08977830's own arithmetic:
+//
+//     lw   $a3, 0xc($a0)     ; count, bounds-checked against the index
+//     lw   $a3, 0($a0)       ; the array
+//     sll  $t0, $a2, 3       ; index*8 ...
+//     addu $t0, $a2, $t0     ; ... + index   = index*9
+//     addu $t3, $a2, $t0     ; ... + index   = index*10   <- the stride
+//     lh   $t0, 0($t2)       ; x
+//     lh   $t1, 2($t2)       ; y
+//     lb   $t2, 4($t2)       ; z
+//
+// Positions are stored times 8, which the extents confirm: x spans -16638..12005, or -2080..1501
+// once divided, against a player measured at -1093.
+inline constexpr u32 kVCSPathNodeArray = 0x00;    // ThePaths+0x00
+inline constexpr u32 kVCSPathNodeCount = 0x0c;    // ThePaths+0x0c, read 8380
+inline constexpr u32 kVCSPathNodeStride = 10;
+inline constexpr float kVCSPathNodeScale = 8.0f;
+inline constexpr u32 kVCSPathNodeX = 0x00;        // s16
+inline constexpr u32 kVCSPathNodeY = 0x02;        // s16
+inline constexpr u32 kVCSPathNodeZ = 0x04;        // s8
+inline constexpr u32 kVCSPathNodeFirstLink = 0x06;  // u16 into the link array
+inline constexpr u32 kVCSPathNodeLinkCount = 0x08;  // low nibble; the high nibble is flags
+
+// The links are u16 node indices sitting immediately AFTER the node array - there is no pointer to
+// them. Confirmed by arithmetic rather than by a scan: the gap between the node array's end and
+// ThePaths+0x08 is 35264 bytes, which is exactly the 17632 links the nodes themselves declare.
+inline constexpr u32 kVCSPathLinkStride = 2;
+
 inline constexpr u32 kVCSMapPanX = 0xc0;
 inline constexpr u32 kVCSMapPanY = 0xc4;
 
@@ -413,6 +441,9 @@ enum class VCSAddr {
 	MenuPagesEnd,
 	MenuOverlaysBegin, // Vector of the four BUTTONS groups - the button-hint bar.
 	MenuOverlaysEnd,
+
+	// The road network - the middle of a GPS route, between the player and the marker.
+	ThePaths,          // Pointer to CPathFind. The node array and its links hang off it.
 
 	// The map marker the player drops - the destination half of a GPS route.
 	BlipManager,       // Pointer to the radar's blip store; everything below hangs off it.
@@ -631,6 +662,11 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// pushes CONFIRM_PAGE. So 1 is "the tab strip has focus" and 0 is "you are inside the page" -
 	// which is why a page tabbed to needs one more press before its entries respond, and why that
 	// press must never be sent when this already reads 0.
+	// gp - 0x4220. From `01B5 get_closest_car_node` (handler 0x08a9247c), which loads it and hands
+	// it to 0x08976fbc - FindNodeClosestToCoors, taking a coordinate and a 800.0 radius - then
+	// passes the node it gets back to 0x08977830, which turns a node index into world coordinates.
+	// That second function is what documents the whole layout; see docs/VCS_ADDRESSES.md.
+	{ VCSAddr::ThePaths,      "ThePaths",      VCSAddrType::U32,   0x08badb40,    kNoBase,              "gp-0x4220. CPathFind. Nodes at +0x00, count at +0x0c (8380), links after the nodes" },
 	// gp + 0x16dc. Reached from `00C3 add_blip_for_coord` (handler 0x08a7913c), which collects
 	// three floats and then calls 0x0880e450 with `*(gp + 0x16dc)` as its first argument - the
 	// blip store - taking back an index or -1.

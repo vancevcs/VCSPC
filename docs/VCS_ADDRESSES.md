@@ -1220,3 +1220,56 @@ The transferable part is that (2) was *confirmed by a successful fix* and still 
 `Map_AE` worked because a bigger rectangle covers more screen, not because 224 meant anything, and
 the page where the theory was tested was the one page that could not distinguish the two
 explanations. **A fix that works on the case you tested is not evidence for the reason you gave.**
+
+### The road network - `ThePaths`, and a link array with no pointer to it
+
+The middle of a GPS route. Found the same way as everything else this round: from the script table,
+not from a scan.
+
+`01B5 get_closest_car_node` resolves to `0x08a9247c`, which loads `*(gp - 0x4220)` = **`0x08badb40`**
+and hands it to two functions - `0x08976fbc` (find the node closest to a coordinate, with an 800.0
+radius) and `0x08977830` (turn a node index into world coordinates). The second one documents the
+entire layout in eight instructions:
+
+```
+lw   $a3, 0xc($a0)     ; node count, bounds-checked against the index
+lw   $a3, 0($a0)       ; the node array
+sll  $t0, $a2, 3       ; index*8
+addu $t0, $a2, $t0     ;  + index = index*9
+addu $t3, $a2, $t0     ;  + index = index*10      <- ten bytes per node
+lh   $t0, 0($t2)       ; x
+lh   $t1, 2($t2)       ; y
+lb   $t2, 4($t2)       ; z
+```
+
+| | |
+|---|---|
+| `+0x00` `+0x02` `+0x04` | `s16 x`, `s16 y`, `s8 z` - **stored times 8** |
+| `+0x06` | `u16` first link |
+| `+0x08` | low nibble = link count (1..5, nearly always 2); high nibble flags |
+
+8380 nodes in the gameplay savestate. The scale is confirmed by the extents: x spans -16638..12005,
+or -2080..1501 divided, against a player measured at -1093.
+
+**The link array has no pointer, and finding it that way is the point.** It sits immediately after
+the node array, and nothing in `ThePaths` points at it. Three header pointers were tested as link
+arrays by asking whether the indices were in range and whether linked nodes were physically near
+each other; all three failed, one of them producing a median "neighbour" distance of 1050 units on
+a map about 4000 across - which is how a wrong answer announces itself here.
+
+What located it was arithmetic. The nodes declare 17632 links between them, and the gap between the
+end of the node array and `ThePaths+0x08` is 35264 bytes - exactly 17632 u16. Reading it there gives:
+
+- **median neighbour distance 16.3 units**, 95th percentile 54.4, max 266 - adjacent road nodes
+- **100% of links mutual**: every `i -> j` has a `j -> i`, which a road graph must have
+
+The structure also checks out against itself before any of that: `first[i+1] - first[i] == count[i]`
+holds on **all 8379 consecutive pairs**. An invariant that exact is not a coincidence, and it is
+worth testing before trusting a field, because it costs one loop and rules out a whole class of
+misparse.
+
+**Two things still open.** 332 of the 17632 links (1.9%) are out of range, all with bit 15 set, and
+masking `0x7fff` only rescues 56 of them - so they are a different kind of entry, not flagged
+indices. And `ThePaths+0x10` and `+0x14` read 3087 and 5293, which sum to exactly 8380: the nodes
+are two groups, almost certainly car and ped. A route wants the car ones, so which group comes
+first has to be settled before this is used.
