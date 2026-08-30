@@ -44,6 +44,35 @@ bool MenuOnTabStrip() {
 	return ReadAddrBool(VCSAddr::MenuUseRoot).value_or(true);
 }
 
+bool FindWaypoint(float *x, float *y) {
+	const std::optional<u32> store = ReadAddrU32(VCSAddr::BlipManager);
+	if (!store || *store == 0) {
+		return false;
+	}
+	for (int i = 0; i < kVCSBlipMaxEntries; i++) {
+		const u32 entry = *store + kVCSBlipArray + (u32)i * kVCSBlipStride;
+		const std::optional<u32> type = ReadU32(entry + kVCSBlipType);
+		const std::optional<u32> active = ReadU32(entry + kVCSBlipActive);
+		if (!type || !active || *type != kVCSBlipMarkerType || *active == 0) {
+			continue;
+		}
+		const std::optional<float> bx = ReadFloat(entry + kVCSBlipX);
+		const std::optional<float> by = ReadFloat(entry + kVCSBlipY);
+		if (!bx || !by) {
+			continue;
+		}
+		// A blip of the right type still has to be somewhere on the map. This rejects a slot that
+		// is mid-allocation, whose type is already written and whose position is not.
+		if (*bx < -4000.0f || *bx > 4000.0f || *by < -4000.0f || *by > 4000.0f) {
+			continue;
+		}
+		*x = *bx;
+		*y = *by;
+		return true;
+	}
+	return false;
+}
+
 bool GameMenuActive() {
 	return ReadAddrBool(VCSAddr::MenuActive).value_or(false);
 }
@@ -85,6 +114,11 @@ int g_presses = 0;
 int g_lastSeenPage = -1;
 u32 g_mask = 0;
 const char *g_status = "idle";
+
+// Whether the menu on screen is one this bridge opened, as opposed to one the game put
+// up itself. Declared here rather than beside the map drag because Finish and GoIdle -
+// far above it - are what set and clear it.
+bool g_bridgeOwnsMenu = false;
 
 // The game logic clock, exactly as the cheat sequencer uses it and for the same reason: the front
 // end reads the pad once per logic frame, and a press measured in vblanks is a press held for an
@@ -157,6 +191,8 @@ int Frames(int value) {
 }
 
 void Finish(const char *why) {
+	// Everything Finish is reached from is the bridge having put a page on screen.
+	g_bridgeOwnsMenu = true;
 	// Whatever happened - arrived, gave up, the menu closed under us - the pages come back. A
 	// walk that ends without this leaves the whole front end invisible.
 	ShowPagesAgain();
@@ -217,6 +253,7 @@ void Arrive(const char *why) {
 }
 
 void GoIdle(const char *why) {
+	g_bridgeOwnsMenu = false;
 	ShowPagesAgain();
 	g_phase = Phase::Idle;
 	g_mask = 0;
@@ -761,6 +798,10 @@ u32 MapZoomButtonMask() {
 	return g_zoomFrames > 0 ? g_zoomMask : 0u;
 }
 
+bool BridgeOwnsMenu() {
+	return g_bridgeOwnsMenu && GameMenuActive();
+}
+
 int HiddenChromeCount() {
 	return (int)g_hidden.size();
 }
@@ -775,8 +816,21 @@ bool MenuPageHasItems() {
 	}
 	cachedPage = page;
 	cachedAnswer = false;
+
+	// An UNREADABLE or out-of-band page never locks anything, and getting this backwards is what
+	// made the save slots unnavigable.
+	//
+	// The save menu is not tabbed to - it is opened from the world, by walking into the save icon
+	// at a safe house - so `MenuPage` does not name a tab page while it is up. The old default
+	// answered "no items", which dropped up and down, and the slot list could not be moved
+	// through. Load and Delete were fine only because they are reached from the Game page, which
+	// does name a tab and does have entries.
+	//
+	// So the rule is: take the player's arrow keys only when we positively know they are on a tab
+	// page with nothing on it to select. Anything we cannot identify keeps its controls.
 	if (page < 0) {
-		return false;
+		cachedAnswer = true;
+		return true;
 	}
 
 	// Only the eight TAB pages are ever locked. Anything past them is a dialog the front end has

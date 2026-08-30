@@ -82,6 +82,8 @@ using namespace std::placeholders;
 #include "UI/GamepadEmu.h"
 #include "UI/PauseScreen.h"
 #include "Core/VCS/VCSFrontEnd.h"
+#include "Common/Render/ManagedTexture.h"
+#include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSSettings.h"
 #include "UI/VCSMenuScreen.h"
@@ -850,25 +852,25 @@ void EmuScreen::ProcessVKey(VirtKey virtKey, bool down) {
 
 	case VIRTKEY_SCREEN_ROTATION_VERTICAL:
 		if (down) {
-			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
+			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 			config.iInternalScreenRotation = ROTATION_LOCKED_VERTICAL;
 		}
 		break;
 	case VIRTKEY_SCREEN_ROTATION_VERTICAL180:
 		if (down) {
-			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
+			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 			config.iInternalScreenRotation = ROTATION_LOCKED_VERTICAL180;
 		}
 		break;
 	case VIRTKEY_SCREEN_ROTATION_HORIZONTAL:
 		if (down) {
-			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
+			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 			config.iInternalScreenRotation = ROTATION_LOCKED_HORIZONTAL;
 		}
 		break;
 	case VIRTKEY_SCREEN_ROTATION_HORIZONTAL180:
 		if (down) {
-			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
+			DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 			config.iInternalScreenRotation = ROTATION_LOCKED_HORIZONTAL180;
 		}
 		break;
@@ -1346,7 +1348,10 @@ void EmuScreen::CreateViews() {
 	loadingBG->SetVisibility(V_INVISIBLE);
 }
 
+static void VCSReleaseOverlayTextures();
+
 void EmuScreen::deviceLost() {
+	VCSReleaseOverlayTextures();
 	// If we are currently in the middle of boot, we have to block here!
 	// Otherwise the boot thread will encounter draw_ == nullptr and weird stuff like that.
 	// We're doing this in a very ugly way for now.
@@ -1477,7 +1482,7 @@ void EmuScreen::update() {
 
 	double now = time_now_d();
 
-	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
+	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 	g_controlMapper.UpdateConfig(config);
 
 	if (saveStatePreview_ && !bootPending_) {
@@ -1845,7 +1850,7 @@ bool EmuScreen::hasVisibleUI() {
 		return true;
 	if (!g_OSD.IsEmpty() || g_Config.bShowTouchControls || g_Config.iShowStatusFlags != 0)
 		return true;
-	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(GetDeviceOrientation());
+	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 	if (config.bEnableCardboardVR || g_Config.bEnableNetworkChat)
 		return true;
 	if (g_Config.bShowGPOLEDs)
@@ -1860,6 +1865,137 @@ bool EmuScreen::hasVisibleUI() {
 	}
 
 	return false;
+}
+
+// The GPS line over the game's radar.
+//
+// VCS::RadarTick has already done everything that needs PSP memory: this gets screen-space
+// segments in the PSP's own 480x272 coordinates and only has to place them on whatever rectangle
+// the display is actually being drawn into. That mapping is the same one the display layout screen
+// uses - output rect in pixels, scaled to dp - so the line stays put through window resizes,
+// stretched aspect ratios and integer scaling alike.
+// The game's own player marker, out of the texture pack, so that the pack's replacement is what
+// gets drawn rather than a stand-in of ours. Loaded once and kept; a miss is remembered too, so a
+// missing file costs one failed open per session instead of one per frame.
+static Draw::Texture *g_vcsPlayerIcon = nullptr;
+static bool g_vcsPlayerIconTried = false;
+
+static void VCSReleaseOverlayTextures() {
+	if (g_vcsPlayerIcon) {
+		g_vcsPlayerIcon->Release();
+		g_vcsPlayerIcon = nullptr;
+	}
+	g_vcsPlayerIconTried = false;
+}
+
+static Draw::Texture *VCSPlayerIcon(UIContext *ctx) {
+	if (g_vcsPlayerIconTried) {
+		return g_vcsPlayerIcon;
+	}
+	g_vcsPlayerIconTried = true;
+	const std::string discID = VCS::GetDiscID();
+	if (discID.empty()) {
+		return nullptr;
+	}
+	// Same place the texture replacement system reads from, so a pack that replaces the radar
+	// arrow replaces this too.
+	const Path path = GetSysDirectory(DIRECTORY_TEXTURES) / discID / "HUD" / "Radar" / "Player.png";
+	g_vcsPlayerIcon = CreateTextureFromFile(ctx->GetDrawContext(), path.c_str(), ImageFileType::DETECT, false);
+	return g_vcsPlayerIcon;
+}
+
+static void DrawVCSRouteOverlay(UIContext *ctx) {
+	const VCS::VCSRadarSettings &s = VCS::RadarSettings();
+	if (!s.drawRoute) {
+		return;
+	}
+	std::vector<VCS::RadarSegment> segments;
+	VCS::GetRouteSegments(&segments);
+	if (segments.empty() && !s.showCalibration) {
+		return;
+	}
+
+	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
+	const FRect screenFrame = GetScreenFrame(config.bIgnoreScreenInsets, (float)g_display.pixel_xres, (float)g_display.pixel_yres);
+	FRect rc;
+	CalculateDisplayOutputRect(config, &rc, 480.0f, 272.0f, screenFrame, config.iInternalScreenRotation);
+
+	const float ox = rc.x * g_display.dpi_scale_x;
+	const float oy = rc.y * g_display.dpi_scale_y;
+	const float sx = (rc.w * g_display.dpi_scale_x) / 480.0f;
+	const float sy = (rc.h * g_display.dpi_scale_y) / 272.0f;
+	if (sx <= 0.0f || sy <= 0.0f) {
+		return;
+	}
+
+	const ImageID white = ctx->GetTheme().whiteImage;
+	// Thickness follows the vertical scale so the line looks the same at any window size, but never
+	// thinner than a pixel - a half-pixel line on a small window is an invisible one.
+	const float thickness = std::max(1.0f, s.thickness * sy);
+
+	if (s.showCalibration) {
+		// The circle the four numbers claim the radar occupies, for lining them up against the
+		// radar the game is drawing underneath.
+		ctx->Draw()->Circle(ox + s.centreX * sx, oy + s.centreY * sy,
+		                    s.radius * sx, 1.0f, 48, 0.0f, 0x80FFFFFF, 1.0f);
+		ctx->Draw()->Line(white, ox + (s.centreX - 4.0f) * sx, oy + s.centreY * sy,
+		                  ox + (s.centreX + 4.0f) * sx, oy + s.centreY * sy, 1.0f, 0xC0FFFFFF);
+		ctx->Draw()->Line(white, ox + s.centreX * sx, oy + (s.centreY - 4.0f) * sy,
+		                  ox + s.centreX * sx, oy + (s.centreY + 4.0f) * sy, 1.0f, 0xC0FFFFFF);
+	}
+
+	// Drawn twice: a dark casing first, then the line over it. The radar's own artwork is busy and
+	// a single bright stroke disappears against the road tiles wherever they happen to be pale.
+	for (const VCS::RadarSegment &g : segments) {
+		ctx->Draw()->Line(white, ox + g.x1 * sx, oy + g.y1 * sy,
+		                  ox + g.x2 * sx, oy + g.y2 * sy, thickness + 1.5f, 0xB0000000);
+	}
+	for (const VCS::RadarSegment &g : segments) {
+		ctx->Draw()->Line(white, ox + g.x1 * sx, oy + g.y1 * sy,
+		                  ox + g.x2 * sx, oy + g.y2 * sy, thickness, COLOR(s.lineColor));
+	}
+
+	// And the player's arrow back on top of it. The radar turns with the player, so the arrow
+	// always points up and needs no rotation of its own - the map is what rotates underneath it.
+	if (s.drawPlayerIcon && !segments.empty()) {
+		if (Draw::Texture *icon = VCSPlayerIcon(ctx)) {
+			const float half = s.iconSize * 0.5f;
+			Bounds b;
+			b.x = ox + (s.centreX - half) * sx;
+			b.y = oy + (s.centreY - half) * sy;
+			b.w = s.iconSize * sx;
+			b.h = s.iconSize * sy;
+			// A rotated quad by hand, because DrawTexRect is axis-aligned and DrawImageRotated
+			// only takes atlas images - and this texture comes off disk, out of the pack.
+			float angle = 0.0f;
+			VCS::GetPlayerFacing(&angle);
+			const float ca = cosf(angle);
+			const float sa = sinf(angle);
+			const float cx = b.x + b.w * 0.5f;
+			const float cy = b.y + b.h * 0.5f;
+			const float hw = b.w * 0.5f;
+			const float hh = b.h * 0.5f;
+			const float lx[4] = { -hw,  hw,  hw, -hw };
+			const float ly[4] = { -hh, -hh,  hh,  hh };
+			const float uu[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
+			const float vv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+			float qx[4], qy[4];
+			for (int i = 0; i < 4; i++) {
+				qx[i] = cx + lx[i] * ca - ly[i] * sa;
+				qy[i] = cy + lx[i] * sa + ly[i] * ca;
+			}
+			ctx->Flush();
+			ctx->Begin();
+			ctx->GetDrawContext()->BindTexture(0, icon);
+			const int order[6] = { 0, 1, 2, 0, 2, 3 };
+			for (int i = 0; i < 6; i++) {
+				const int k = order[i];
+				ctx->Draw()->V(qx[k], qy[k], 0xFFFFFFFF, uu[k], vv[k]);
+			}
+			ctx->Flush();
+			ctx->RebindTexture();
+		}
+	}
 }
 
 void EmuScreen::renderUI() {
@@ -1882,6 +2018,9 @@ void EmuScreen::renderUI() {
 		}
 		if (g_Config.iShowStatusFlags) {
 			DrawFPS(ctx, GetLayoutBounds(*ctx));
+		}
+		if (VCS::IsActive()) {
+			DrawVCSRouteOverlay(ctx);
 		}
 	}
 

@@ -774,6 +774,9 @@ SOURCES_CXX += \
 	       $(COREDIR)/VCS/VCSCamera.cpp \
 	       $(COREDIR)/VCS/VCSCheats.cpp \
 	       $(COREDIR)/VCS/VCSFrontEnd.cpp \
+	       $(COREDIR)/VCS/VCSRoute.cpp \
+	       $(COREDIR)/VCS/VCSBlips.cpp \
+	       $(COREDIR)/VCS/VCSRadar.cpp \
 	       $(COREDIR)/VCS/VCSFireHook.cpp \
 	       $(COREDIR)/VCS/VCSGame.cpp \
 	       $(COREDIR)/VCS/VCSInput.cpp \

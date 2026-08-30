@@ -294,6 +294,73 @@ inline constexpr u32 kVCSPathNodeLinkCount = 0x08;  // low nibble; the high nibb
 // ThePaths+0x08 is 35264 bytes, which is exactly the 17632 links the nodes themselves declare.
 inline constexpr u32 kVCSPathLinkStride = 2;
 
+// The nodes are TWO graphs in one array, and no link crosses between them. `ThePaths+0x10` counts
+// the first group and `+0x14` the second; they sum to exactly the total.
+//
+// The first group is the ROAD network - measured, after two heuristics disagreed. Parked on an
+// ordinary road, the car sat **1.46 units** from a group-1 link segment and **5.63** from the
+// nearest group-2 one: on a road, and a pavement's width off the other. Connectivity says the same
+// - group 1 is 13 components with 78% in one, group 2 is 95 components with 40% in the largest,
+// which is what a pavement network fragmented by roads looks like and what a drivable road network
+// cannot be.
+//
+// The byte at node+5 pointed the other way - non-zero on 95% of group 2 and only 9% of group 1 -
+// so it is not the road width it looked like. Recorded because it is the one piece of evidence
+// that disagreed, and a later reader deserves to know it was weighed rather than missed.
+inline constexpr u32 kVCSPathCarNodeCount = 0x10;   // ThePaths+0x10, read 3087: nodes [0, 3087)
+inline constexpr u32 kVCSPathPedNodeCount = 0x14;   // ThePaths+0x14, read 5293: the rest
+
+// The blip store is an array of 0xc0-byte entries. Found by toggling the map marker and diffing:
+// one Square press flipped entry 13's active flag from 4 to 0 and its type from 0x56 to 2.
+//
+//   +0x04  active   4 while placed, 0 once cleared
+//   +0x10  world X  }  same units as the player position
+//   +0x14  world Y  }
+//   +0x20  type     0x56 for the player's map marker; 0x7e for safe houses
+//
+// **Found by TYPE, never by slot index**, and that is the whole point of these constants. The
+// first version of this used a fixed offset, on the evidence that two markers placed in a row
+// landed in the same entry - which proves nothing, because a transient blip reuses the free slot
+// it just released. It read a safe house the moment anything else was allocated, and the route
+// drew confidently to the wrong place.
+// The array starts at store+0x270 and the entries are 0x30 apart. Both fall out of the handle
+// validator at 0x0880e450, which is the game's own arithmetic rather than anything measured:
+//
+//     sll  $a3, $v0, 4     ; index * 16
+//     addu $t1, $a3, $a3   ;  ... * 32
+//     addu $a3, $a3, $t1   ;  ... * 48 = 0x30    <- the stride
+//     lhu  $a0, 0x29a($a0) ; the entry's serial
+//
+// 0x29a is entry+0x2a once the array base is 0x270, which is what fixes the base. The marker sits
+// at store+0x9c0, and (0x9c0 - 0x270) / 0x30 = 39 exactly.
+//
+// **This was 0xc0 from the store base and worked by luck.** The marker happened to land on a
+// multiple of four entries, so a scan stepping 0xc0 hit it; any other slot and it would have been
+// invisible. Second time the same mistake has been made on this store - see the note below.
+inline constexpr u32 kVCSBlipArray = 0x270;
+inline constexpr u32 kVCSBlipStride = 0x30;
+inline constexpr u32 kVCSBlipActive = 0x04;
+inline constexpr u32 kVCSBlipX = 0x10;
+inline constexpr u32 kVCSBlipY = 0x14;
+inline constexpr u32 kVCSBlipType = 0x20;
+inline constexpr u32 kVCSBlipMarkerType = 0x56;
+inline constexpr u32 kVCSBlipSerial = 0x2a;      // u16; the high half of a blip handle
+
+// 75 slots, and "in use" is bit 2 of the type byte. Both come from the creator's own free-slot
+// search at 0x0880e06c, which is also what finally confirmed the base and stride above:
+//
+//     lb    $v0, 0x290($t1)     ; $t1 = store + i*0x30, so this is entry+0x20
+//     andi  $v0, $v0, 4         ; bit 2: taken
+//     beqz  $v0, claim
+//     addiu $t1, $t1, 0x30      ; next entry
+//     sltiu $t0, $t2, 0x4b      ; ... 75 of them
+inline constexpr int kVCSBlipMaxEntries = 75;
+inline constexpr u32 kVCSBlipInUseBit = 0x04;
+
+// From the radar object, which is the same object as the blip store. The range is the world
+// radius the radar shows, and it changes with the zoom - 96.0 at the default.
+inline constexpr u32 kVCSRadarRange = 0x1ab8;
+
 inline constexpr u32 kVCSMapPanX = 0xc0;
 inline constexpr u32 kVCSMapPanY = 0xc4;
 
@@ -446,10 +513,12 @@ enum class VCSAddr {
 	ThePaths,          // Pointer to CPathFind. The node array and its links hang off it.
 
 	// The map marker the player drops - the destination half of a GPS route.
-	BlipManager,       // Pointer to the radar's blip store; everything below hangs off it.
-	WaypointActive,    // Nonzero while a marker is placed.
-	WaypointX,         // Its world position. Same units as the player's own.
-	WaypointY,
+	BlipManager,       // Pointer to the radar's blip store. The map marker is found by scanning it.
+
+	// The radar's own view of the world, for drawing a route line over it. Read out of the
+	// transform at 0x0880edb0 - see VCSRadar.h for the arithmetic these three feed.
+	RadarOrigin,       // Two floats: the world point the radar is centred on. Tracks the player.
+	RadarForward,      // Two floats: a unit vector, the direction the radar treats as up.
 
 	MenuUseRoot,       // 1 while the tab strip has focus, 0 once you are inside the page.
 	MenuActive,        // Nonzero while the game's own pause menu is up. The Menu context's gate.
@@ -671,17 +740,11 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// three floats and then calls 0x0880e450 with `*(gp + 0x16dc)` as its first argument - the
 	// blip store - taking back an index or -1.
 	{ VCSAddr::BlipManager,   "BlipManager",   VCSAddrType::U32,   0x08bb343c,    kNoBase,              "gp+0x16dc. The radar's blip store. Read 0x08e8ed40" },
-	// The map marker's own slot, +0x990 into that store, measured by placing one marker, moving
-	// the map, placing a second, and diffing: only this entry's fields moved. Both markers landed
-	// in the SAME slot, which is what says it is the marker's own rather than the next one free.
-	//
-	//   +0x04  active     0 with no marker, 4 with one
-	//   +0x10  world X    read 1150.000 against a player at -1093.58
-	//   +0x14  world Y    read -549.915
-	//   +0x24  scale      1.0        +0x2c  alpha  0xff
-	{ VCSAddr::WaypointActive, "WaypointActive", VCSAddrType::U32, 0x994,         VCSAddr::BlipManager, "BlipManager+0x994. Nonzero while a map marker is placed" },
-	{ VCSAddr::WaypointX,     "WaypointX",     VCSAddrType::Float, 0x9a0,         VCSAddr::BlipManager, "BlipManager+0x9a0. Marker world X, same units as the player position" },
-	{ VCSAddr::WaypointY,     "WaypointY",     VCSAddrType::Float, 0x9a4,         VCSAddr::BlipManager, "BlipManager+0x9a4. Marker world Y" },
+	// gp+0x1744 and gp+0x174c, found by sweeping the globals for a float pair that tracked the
+	// player and then confirmed from the code: 0x0880edb0 loads exactly these two pairs, and the
+	// second reads as a unit vector to four decimal places.
+	{ VCSAddr::RadarOrigin,   "RadarOrigin",   VCSAddrType::Float, 0x08bb34a4,    kNoBase,              "gp+0x1744. Radar centre in world units; Y follows at +4" },
+	{ VCSAddr::RadarForward,  "RadarForward",  VCSAddrType::Float, 0x08bb34ac,    kNoBase,              "gp+0x174c. Unit vector the radar rotates by; Y follows at +4" },
 	{ VCSAddr::MenuUseRoot,   "MenuUseRoot",   VCSAddrType::U8,    0x08bc911e,    kNoBase,              "FrontEndMenuManager+0x1e. 1 = focus on the tab strip, 0 = inside the page" },
 	{ VCSAddr::MenuActive,    "MenuActive",    VCSAddrType::U8,    0x08bc9120,    kNoBase,              "FrontEndMenuManager+0x20. 1 while the game's own pause menu is up. Read 0 in gameplay" },
 	// +0x1c is a SIGNED byte index into the page vector at +0x04 (begin) / +0x08 (end) - the

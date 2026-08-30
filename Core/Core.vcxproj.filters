@@ -243,6 +243,15 @@
     <ClCompile Include="VCS\VCSFrontEnd.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
+    <ClCompile Include="VCS\VCSRoute.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSBlips.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
+    <ClCompile Include="VCS\VCSRadar.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
     <ClCompile Include="VCS\VCSFireHook.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -1569,6 +1578,15 @@
     <ClInclude Include="VCS\VCSFrontEnd.h">
       <Filter>VCS</Filter>
     </ClInclude>
+    <ClInclude Include="VCS\VCSRoute.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSBlips.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSRadar.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
     <ClInclude Include="VCS\VCSFireHook.h">
       <Filter>VCS</Filter>
     </ClInclude>
@@ -1582,6 +1600,9 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSMemory.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSMips.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSState.h">

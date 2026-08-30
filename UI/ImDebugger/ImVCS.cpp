@@ -35,6 +35,9 @@
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSState.h"
 #include "Core/VCS/VCSFrontEnd.h"
+#include "Core/VCS/VCSBlips.h"
+#include "Core/VCS/VCSRadar.h"
+#include "Core/VCS/VCSRoute.h"
 #include "Core/VCS/VCSVault.h"
 #include "Core/VCS/VCSWorld.h"
 
@@ -1443,6 +1446,156 @@ void ImVCSWindow::DrawCamera() {
 // The live `Page` row is also the only way to tell the two failure modes apart: a page that never
 // moves while tabbing means the tab control is wrong, and a page that moves but never arrives
 // means the target number is.
+// The road network, the route across it, and where the player and the marker are - drawn, because
+// a route is a shape and a shape cannot be checked by reading two numbers off a panel.
+//
+// A length that looks plausible next to the crow-flies distance says nothing about whether the path
+// follows streets, doubles back, or hops between two roads that only touch on the map. One look at
+// the polyline over the road graph answers all three, which is why this exists before anything is
+// drawn in the game itself.
+//
+// Deliberately not a minimap: north is up, the scale is whatever fits, and there is no attempt to
+// match what the game draws. It is an instrument.
+void ImVCSWindow::DrawRoute() {
+	if (!VCS::EnsureGraph()) {
+		ImGui::TextUnformatted("No path graph loaded - nothing to draw.");
+		return;
+	}
+	ImGui::Text("%d road nodes, %d links", VCS::RoadNodeCount(), VCS::RoadLinkCount());
+
+	// The line. This is the one that draws in normal play; the blip markers below are the old
+	// approach, kept as a fallback.
+	VCS::VCSRadarSettings &rs = VCS::RadarSettings();
+	ImGui::Checkbox("Draw the GPS line", &rs.drawRoute);
+	ImGui::SameLine();
+	ImGui::Text("(%s)", VCS::RadarStatus());
+	{
+		float ox = 0.0f, oy = 0.0f, fx = 0.0f, fy = 0.0f, range = 0.0f;
+		if (VCS::ReadRadarFrame(&ox, &oy, &fx, &fy, &range)) {
+			ImGui::Text("radar: origin (%.1f, %.1f)  facing (%.3f, %.3f)  range %.1f",
+				ox, oy, fx, fy, range);
+		} else {
+			ImGui::TextUnformatted("radar: no usable frame - origin, facing or range refused");
+		}
+	}
+	ImGui::Checkbox("Show the radar circle", &rs.showCalibration);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Draws where this thinks the radar is. The world-to-radar half of the transform is the game's own and is exact; this circle is the other half - four numbers for the HUD's layout that were settled by eye. Turn it on and line it up with the radar underneath.");
+	}
+	ImGui::SliderFloat("Radar centre X", &rs.centreX, 0.0f, 480.0f, "%.1f");
+	ImGui::SliderFloat("Radar centre Y", &rs.centreY, 0.0f, 272.0f, "%.1f");
+	ImGui::SliderFloat("Radar radius", &rs.radius, 4.0f, 120.0f, "%.1f");
+	ImGui::SliderFloat("Line thickness", &rs.thickness, 0.5f, 8.0f, "%.2f");
+
+	ImGui::Separator();
+
+	VCS::VCSBlipSettings &bs = VCS::BlipSettings();
+	ImGui::Checkbox("Mark the route on the radar (old blip markers)", &bs.showRoute);
+	ImGui::SameLine();
+	ImGui::Text("(maker: %s, %d placed, %d slots free)", VCS::BlipStatus(),
+		VCS::RouteBlipCount(), VCS::FreeBlipSlots());
+	ImGui::InputInt("Markers", &bs.maxMarkers);
+	ImGui::InputFloat("Spacing", &bs.spacing);
+
+	const std::vector<VCS::RoutePoint> route = VCS::RouteToWaypoint();
+	VCS::RoutePoint player{}, marker{};
+	bool havePlayer = false, haveMarker = false;
+	if (const std::optional<u32> pb = VCS::ReadAddrU32(VCS::VCSAddr::PlayerBase)) {
+		const std::optional<float> px = VCS::ReadFloat(*pb + VCS::kVCSEntityPositionOffset);
+		const std::optional<float> py = VCS::ReadFloat(*pb + VCS::kVCSEntityPositionOffset + 4);
+		if (px && py) { player = {*px, *py, 0.0f}; havePlayer = true; }
+	}
+	{
+		float wx = 0.0f, wy = 0.0f;
+		if (VCS::FindWaypoint(&wx, &wy)) { marker = {wx, wy, 0.0f}; haveMarker = true; }
+	}
+
+	if (route.empty()) {
+		if (!haveMarker) {
+			ImGui::TextUnformatted("No marker placed.");
+		} else {
+			// Which piece each end landed on is the whole diagnosis when a route fails, so say it
+			// rather than leaving "no route" to be guessed at.
+			const int fromNode = havePlayer ? VCS::NearestRoadNode(player.x, player.y, 150.0f) : -1;
+			const int toNode = VCS::NearestRoadNode(marker.x, marker.y, 600.0f);
+			ImGui::Text("No route. Player on piece %d, marker on piece %d, of %d.",
+				VCS::RoadNodeComponent(fromNode), VCS::RoadNodeComponent(toNode),
+				VCS::RoadComponentCount());
+		}
+	} else {
+		float direct = 0.0f;
+		if (havePlayer && haveMarker) {
+			const float dx = marker.x - player.x, dy = marker.y - player.y;
+			direct = sqrtf(dx * dx + dy * dy);
+		}
+		ImGui::Text("Route: %d nodes, %.0f units", (int)route.size(), VCS::RouteLength(route));
+		if (direct > 1.0f) {
+			// The ratio is the number worth watching. Around 1.2-2 is ordinary city driving;
+			// much more than that means the search is going somewhere strange.
+			ImGui::SameLine();
+			ImGui::Text("  (direct %.0f, ratio %.2f)", direct, VCS::RouteLength(route) / direct);
+		}
+	}
+
+	// Frame everything of interest, then pad, so the route never touches the edge.
+	float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+	auto grow = [&](float x, float y) {
+		minX = std::min(minX, x); maxX = std::max(maxX, x);
+		minY = std::min(minY, y); maxY = std::max(maxY, y);
+	};
+	for (const VCS::RoutePoint &p : route) grow(p.x, p.y);
+	if (havePlayer) grow(player.x, player.y);
+	if (haveMarker) grow(marker.x, marker.y);
+	if (minX > maxX) {   // nothing to frame - show the whole city
+		minX = -2100.0f; maxX = 1600.0f; minY = -1900.0f; maxY = 1900.0f;
+	}
+	const float pad = std::max(80.0f, std::max(maxX - minX, maxY - minY) * 0.15f);
+	minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	ImVec2 size = ImGui::GetContentRegionAvail();
+	size.y = std::max(size.y, 260.0f);
+	const float span = std::max(maxX - minX, maxY - minY);
+	const float scale = std::min(size.x, size.y) / std::max(span, 1.0f);
+	const float cx = (minX + maxX) * 0.5f, cy = (minY + maxY) * 0.5f;
+	// World y grows north, screen y grows down - so y is negated and nothing else is.
+	auto toScreen = [&](float x, float y) {
+		return ImVec2(origin.x + size.x * 0.5f + (x - cx) * scale,
+		              origin.y + size.y * 0.5f - (y - cy) * scale);
+	};
+
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(16, 16, 22, 255));
+
+	// The roads in view, drawn once per pair by only taking links that run to a higher index.
+	const int nodes = VCS::RoadNodeCount();
+	for (int i = 0; i < nodes; i++) {
+		VCS::RoutePoint a;
+		if (!VCS::RoadNodeAt(i, &a)) continue;
+		if (a.x < minX || a.x > maxX || a.y < minY || a.y > maxY) continue;
+		for (int k = 0; ; k++) {
+			int j;
+			if (!VCS::RoadLinkAt(i, k, &j)) break;
+			if (j <= i) continue;
+			VCS::RoutePoint b;
+			if (!VCS::RoadNodeAt(j, &b)) continue;
+			dl->AddLine(toScreen(a.x, a.y), toScreen(b.x, b.y), IM_COL32(70, 80, 95, 255), 1.0f);
+		}
+	}
+
+	for (size_t i = 1; i < route.size(); i++) {
+		dl->AddLine(toScreen(route[i - 1].x, route[i - 1].y), toScreen(route[i].x, route[i].y),
+			IM_COL32(90, 200, 255, 255), 3.0f);
+	}
+	if (havePlayer) {
+		dl->AddCircleFilled(toScreen(player.x, player.y), 5.0f, IM_COL32(120, 255, 140, 255));
+	}
+	if (haveMarker) {
+		dl->AddCircleFilled(toScreen(marker.x, marker.y), 5.0f, IM_COL32(255, 120, 200, 255));
+	}
+	ImGui::Dummy(size);
+}
+
 void ImVCSWindow::DrawFrontEnd() {
 	VCS::VCSFrontEndSettings &s = VCS::FrontEndSettings();
 
@@ -1456,15 +1609,31 @@ void ImVCSWindow::DrawFrontEnd() {
 	// widget names differ would look like - as opposed to the setting simply being off.
 	ImGui::Text("Chrome hidden: %d widget(s)", VCS::HiddenChromeCount());
 	{
-		const std::optional<u32> wpOn = VCS::ReadAddrAsU32(VCS::VCSAddr::WaypointActive);
-		const std::optional<float> wx = VCS::ReadAddrFloat(VCS::VCSAddr::WaypointX);
-		const std::optional<float> wy = VCS::ReadAddrFloat(VCS::VCSAddr::WaypointY);
-		if (wpOn && *wpOn && wx && wy) {
-			ImGui::Text("Waypoint    : %.1f, %.1f", *wx, *wy);
+		float wx = 0.0f, wy = 0.0f;
+		if (VCS::FindWaypoint(&wx, &wy)) {
+			ImGui::Text("Waypoint    : %.1f, %.1f", wx, wy);
 		} else {
 			ImGui::Text("Waypoint    : none");
 		}
 	}
+	ImGui::Separator();
+	if (VCS::EnsureGraph()) {
+		ImGui::Text("Roads       : %d nodes, %d links",
+			VCS::RoadNodeCount(), VCS::RoadLinkCount());
+		const std::vector<VCS::RoutePoint> route = VCS::RouteToWaypoint();
+		if (route.empty()) {
+			ImGui::Text("Route       : none");
+		} else {
+			ImGui::Text("Route       : %d nodes, %.0f units", (int)route.size(),
+				VCS::RouteLength(route));
+			ImGui::Text("  first     : %.0f, %.0f", route.front().x, route.front().y);
+			ImGui::Text("  last      : %.0f, %.0f", route.back().x, route.back().y);
+		}
+	} else {
+		ImGui::Text("Roads       : no path graph loaded");
+	}
+	ImGui::Separator();
+
 	ImGui::Text("Wheel notches: %d   (zoom mask 0x%08x)",
 		VCS::WheelNotchesSeen(), VCS::MapZoomButtonMask());
 	ImGui::Text("Page has items: %s", VCS::MenuPageHasItems() ? "yes (up/down select)"
@@ -1782,6 +1951,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Camera")) {
 			DrawCamera();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Route")) {
+			DrawRoute();
 			ImGui::EndTabItem();
 		}
 		if (ImGui::BeginTabItem("Front End")) {

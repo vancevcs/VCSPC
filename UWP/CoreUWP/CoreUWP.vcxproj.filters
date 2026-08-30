@@ -97,6 +97,9 @@
     <ClCompile Include="..\..\Core\VCS\VCSFireHook.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSGame.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSFrontEnd.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSRoute.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSBlips.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSRadar.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSInput.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSMemory.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSState.cpp" />
@@ -527,9 +530,13 @@
     <ClInclude Include="..\..\Core\VCS\VCSFireHook.h" />
     <ClInclude Include="..\..\Core\VCS\VCSAddresses.h" />
     <ClInclude Include="..\..\Core\VCS\VCSFrontEnd.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSRoute.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSBlips.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSRadar.h" />
     <ClInclude Include="..\..\Core\VCS\VCSGame.h" />
     <ClInclude Include="..\..\Core\VCS\VCSInput.h" />
     <ClInclude Include="..\..\Core\VCS\VCSMemory.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSMips.h" />
     <ClInclude Include="..\..\Core\VCS\VCSState.h" />
     <ClInclude Include="..\..\Core\VCS\VCSVault.h" />
     <ClInclude Include="..\..\Core\VCS\VCSWorld.h" />

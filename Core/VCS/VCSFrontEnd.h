@@ -289,6 +289,15 @@ bool MenuOnTabStrip();
 // are on. Cached against the page index, so this is cheap to ask every frame.
 bool MenuPageHasItems();
 
+// Whether the menu on screen is one THIS BRIDGE opened - a MAP, BRIEF, STATS or GAME row - as
+// opposed to one the game put up by itself, like the save UI you get by walking into the save icon
+// at a safe house.
+//
+// The distinction decides whether the arrow lock applies at all. Hiding the tab strip is something
+// we do to a page we navigated to; a menu the game opened was never tabbed to and must keep every
+// control it came with.
+bool BridgeOwnsMenu();
+
 // Ask for the game's front end. Safe from the UI thread, which is where the menu row calls it.
 // `Save` is forwarded to RequestSaveMenu; everything else opens the menu and walks.
 //
@@ -300,6 +309,12 @@ void RequestGameMenu(FrontEndTarget target);
 // Shut the game's own menu if it is open, by pressing its back control until it closes. Safe from
 // the UI thread; queued like everything else here.
 void RequestCloseGameMenu();
+
+// Where the player's map marker is, in world units. False when none is placed.
+//
+// Scans the blip store for an entry of the marker's type rather than reading a fixed slot - see
+// the constants in VCSAddresses.h for why that distinction cost a wrong route once already.
+bool FindWaypoint(float *x, float *y);
 
 // Ask the front end to open its SAVE menu, the way script opcode `0260 activate_save_menu` does -
 // by setting the request flag the front end polls. This one really is a single write, and it is

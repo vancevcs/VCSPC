@@ -1726,7 +1726,12 @@ u32 ApplyMapping(VCSInputContext context) {
 		setMask |= MapZoomButtonMask();
 	}
 
-	if (context == VCSInputContext::Menu && FrontEndSettings().lockMenuTabs) {
+	// Only on a page THIS FORK navigated to. The lock exists because the tab strip is hidden on
+	// those pages, so tabbing moves you somewhere unmarked - it is not a statement about menus in
+	// general, and applying it to one the game opened itself was a real bug: the save UI reports
+	// MenuPage 0, which resolves to MAP_PAGE, which has no selectable widgets, so up and down were
+	// dropped and the save slots could not be moved through.
+	if (context == VCSInputContext::Menu && FrontEndSettings().lockMenuTabs && BridgeOwnsMenu()) {
 		setMask &= ~(u32)(CTRL_LEFT | CTRL_RIGHT);
 		// Up and down change which ROW of tabs you are on, so they go the same way - except on a
 		// page that has entries to move between, where they are how you pick one. The page itself

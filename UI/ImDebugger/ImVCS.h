@@ -44,6 +44,7 @@ private:
 	void DrawCamera();
 	void DrawVault();
 	void DrawFrontEnd();
+	void DrawRoute();
 
 	// Scratchpad rows. Fixed size on purpose - this is a scratchpad, not a watch list, and
 	// keeping it a plain array means no allocation while the emulator is running.

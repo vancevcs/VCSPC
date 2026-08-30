@@ -112,6 +112,17 @@ void WorldQueryNoteMainThread();
 // rule. Safe and free to call from several of them; the first one each frame does the work.
 void WorldQueryDispatch(const char *host);
 
+// Post a call into game code, to be made at the next safe dispatch point.
+//
+// Exists so that a second caller does not have to rediscover the rule the crash above taught:
+// hleEnqueueCall is only safe from inside a syscall, on the game's main thread, outside an
+// interrupt. WorldQueryDispatch already stands on all three, so anything else that wants to call
+// game code queues here and is dispatched from the same place, under the same guards.
+//
+// One at a time, and the world query wins a tie - it has a player waiting on it mid-vault, and
+// this is for things that can be a frame late. Returns false when a call is already queued.
+bool EnqueueGameCall(u32 func, u32 arg);
+
 // Ask for up to kMaxGroundSamples heights. Returns false if the query layer isn't ready, if a
 // previous request is still outstanding, or if the arguments could not be written.
 //

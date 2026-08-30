@@ -25,6 +25,7 @@
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
+#include "Core/VCS/VCSMips.h"
 
 namespace VCS {
 
@@ -129,6 +130,10 @@ static u64 g_answerTick = 0;
 // A prepared request waiting for a syscall to carry it into the game. See the comment on
 // WorldQueryDispatch for why a request cannot simply be sent when it is made.
 static bool g_wantDispatch = false;
+// A call some other part of the VCS layer wants made, waiting for the same safe moment.
+static bool g_wantForeign = false;
+static u32 g_foreignFunc = 0;
+static u32 g_foreignArg = 0;
 static u32 g_dispatchCodeOff = 0;      // which program the pending call runs
 static u32 g_climbSeq = 0;
 static bool g_climbPending = false;
@@ -148,49 +153,6 @@ static SceUID g_mainThread = -1;
 static int g_resultCount = 0;
 static VCSGroundResult g_results[kMaxGroundSamples];
 
-// --- A very small MIPS assembler ----------------------------------------------------------------
-//
-// Written out as encodings rather than as a blob of hex words, because a blob cannot be reviewed.
-// Every form below was checked against the game's own disassembly - e.g. `addiu $sp, $sp, -0x20`
-// really is 0x27bdffe0 at 0x08a9e434, and `jal 0x8893460` really is 0x0e224d18 - so the encodings
-// are confirmed by the same listing that supplied the address.
-static constexpr u32 kRegZero = 0;
-static constexpr u32 kRegA0 = 4;
-static constexpr u32 kRegA1 = 5;
-static constexpr u32 kRegT0 = 8;
-static constexpr u32 kRegT1 = 9;
-static constexpr u32 kRegT2 = 10;
-static constexpr u32 kRegS0 = 16;
-static constexpr u32 kRegS1 = 17;
-static constexpr u32 kRegS2 = 18;
-static constexpr u32 kRegSP = 29;
-static constexpr u32 kRegRA = 31;
-static constexpr u32 kRegF0 = 0;
-static constexpr u32 kRegF12 = 12;
-static constexpr u32 kRegF13 = 13;
-static constexpr u32 kRegF14 = 14;
-
-static constexpr u32 IType(u32 op, u32 rs, u32 rt, int imm) {
-	return (op << 26) | (rs << 21) | (rt << 16) | (u32)(u16)(s16)imm;
-}
-static constexpr u32 Addiu(u32 rt, u32 rs, int imm) { return IType(0x09, rs, rt, imm); }
-static constexpr u32 Sltiu(u32 rt, u32 rs, int imm) { return IType(0x0b, rs, rt, imm); }
-static constexpr u32 Lw(u32 rt, u32 rs, int off) { return IType(0x23, rs, rt, off); }
-static constexpr u32 Sw(u32 rt, u32 rs, int off) { return IType(0x2b, rs, rt, off); }
-static constexpr u32 Lbu(u32 rt, u32 rs, int off) { return IType(0x24, rs, rt, off); }
-static constexpr u32 Sb(u32 rt, u32 rs, int off) { return IType(0x28, rs, rt, off); }
-static constexpr u32 Lwc1(u32 ft, u32 rs, int off) { return IType(0x31, rs, ft, off); }
-static constexpr u32 Swc1(u32 ft, u32 rs, int off) { return IType(0x39, rs, ft, off); }
-static constexpr u32 Beq(u32 rs, u32 rt, int words) { return IType(0x04, rs, rt, words); }
-static constexpr u32 B(int words) { return Beq(kRegZero, kRegZero, words); }
-static constexpr u32 Addu(u32 rd, u32 rs, u32 rt) {
-	return (rs << 21) | (rt << 16) | (rd << 11) | 0x21;
-}
-static constexpr u32 Move(u32 rd, u32 rs) { return Addu(rd, rs, kRegZero); }
-static constexpr u32 Sll(u32 rd, u32 rt, u32 sa) { return (rt << 16) | (rd << 11) | (sa << 6); }
-static constexpr u32 Jal(u32 target) { return (0x03u << 26) | ((target >> 2) & 0x03ffffffu); }
-static constexpr u32 Jr(u32 rs) { return (rs << 21) | 0x08; }
-static constexpr u32 Nop() { return 0; }
 
 // The program itself.
 //
@@ -601,9 +563,22 @@ static u32 Tag(const char *s) {
 	return tag;
 }
 
+bool EnqueueGameCall(u32 func, u32 arg) {
+	if (g_wantForeign || func == 0) {
+		return false;
+	}
+	g_wantForeign = true;
+	g_foreignFunc = func;
+	g_foreignArg = arg;
+	return true;
+}
+
 void WorldQueryDispatch(const char *host) {
-	if (!g_block || !g_wantDispatch) {
+	if (!g_wantDispatch && !g_wantForeign) {
 		return;   // nothing waiting: the overwhelmingly common case, and not worth recording
+	}
+	if (!g_block && !g_wantForeign) {
+		return;
 	}
 
 	// Everything from here on happens with a question waiting, so a refusal is worth writing down.
@@ -628,6 +603,18 @@ void WorldQueryDispatch(const char *host) {
 		WriteU32(g_block + kBlockRefusedThreadOff, (u32)cur);
 		WriteU32(g_block + kBlockRefusedWhyOff, Tag(refusal));
 		WriteU32(g_block + kBlockRefusalsOff, (u32)g_refusals);
+		return;
+	}
+
+	// A queued foreign call goes only when the world query has nothing of its own to send. Two
+	// hleEnqueueCalls in one syscall would both be acted on when it finishes, which is not what
+	// that mechanism promises.
+	if (!g_wantDispatch) {
+		const u32 foreignArg = g_foreignArg;
+		hleEnqueueCall(g_foreignFunc, 1, &foreignArg);
+		g_wantForeign = false;
+		g_dispatches++;
+		g_lastHost = host;
 		return;
 	}
 
