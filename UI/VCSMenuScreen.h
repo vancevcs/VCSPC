@@ -61,6 +61,12 @@ enum class VCSMenuPage {
 	// What this port adds to the game, each row a switch that hands one of them back.
 	Gameplay,
 
+	// The game's own Game tab, rebuilt here: new game, and the save list in this menu's own face
+	// rather than the firmware's. See Core/VCS/VCSSaves.h for why the list is ours to draw.
+	Game,
+	LoadGame,
+	DeleteGame,
+
 	// The read-only controls listing: the device switch and a menu of the four situations, then
 	// a page of bindings for each. Nothing on those pages can be edited - they are a reference
 	// card, which is what the game's own Controls screen is once you take the rebinding out.
@@ -220,6 +226,12 @@ private:
 	void AddGameMenuRow(UI::ViewGroup *parent, const char *label, VCS::FrontEndTarget target,
 		const char *help);
 	void AddBackRow(UI::ViewGroup *parent);
+
+	// One row per save slot, built from what is actually on the memory stick. `deleting` picks
+	// which of the two things a row does with the slot it names - both pages are the same list,
+	// and that is the point: a player choosing what to delete is reading the same shelf they load
+	// from.
+	void AddSaveRows(UI::ViewGroup *parent, bool deleting);
 	// True for the leaf pages that are a list of settings rather than a list of pages.
 	static bool IsOptionPage(VCSMenuPage page);
 	static VCS::OptionPage ToOptionPage(VCSMenuPage page);
@@ -227,6 +239,10 @@ private:
 	void OnResume(UI::EventParams &e);
 	void OnLoadGame(UI::EventParams &e);
 	void OnExitGame(UI::EventParams &e);
+	// Asks first, then hands the game its own NEW GAME. The confirmation is ours because the row
+	// is ours; the game's identical prompt on the far side is answered by the bridge, so the
+	// player is asked once rather than twice.
+	void OnNewGame(UI::EventParams &e);
 	void OnQuitApp(UI::EventParams &e);
 	void OnGameSettings(UI::EventParams &e);
 	void OnRestoreDefaults(UI::EventParams &e);
@@ -236,6 +252,16 @@ private:
 	// save-state rows - but it is what those rows would have to be gated on.
 	bool bootPending_;
 	VCSMenuMode mode_;
+
+	// Answers from a popup, acted on in update() rather than in the popup's own callback.
+	//
+	// Not a refinement: doing either of these from inside the callback changes the screen stack
+	// underneath a screen that is still finishing, and the result is a menu that renders and
+	// stops taking input at all - clicks, keys, everything - with the emulator paused behind it.
+	// Seen, and it looks exactly like a hang. The callback records the answer; the next update
+	// does something about it, by which time the popup is gone.
+	bool pendingNewGame_ = false;
+	int pendingDelete_ = -1;
 
 	VCSMenuPage page_ = VCSMenuPage::Root;
 

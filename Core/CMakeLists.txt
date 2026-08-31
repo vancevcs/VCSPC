@@ -433,6 +433,7 @@ add_library(Core STATIC
 	VCS/VCSCheats.cpp
 	VCS/VCSFrontEnd.cpp
 	VCS/VCSRoute.cpp
+	VCS/VCSSaves.cpp
 	VCS/VCSRadar.cpp
 	VCS/VCSFireHook.cpp
 	VCS/VCSCamera.h
@@ -440,6 +441,7 @@ add_library(Core STATIC
 	VCS/VCSFrontEnd.h
 	VCS/VCSRoute.h
 	VCS/VCSSaveDialog.h
+	VCS/VCSSaves.h
 	VCS/VCSRadar.h
 	VCS/VCSFireHook.h
 	VCS/VCSGame.cpp

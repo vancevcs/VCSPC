@@ -44,6 +44,7 @@ TITLES = {
     "audio": "Audio",
     "quit": "Quit Game",
     "loadgame": "Load Game",
+    "deletegame": "Delete Game",
     "onfoot": "On Foot",
     "invehicle": "In Vehicle",
     "aircraft": "Aircraft",

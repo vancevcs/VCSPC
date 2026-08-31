@@ -455,6 +455,26 @@ void MapCursorReset();
 // it from; the filesystem check happens there and the rest is queued like every other request.
 bool RequestAutoLoad();
 
+// Load one particular save, by the game's own slot number (0..7, the S92F* suffix).
+//
+// The difference from the auto-load is one number: that one takes whatever the firmware's list
+// arrives on, this one walks the list to the slot the player picked out of OUR save menu. Both go
+// behind the curtain, because both are a menu being driven by nobody.
+//
+// Safe from the UI thread, which is where the save list calls it from.
+void RequestLoadSlot(int slot);
+
+// Start the story again - by BOOTING THE DISC AGAIN, not by walking to the game's own NEW GAME.
+//
+// VCS has no new-game screen: it boots logos, credits, then walks itself into the story, so
+// restarting the disc is starting a new game, on the path this port takes every launch. The one
+// thing it has to arrange is that the boot auto-load stands down for that one boot.
+//
+// The walk was written first and is not what shipped: confirming the game's own NEW GAME tears
+// the world down, which stops the logic clock the bridge's presses are paced on, and the game
+// comes back with its front end open on a black screen. See the note on the definition.
+void RequestNewGame();
+
 // Whether a sequence the player did not ask for is running, and should be hidden while it does.
 //
 // Both automatic sequences drive the game's own menus, which means both of them put a menu being

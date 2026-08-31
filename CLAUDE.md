@@ -897,6 +897,45 @@ played.
 **A save the player asks for is not covered.** `RequestSaveMenu` raises nothing - somebody who
 opened the save menu went looking for it. Only the auto-save does.
 
+### The save menu is ours now, and the game loads a save by itself at boot
+
+`GAME` on the pause root opens this fork's own page - NEW GAME, LOAD GAME, DELETE GAME - and the
+two lists are ours as well: eight rows built from `PARAM.SFO`, the mission each save is named
+after as the label and the game's own description as the help line, with a `*` against whichever
+is newest. Everything on screen there was written by the game; only the drawing is this port's.
+
+Loading still goes through the game, because only the game can put a world back together: the row
+asks for a slot, the bridge walks the front end to LOAD GAME and steers the firmware's list to
+that entry, all behind the loading screen. Deleting does not - it is a directory, and the game
+re-enumerates the memory stick every time it opens a list, so `VCS::DeleteSave` removes it here
+rather than walking into a third firmware dialog to do the same thing.
+
+**The finding that cost the most, and explains three earlier confusions: VCS loads a save by
+itself at boot.** Not through its menu, and not through this fork - the game asks the firmware for
+a silent AUTOLOAD of a save it names, and the world that comes up is that save's world. It is why
+a first run with an empty memory stick starts the story and a later run does not, and it is why
+the fork's own auto-load usually looks like it "worked" even in builds where it had not run at all.
+
+That is what defeated the first two attempts at NEW GAME:
+
+- **Walking the game's own NEW GAME hangs it.** Confirming that entry tears the world down, and
+  the bridge's presses are paced on the game's logic clock - which stops during the teardown. The
+  press never finishes, the game comes back with its own confirm page open on a black screen and
+  its frame counter racing, and nothing recovers it. The same presses injected from outside,
+  released on a wall clock, start a new game every time; that control run is what separated our
+  timing from the game's behaviour. A watchdog that releases the button on the wall clock was
+  added and did NOT fix it, which is what ruled out the stuck press and left the teardown itself
+  as the thing not to be standing in the middle of. The watchdog stayed - a press paced on a clock
+  that can stop is a bug waiting for another caller - but it is not what makes NEW GAME work.
+- **Rebooting the disc is not enough on its own**, because the boot autoload then quietly
+  continues from a save again. Twice this looked like "the reset did not happen".
+
+So NEW GAME is: reboot the disc, and tell that one autoload to find nothing. Both halves are
+one-shot flags, and `TakeNewGameBoot` is consumed by `PSPSaveDialog`'s autoload path - which puts
+the game in exactly the state a first run is in, and the story starts. Verified from the other
+end: the mission key empty, `$ONMISSION` 1 with mission 8 running, the player at Fort Baxter, and
+the front end never opened.
+
 ### Saving after a mission, and how the game says one was passed
 
 `01EB register_mission_passed` is the trigger, resolved from the script command table the usual

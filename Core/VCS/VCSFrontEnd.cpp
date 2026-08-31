@@ -22,6 +22,8 @@
 #include <vector>
 
 #include "Common/System/OSD.h"
+#include "Common/System/Request.h"
+#include "Common/System/System.h"
 #include "Common/File/DirListing.h"
 #include "Common/File/Path.h"
 #include "Common/StringUtils.h"
@@ -193,6 +195,10 @@ enum class Phase {
 	// hold/gap pairs; there was no reason to rewrite them.
 	PressHold,
 	PressGap,
+
+	// Nothing left to press. A sequence that ends without a dialog behind it - NEW GAME - lands
+	// here rather than on Idle directly, so the tidy-up in GoIdle still happens.
+	EndSequence,
 };
 
 Phase g_phase = Phase::Idle;
@@ -229,12 +235,44 @@ int g_pressHold = 0;
 int g_pressGap = 0;
 bool g_pressOnVblank = false;
 
+// A watchdog on a press counted in GAME frames, because that clock can stop with the button still
+// down.
+//
+// NEW GAME is where this was found and it is the clearest case of it: confirming tears the world
+// down, the frame counter stops dead, and the hold never finishes - so the game comes back up
+// with Cross held, and hangs on a black screen with its own confirm page still open and the
+// counter racing. The same presses sent from outside, released on a wall clock, start a new game
+// every time; that control run is what separated our timing from the game's behaviour.
+//
+// Three quarters of a second, which is far longer than any press here wants and far shorter than
+// the load it must not outlive. It exists for correctness, not for pacing: when the game's clock
+// is running, the frame count always wins.
+int g_pressVblanks = 0;
+constexpr int kPressVblankLimit = 45;
+
 // Bounded everywhere, because every one of these loops is "press something and look again" and
 // the failure mode without a bound is a fork holding the player's pad forever.
 int g_seqPresses = 0;
 int g_dialogWaited = 0;
 bool g_sawDialog = false;
 constexpr int kMaxSeqPresses = 12;
+
+// Skip the boot's auto-load exactly once, because this boot IS the new game.
+//
+// **Deliberately not cleared by FrontEndReset**, which is the one piece of state here that is
+// not: Reset runs from VCS::Init, i.e. on the very boot this flag exists to talk to. Clearing it
+// there would be clearing the message on delivery.
+bool g_skipAutoLoadOnce = false;
+
+// And the same message for the GAME's own boot autoload, which is a different thing entirely and
+// has to be told separately. See TakeNewGameBoot in VCSSaveDialog.h. Not cleared by FrontEndReset
+// either, and for the same reason.
+bool g_newGameBoot = false;
+
+// Which save the load is after: a slot number, or -1 for "whatever the firmware's list arrives
+// on", which is the most recent and is what the auto-load wants. Set by the request, read in the
+// dialog.
+int g_wantSlot = -1;
 
 // Retries of the Start press, for the auto-load only. The boot seam lands in the opening scene,
 // where the first Start may be spent skipping something rather than opening the menu.
@@ -329,6 +367,10 @@ u32 g_asLastFrame = 0;
 int g_autoSaveDelay = 0;
 bool g_autoSaveArmed = false;
 int g_autoSaveWaited = 0;
+// Game frames after a world restart during which the mission key is re-baselined and nothing can
+// arm. See MissionWatchTick for the save this prevented.
+int g_missionSettle = 0;
+constexpr int kMissionSettleFrames = 120;
 // A minute of game frames. If the world never becomes a good moment to save in - the player is
 // in another menu, or a cheat sequence never ends - the auto-save gives up rather than firing at
 // some unrelated moment much later.
@@ -455,6 +497,7 @@ bool SelectedWidgetName(char *out, size_t size) {
 // Hold a button, release it, then go to `back`. Both halves are counted on whichever clock the
 // caller says, because the firmware's dialog runs with the game's logic stopped.
 void Press(u32 mask, Phase back, int hold, int gap, bool onVblank) {
+	g_pressVblanks = 0;
 	g_mask = mask;
 	g_pressHold = Frames(hold);
 	g_pressGap = Frames(gap);
@@ -626,17 +669,23 @@ void DialogTick() {
 	const u32 back = peek.cancelButton ? peek.cancelButton : (u32)CTRL_CIRCLE;
 
 	if (peek.list) {
-		// The load list is left exactly as the game asked for it - VCS focuses the LATEST save,
-		// which is the whole definition of "load the most recent". The save list is walked to the
-		// dedicated slot instead, one press at a time, watching the index rather than counting.
-		if (peek.save && peek.selected >= 0 && peek.count > 0) {
-			int want = s.autoSaveSlot;
+		// Which entry to take. A save always walks to its dedicated slot; a load takes the one
+		// the game asked the firmware to focus - the LATEST, which is the whole definition of
+		// "continue" - unless the player picked a particular one out of our own save list, in
+		// which case it walks there the same way.
+		//
+		// Walked one press at a time watching the index, rather than counted, for the reason
+		// every other loop here watches something: a list that scrolls differently than expected
+		// stops the walk instead of running off the end of it.
+		const bool steer = peek.save || g_wantSlot >= 0;
+		if (steer && peek.selected >= 0 && peek.count > 0) {
+			int want = peek.save ? s.autoSaveSlot : g_wantSlot;
 			if (want < 0) want = 0;
 			if (want >= peek.count) want = peek.count - 1;
 			if (peek.selected != want) {
 				if (++g_seqPresses > kMaxSeqPresses) {
-					GoIdle("could not reach the save slot");
-					g_OSD.Show(OSDType::MESSAGE_ERROR, "Could not reach the auto-save slot", 4.0f,
+					GoIdle("could not reach the slot");
+					g_OSD.Show(OSDType::MESSAGE_ERROR, "Could not reach that save slot", 4.0f,
 						"vcs_frontend");
 					return;
 				}
@@ -798,12 +847,26 @@ void MissionWatchTick() {
 	}
 
 	// A world that RESTARTED - a load, or NEW GAME - brings a different key with it, and the
-	// frame counter rewinding is how that is told from a mission being passed. Without this the
-	// first thing an auto-load does is fire an auto-save over the save it just loaded.
+	// frame counter rewinding is how that is told from a mission being passed.
+	//
+	// **The rewind and the key are not on the same tick**, and that cost a spurious save before
+	// it was written down: the counter goes back to 1 the instant the world starts, and the save
+	// data lands in the globals somewhere after it, so a check that only disarmed on the tick of
+	// the rewind saw a perfectly ordinary key change a moment later and called it a mission. Seen
+	// in the wild - slot 0 written four seconds after a boot in which nothing was played.
+	//
+	// So a restart opens a WINDOW rather than firing once, and while it is open the key is
+	// re-baselined every tick and nothing can arm. Four seconds, which is longer than the gap has
+	// ever been and far shorter than the quickest mission.
 	bool restarted = false;
 	if (const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter)) {
 		restarted = *frame < g_asLastFrame;
 		g_asLastFrame = *frame;
+	}
+	if (restarted) {
+		g_missionSettle = kMissionSettleFrames;
+		g_autoSaveArmed = false;
+		g_autoSaveDelay = 0;
 	}
 
 	const bool changed = g_haveMissionKey && (*lo != g_missionKeyLo || *hi != g_missionKeyHi);
@@ -812,9 +875,16 @@ void MissionWatchTick() {
 	const bool first = !g_haveMissionKey;
 	g_haveMissionKey = true;
 
-	if (restarted) {
-		g_autoSaveArmed = false;
-		g_autoSaveDelay = 0;
+	if (g_missionSettle > 0) {
+		// Counted on the game's clock like the delay, so a settle cannot expire during a load -
+		// the counter is not moving then, and the world it is waiting for has not arrived.
+		//
+		// It shares the auto-save's frame consumer, which is safe by construction rather than by
+		// luck: the two are mutually exclusive. A settle clears `armed` when it opens and nothing
+		// can arm while it is open, so the frame edge is never wanted by both.
+		if (GameFrameAdvancedForAutoSave()) {
+			g_missionSettle--;
+		}
 		return;
 	}
 	if (first || !changed || *lo == 0) {
@@ -936,15 +1006,59 @@ bool RequestAutoLoad() {
 	if (!FrontEndSettings().autoLoadOnBoot) {
 		return false;
 	}
+	// The player asked for a new game and this is the boot they asked for it with.
+	if (g_skipAutoLoadOnce) {
+		g_skipAutoLoadOnce = false;
+		return false;
+	}
 	// The filesystem question is answered HERE, on the thread that asked, rather than inside the
 	// sequence: it is the one part of this that has nothing to do with the game, and a first run
 	// with an empty memory stick should press nothing at all rather than walk to an empty list.
 	if (!AnySaveOnMemoryStick()) {
 		return false;
 	}
+	// -1: take the entry the firmware's list arrives on, which VCS asks to be the latest save.
+	g_wantSlot = -1;
 	RaiseCurtain(CurtainKind::Loading);
 	RequestGameMenu(FrontEndTarget::Load);
 	return true;
+}
+
+void RequestLoadSlot(int slot) {
+	// The slot goes in before the request, not with it: the request is one atomic int and this is
+	// the second half of the same instruction as far as the sequence is concerned. Nothing can
+	// read it in between - FrontEndTick takes the request on the emu thread, and it is the only
+	// thing that reads either.
+	g_wantSlot = slot;
+	RaiseCurtain(CurtainKind::Loading);
+	RequestGameMenu(FrontEndTarget::Load);
+}
+
+void RequestNewGame() {
+	// A reboot of the disc, not a walk to NEW GAME - and the reason is worth keeping, because the
+	// walk was written first and it works right up until the moment it matters.
+	//
+	// Confirming the game's own NEW GAME tears the world down. The bridge's presses are paced on
+	// the game's logic clock, and that clock STOPS during the teardown, so the sequence cannot
+	// finish and the game comes back with the front end still open on a black screen, its frame
+	// counter racing and nothing on screen. Reproduced every time; a watchdog that releases the
+	// button on the wall clock did not fix it, which is what ruled out the stuck press and left
+	// the teardown itself as the thing not to be standing in the middle of.
+	//
+	// And the reboot is not a workaround, it is the shorter road to the same place. **VCS has no
+	// new-game screen**: it boots logos, credits, then walks itself into the story - measured, in
+	// "The boot sequence" - so starting the disc again IS starting a new game, on the path this
+	// port already takes every single launch. The only thing that has to be said is "do not load
+	// anything this time".
+	g_skipAutoLoadOnce = true;
+	g_newGameBoot = true;
+	System_PostUIMessage(UIMessage::REQUEST_GAME_RESET);
+}
+
+bool TakeNewGameBoot() {
+	const bool want = g_newGameBoot;
+	g_newGameBoot = false;
+	return want;
 }
 
 CurtainKind AutoCurtain() {
@@ -1001,6 +1115,7 @@ bool FrontEndDriving() {
 	case Phase::Dialog:
 	case Phase::PressHold:
 	case Phase::PressGap:
+	case Phase::EndSequence:
 		return true;
 	default:
 		return false;
@@ -1801,6 +1916,20 @@ void FrontEndTick() {
 		DialogTick();
 		return;
 	}
+	// The watchdog above, ticked on the only clock that cannot stop. A press that has outlived it
+	// is released and moved on whatever the game's counter is doing.
+	if (!g_pressOnVblank && (g_phase == Phase::PressHold || g_phase == Phase::PressGap)) {
+		if (++g_pressVblanks >= kPressVblankLimit) {
+			g_pressVblanks = 0;
+			if (g_phase == Phase::PressHold) {
+				g_mask = 0;
+				g_phase = Phase::PressGap;
+			} else {
+				g_phase = g_pressReturn;
+			}
+			return;
+		}
+	}
 	if (g_pressOnVblank && (g_phase == Phase::PressHold || g_phase == Phase::PressGap)) {
 		if (g_phase == Phase::PressHold) {
 			if (--g_pressHold <= 0) {
@@ -1833,6 +1962,10 @@ void FrontEndTick() {
 		}
 		break;
 
+	case Phase::EndSequence:
+		GoIdle("done");
+		break;
+
 	// Put the highlight on LOAD GAME and press it. The Game page opens with that entry selected
 	// anyway - it is the first - so the usual path is one read and one Cross; the press up is
 	// there for the case where it is not, and it is bounded because a page that will not move its
@@ -1842,21 +1975,26 @@ void FrontEndTick() {
 			GoIdle("menu closed");
 			break;
 		}
+		// Which entry, and which way to walk to it. The page is `LoadGame_MI, NewGame_MI,
+		// DeleteGame_MI, GameTitle, Reset_MI` in that order and it arrives with the first one
+		// selected - measured - so LOAD is already there and NEW is one press down. The name is
+		// still checked every time rather than trusted: a press is only made because the
+		// selection is not what was asked for yet.
+		const char *want = "LoadGame_MI";
 		char name[32];
 		const bool have = SelectedWidgetName(name, sizeof(name));
-		if (have && strcmp(name, "LoadGame_MI") == 0) {
+		if (have && strcmp(name, want) == 0) {
 			g_seqPresses = 0;
 			g_waited = 0;
 			Press(CTRL_CROSS, Phase::LoadPrompt, s.enterFrames, s.gapFrames, false);
 			break;
 		}
 		if (++g_seqPresses > kMaxSeqPresses) {
-			AbandonSequence("could not select LOAD GAME", "Could not reach LOAD GAME");
+			AbandonSequence("could not select the entry", "Could not reach that menu entry");
 			break;
 		}
-		// Up, because LOAD GAME is the first entry on the page - see the widget list in
-		// docs/VCS_ADDRESSES.md. A page that reports no selection at all gets the same press:
-		// moving is what makes it name one.
+		// A page that reports no selection at all gets the same press: moving is what makes it
+		// name one.
 		Press(CTRL_UP, Phase::LoadPick, s.holdFrames, s.gapFrames, false);
 		break;
 	}
@@ -2140,6 +2278,8 @@ void FrontEndReset() {
 	g_autoSaveArmed = false;
 	g_autoSaveDelay = 0;
 	g_autoSaveWaited = 0;
+	g_missionSettle = 0;
+	g_wantSlot = -1;
 	g_request.store(-1, std::memory_order_relaxed);
 	// Dropped rather than restored: the game these belonged to is going away, and the write
 	// would land in whatever replaces it.

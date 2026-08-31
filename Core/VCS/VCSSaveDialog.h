@@ -76,4 +76,17 @@ struct SaveDialogPeek {
 // False when no savedata dialog is up, in which case `out` is left in its default state.
 bool PeekSaveDialog(SaveDialogPeek *out);
 
+// Whether THIS boot's silent autoload should find nothing, asked once and answered once.
+//
+// **VCS loads a save by itself at boot.** Not through its menu and not through this fork: the
+// game asks the firmware for a silent AUTOLOAD of a save it names, and the world that comes up is
+// that save's. It is why a first run - an empty memory stick - starts the story and a later one
+// does not, and it is what defeated the first two attempts at a NEW GAME row: whatever the menu
+// did, the next boot quietly continued from a save again.
+//
+// So a new game is "boot the disc, and let that one autoload find nothing", which is exactly the
+// state a first run is in. The dialog asks this on its way into an autoload; RequestNewGame is
+// what makes it true, once.
+bool TakeNewGameBoot();
+
 }  // namespace VCS

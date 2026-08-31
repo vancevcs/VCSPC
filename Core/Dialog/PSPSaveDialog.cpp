@@ -1171,6 +1171,13 @@ void PSPSaveDialog::ExecuteNotVisibleIOAction() {
 	switch (utilityMode) {
 	case SCE_UTILITY_SAVEDATA_TYPE_LOAD: // Only load and exit
 	case SCE_UTILITY_SAVEDATA_TYPE_AUTOLOAD:
+		// VCS fork: a NEW GAME asked for this boot's silent autoload to find nothing, which is
+		// the one state a game with saves on the stick cannot otherwise be put in. The answer is
+		// consumed here, so it applies to exactly one autoload. See Core/VCS/VCSSaveDialog.h.
+		if (utilityMode == SCE_UTILITY_SAVEDATA_TYPE_AUTOLOAD && VCS::TakeNewGameBoot()) {
+			result = SCE_UTILITY_SAVEDATA_ERROR_LOAD_NO_DATA;
+			break;
+		}
 		result = param.Load(param.GetPspParam(), GetSelectedSaveDirName(), currentSelectedSave);
 		ResetSecondsSinceLastGameSave();
 		ShowSaveLoadIndicator(false);
