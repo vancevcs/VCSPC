@@ -448,6 +448,14 @@ inline constexpr u32 kVCSMapCrosshairCall = 0x0897ba2c;
 // kill the black bar, which puts the cursor at y=200 on a 272-row screen rather than at 136. That
 // is where the game really does place a waypoint, so it is where our cross has to go: drawing at
 // the visual centre would put the cross somewhere the marker does not land.
+//
+// **READ THESE. DO NOT WRITE THEM.** They read zero because they are zero most of the time, not
+// because they are static: the map's update at 0x0897cba0-0x0897cd4c is a pan solver that stores
+// the remaining distance to its target in this pair and zeroes each axis as it arrives, with
+// +0xc0 / +0xc4 driven off their sign. Writing a constant into +0xd4 to move the cursor is
+// therefore an assertion that the map is still travelling vertically, made every frame and
+// winning against the game's own logic - which is how the map came to pan left and right but not
+// up or down. See the note where `centreMapCursor` used to be, in VCSFrontEnd.h.
 inline constexpr u32 kVCSMapCursorOffsetX = 0xd0;
 inline constexpr u32 kVCSMapCursorOffsetY = 0xd4;
 

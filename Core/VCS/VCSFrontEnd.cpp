@@ -946,16 +946,9 @@ void MapCursorTick() {
 	if (ae != 0) {
 		const std::optional<u32> w = ReadU32(ae + kVCSWidgetW);
 		const std::optional<u32> h = ReadU32(ae + kVCSWidgetH);
-		if (s.centreMapCursor && h) {
-			// Half the difference between the widget the game centres on and the screen actually
-			// shown. Written every frame while the map is up rather than once, because the widget
-			// is rebuilt when the page is entered and would take its zero back with it.
-			const float wanted = (float)kVCSScreenHeight * 0.5f - (float)((int)*h / 2);
-			const std::optional<float> now = ReadFloat(ae + kVCSMapCursorOffsetY);
-			if (now && *now != wanted) {
-				WriteFloat(ae + kVCSMapCursorOffsetY, wanted);
-			}
-		}
+		// Read, never written. The pair is the map's own pan state and +0xd4 is how its vertical
+		// axis is steered - writing it froze up and down while left and right went on working.
+		// See the note where `centreMapCursor` used to be, in VCSFrontEnd.h.
 		const std::optional<float> ox = ReadFloat(ae + kVCSMapCursorOffsetX);
 		const std::optional<float> oy = ReadFloat(ae + kVCSMapCursorOffsetY);
 		if (w && h && ox && oy) {

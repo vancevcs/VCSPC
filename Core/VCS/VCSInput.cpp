@@ -1731,14 +1731,22 @@ u32 ApplyMapping(VCSInputContext context) {
 	// general, and applying it to one the game opened itself was a real bug: the save UI reports
 	// MenuPage 0, which resolves to MAP_PAGE, which has no selectable widgets, so up and down were
 	// dropped and the save slots could not be moved through.
-	if (context == VCSInputContext::Menu && FrontEndSettings().lockMenuTabs && BridgeOwnsMenu()) {
-		setMask &= ~(u32)(CTRL_LEFT | CTRL_RIGHT);
-		// Up and down change which ROW of tabs you are on, so they go the same way - except on a
-		// page that has entries to move between, where they are how you pick one. The page itself
-		// says which it is: see MenuPageHasItems.
-		if (!MenuPageHasItems()) {
-			setMask &= ~(u32)(CTRL_UP | CTRL_DOWN);
-		}
+	//
+	// And only while the TAB STRIP has focus, which is the one state the four directions mean
+	// "change tab" in. Inside a page they belong to the page - they pan the map, they move down
+	// the save slots - so a lock that ignored `MenuUseRoot` was taking the arrows away from the
+	// player at exactly the moment the page had a use for them. That is why the map could not be
+	// panned from the keyboard at all: its arrows ARE claimed here, unlike a pad's, so the lock
+	// reached them.
+	//
+	// `MenuPageHasItems` is no longer consulted. It was standing in for this question - "are the
+	// arrows doing something on this page" - and the flag the front end keeps for it answers
+	// directly, on every page, without a widget walk. It defaults to `true` when unreadable,
+	// which keeps the lock's failure mode where it was: an unreadable menu tabs rather than
+	// stranding the player with dead arrows.
+	if (context == VCSInputContext::Menu && FrontEndSettings().lockMenuTabs && BridgeOwnsMenu()
+		&& MenuOnTabStrip()) {
+		setMask &= ~(u32)(CTRL_LEFT | CTRL_RIGHT | CTRL_UP | CTRL_DOWN);
 	}
 
 	// The entry sequence, before the Free Aim press: sprint into a run, then arm the pulse.

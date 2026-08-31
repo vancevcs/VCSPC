@@ -228,16 +228,31 @@ struct VCSFrontEndSettings {
 	float mapCursorArm = 7.0f;        // half-length of each arm, in PSP pixels
 	float mapCursorThickness = 1.0f;
 
-	// Put the map's cursor at the middle of the SCREEN rather than the middle of the widget.
+	// There was a `centreMapCursor` here, which wrote `Map_AE + 0xd4` every frame to lift the
+	// cursor from the middle of the widget to the middle of the screen. It is gone, and the
+	// reason is worth keeping: **+0xd0 and +0xd4 are not a static cursor offset. They are live
+	// pan state, and the map's vertical axis is steered through +0xd4.**
 	//
-	// The two stopped being the same thing when the chrome fix stretched Map_AE to 400 rows to
-	// kill the black bar: the game puts its cursor at half the widget's height, so it sits at 200
-	// on a 272-row screen - about three quarters of the way down. This writes the widget's cursor
-	// offset at +0xd4 to make up the difference.
+	// Read at 0x0897cba0-0x0897cd4c, the map's per-frame update. Each frame it projects a target
+	// into screen space, subtracts the widget's centre - `f12 = x - (w/2 + 1)`, `f13 = y - h/2` -
+	// and then, per axis, either ZEROES the offset or stores that remaining distance into it;
+	// +0xc0 / +0xc4 are driven off the sign of the result and get slammed to one clamp extreme or
+	// the other. So a constant negative in +0xd4 is not an offset the draw happens to read. It is
+	// "still travelling upward, forever", asserted before the game's own logic every single
+	// frame, on one axis only.
 	//
-	// It moves the GAME's cursor, not our drawing of it, which is the only version worth having -
-	// a cross drawn somewhere the marker does not land would be worse than one sitting low.
-	bool centreMapCursor = true;
+	// Which is exactly what it looked like from the player's side, and the symptom is the thing
+	// to recognise again: **the map panned left and right and would not pan up or down.** The
+	// horizontal field was never written, so half of the map worked perfectly and pointed the
+	// blame at input - at a pad, at the d-pad rows, at the tab lock - none of which had anything
+	// to do with it.
+	//
+	// The cursor really does sit low, and that is the honest state of it now: the game places a
+	// marker at `h/2 + [0xd4]`, the chrome fix stretches Map_AE to `backdropHeight` rows to kill
+	// the black bar, and half of 400 is 200 on a screen whose middle is 136. Our cross is drawn
+	// where the marker LANDS rather than where it looks right, which is the only version worth
+	// having. If that is worth closing, the lever is the widget's height - the one number both
+	// halves are derived from - and not a field the game is using for something else.
 	int zoomInFrames = 2;
 
 	bool mapWaypoint = true;
