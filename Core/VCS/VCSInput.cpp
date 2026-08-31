@@ -254,19 +254,16 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Checked against Core/KeyMapDefaults.cpp before adding: PPSSPP binds no VIRTKEY to it, so
 	// claiming it takes nothing away - the trap Escape and Tab document further up.
 	{ VCSInputContext::OnFoot,    NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Attack / fire", "Fire", VCSKeyList::OnFoot },
-	// Menu keys, living in the OnFoot context on purpose.
+	// Enter and Backspace used to sit here too, as a second Cross and a second Circle, on the
+	// reasoning that "the Menu context never resolves, so menus run under OnFoot". That premise
+	// is gone - the Menu context has resolved through `MenuActive` since the front-end bridge
+	// landed, and it carries both keys itself - and what was left behind was the cost the comment
+	// accepted in passing: **Backspace also fires, and Enter also sprints.**
 	//
-	// Menus run under OnFoot, because the Menu context never resolves - it needs GameState, which
-	// is still unset. So the rows further down under Menu are dead, and what actually drives a menu
-	// is whatever OnFoot maps to Cross and Circle: Shift (Sprint) confirms and left-click (Attack)
-	// goes back, which is what "better in menu controls" was about.
-	//
-	// These ADD Enter and Backspace alongside them. Shift and left-click cannot be taken away
-	// without losing sprint and firing, since nothing here can tell a menu from gameplay - that
-	// genuinely needs GameState. Costs: Enter also sprints and Backspace also fires, neither of
-	// which collides with anything.
-	{ VCSInputContext::OnFoot,    NKCODE_ENTER,              CTRL_CROSS,     "Confirm in menus (also sprint)" },
-	{ VCSInputContext::OnFoot,    NKCODE_DEL,                CTRL_CIRCLE,    "Back in menus, Backspace (also fires)" },
+	// Which is a leak rather than a footnote. Both keys are how this fork's own menu is worked, so
+	// leaving that menu with either one still held put the press into the world underneath -
+	// reported as "backspace brings me back to the game, but the character punches". A key cannot
+	// be a menu key here and a weapon there.
 	{ VCSInputContext::OnFoot,    kVCSAimKey,                CTRL_RTRIGGER,  "Aim (verified)", "Aim weapon", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,    NKCODE_F,                  CTRL_TRIANGLE,  "Enter vehicle", "Enter vehicle", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,    NKCODE_E,                  CTRL_RIGHT,     "Next weapon", "Next weapon", VCSKeyList::OnFoot },
@@ -380,8 +377,9 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// heavy hit here) went on confirming and made the failure look like Enter specifically being
 	// broken. The cost is the one the OnFoot rows already accept: Enter also throws a heavy hit
 	// and Backspace also fires, neither of which is reachable while a menu is up.
-	{ VCSInputContext::Aiming,    NKCODE_ENTER,              CTRL_CROSS,     "Confirm in menus (also heavy hit)" },
-	{ VCSInputContext::Aiming,    NKCODE_DEL,                CTRL_CIRCLE,    "Back in menus, Backspace (also fires)" },
+	// Their Enter and Backspace rows are gone for the reason the OnFoot ones are: the Menu context
+	// carries both keys now, and a menu key that also throws a punch is a menu key that punches on
+	// the way out of the menu.
 	// Same as on foot. Bound here mainly so Tab can't fall through to PPSSPP's fast-forward
 	// mid-fight, which would suddenly run the game at several times speed while aiming.
 	{ VCSInputContext::Aiming,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
@@ -1303,6 +1301,7 @@ static bool HandlePadKey(const KeyInput &key) {
 	// game as a Circle a moment later.
 	if (key.keyCode == NKCODE_BUTTON_B && context == VCSInputContext::Menu) {
 		if (down) {
+			SetMenuAfterClose();
 			System_PostUIMessage(UIMessage::REQUEST_GAME_PAUSE);
 		}
 		return true;
@@ -1513,6 +1512,7 @@ bool HandleHostKey(const KeyInput &key) {
 	// shuts the game's menu and raises this fork's once it has gone, so the two are one step from
 	// the player's side - and the same key pressed again in that menu leaves for the world.
 	if (down && context == VCSInputContext::Menu && key.keyCode == NKCODE_DEL) {
+		SetMenuAfterClose();
 		System_PostUIMessage(UIMessage::REQUEST_GAME_PAUSE);
 	}
 

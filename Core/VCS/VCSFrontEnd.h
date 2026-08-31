@@ -496,8 +496,24 @@ enum class CurtainKind {
 	None,
 	Loading,
 	Saving,
+	// A page of the game's own menu being opened or closed on the player's behalf. The same
+	// backdrop with NO word on it, because this is not a load - it is the menu they are already
+	// looking at, held on screen while the walk behind it happens. Without it the game shows
+	// through for the half second the walk takes, every time, in both directions.
+	Menu,
 };
 CurtainKind AutoCurtain();
+
+// Whether the Back that just asked to close the game's menu wants THIS fork's menu afterwards.
+//
+// Escape does not - it means "put this away and let me play", which is one press and one level.
+// Backspace and the pad's B do: they are Back, and back from one of the game's pages is the menu
+// it was reached from. One flag rather than a second UI message, because everything that pauses
+// this game already funnels through the one PPSSPP has.
+//
+// Set on the input thread, taken on the UI thread.
+void SetMenuAfterClose();
+bool TakeMenuAfterClose();
 
 // Whether an auto-save is waiting for its delay to run out. For the debugger, and for anything
 // that wants to keep out of the way of one.

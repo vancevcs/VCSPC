@@ -561,7 +561,10 @@ void EmuScreen::sendMessage(UIMessage message, const char *value) {
 		// walk needs to run.
 		if (VCS::GameMenuActive()) {
 			VCS::RequestCloseGameMenu();
-			vcsMenuAfterGameMenu_ = true;
+			// Which key asked. Escape means "put this away and let me play" - one press, one
+			// level, straight back to the world. Backspace and the pad's B mean Back, and back
+			// from one of the game's pages is the menu it was reached from.
+			vcsMenuAfterGameMenu_ = VCS::TakeMenuAfterClose();
 			return;
 		}
 		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
@@ -1494,9 +1497,10 @@ void EmuScreen::update() {
 		// and it is consumed here. The REQUEST_GAME_PAUSE arm in sendMessage is a different
 		// route - the Windows menu, mostly - and carries the same check.
 		if (VCS::GameMenuActive()) {
-			// Shut the game's menu, then come back to ours - see the arm in sendMessage.
+			// Shut the game's menu, and come back to ours only if it was Back that asked - see
+			// the arm in sendMessage.
 			VCS::RequestCloseGameMenu();
-			vcsMenuAfterGameMenu_ = true;
+			vcsMenuAfterGameMenu_ = VCS::TakeMenuAfterClose();
 		} else {
 			screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 		}
@@ -1933,7 +1937,8 @@ static void DrawVCSCurtain(UIContext *ctx) {
 	if (kind != VCS::CurtainKind::None) {
 		// Remembered rather than asked for during the fade: the sequence is over by then and the
 		// word would otherwise change on the last half second of its own way out.
-		g_vcsCurtainWord = kind == VCS::CurtainKind::Saving ? "SAVING" : "LOADING";
+		g_vcsCurtainWord = kind == VCS::CurtainKind::Saving ? "SAVING"
+			: kind == VCS::CurtainKind::Menu ? nullptr : "LOADING";
 		g_vcsCurtainWasUp = true;
 		g_vcsCurtainFadeStart = 0.0;
 		DrawVCSBootCurtain(*ctx, 1.0f, g_vcsCurtainWord);

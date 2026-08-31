@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -67,6 +68,11 @@ enum class VCSMenuPage {
 	LoadGame,
 	DeleteGame,
 
+	// "Are you sure?", in this menu's own face rather than in PPSSPP's. One page serves all three
+	// questions - deleting a save, starting a new game, quitting - because a confirmation is a
+	// page with two rows on it, and this menu already knows how to draw one of those.
+	Confirm,
+
 	// The read-only controls listing: the device switch and a menu of the four situations, then
 	// a page of bindings for each. Nothing on those pages can be edited - they are a reference
 	// card, which is what the game's own Controls screen is once you take the rebinding out.
@@ -113,6 +119,14 @@ public:
 	// table; an action row - a cheat, a page jump - has nowhere else to carry one.
 	void SetHelp(std::string_view help) { help_ = help; }
 
+	// Start the label at a fixed x instead of centring it on its own length.
+	//
+	// For rows that are a LIST OF NAMES rather than a menu of verbs - the save slots. Eight
+	// titles of eight different lengths, each centred on itself, read as a ragged pile; started
+	// at one x they read as a column, which is what they are. Every other page in this menu wants
+	// the centred version, so this is a per-row choice rather than a new kind of row.
+	void SetLeftAligned(float x) { leftAlignX_ = x; }
+
 protected:
 	// A toggle row flips its value on click. Float rows are edited through the bar and the
 	// arrow keys instead, so this leaves them alone.
@@ -138,6 +152,8 @@ private:
 
 	std::string label_;
 	std::string help_;
+	// Negative means centred, which is what every row that is not a save slot wants.
+	float leftAlignX_ = -1.0f;
 	const VCS::Option *option_ = nullptr;
 	bool draggingValue_ = false;
 };
@@ -195,7 +211,9 @@ protected:
 private:
 	void GoToPage(VCSMenuPage page);
 	// The page one Back press lands on. Root's parent is "close the menu", handled by the caller.
-	static VCSMenuPage ParentPage(VCSMenuPage page);
+	// Not static any more: the confirmation page's parent is wherever the question was asked
+	// from, which is a value this screen carries rather than a fact about the page table.
+	VCSMenuPage ParentPage(VCSMenuPage page) const;
 	const char *PageTitle(VCSMenuPage page) const;
 
 	void AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page);
@@ -253,7 +271,20 @@ private:
 	bool bootPending_;
 	VCSMenuMode mode_;
 
-	// Answers from a popup, acted on in update() rather than in the popup's own callback.
+	// Ask a question on a page of our own, and run `action` if the answer is yes. The heading
+	// stays whatever the page it was asked from uses, so the screen does not appear to jump
+	// somewhere else to ask.
+	void GoToConfirm(const char *titleKey, std::string question, std::string detail,
+		std::function<void()> action);
+
+	// What that page is currently asking, and what to do about it.
+	const char *confirmTitle_ = "paused";
+	std::string confirmQuestion_;
+	std::string confirmDetail_;
+	std::function<void()> confirmAction_;
+	VCSMenuPage confirmParent_ = VCSMenuPage::Root;
+
+	// Answers from a confirmation, acted on in update() rather than in the row's own click.
 	//
 	// Not a refinement: doing either of these from inside the callback changes the screen stack
 	// underneath a screen that is still finishing, and the result is a menu that renders and
@@ -262,6 +293,8 @@ private:
 	// does something about it, by which time the popup is gone.
 	bool pendingNewGame_ = false;
 	int pendingDelete_ = -1;
+	bool pendingExit_ = false;
+	bool pendingQuitApp_ = false;
 
 	VCSMenuPage page_ = VCSMenuPage::Root;
 

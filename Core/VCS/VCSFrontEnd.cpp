@@ -284,6 +284,11 @@ constexpr int kMaxStartAttempts = 3;
 // Atomic because the input gate reads it from the input thread; everything else here is the emu
 // thread's.
 std::atomic<int> g_curtainKind{(int)CurtainKind::None};
+// A raise the tick has not set the counters up for yet. See RaiseCurtain.
+std::atomic<bool> g_curtainFresh{false};
+// What the UI thread is allowed to know about the game's menu: reading MenuActive is a memory
+// read and belongs to the emu thread, so the tick publishes the answer here instead.
+std::atomic<bool> g_gameMenuUpCached{false};
 bool g_curtainSawSequence = false;
 int g_curtainSettle = 0;
 int g_curtainVblanks = 0;
@@ -328,19 +333,33 @@ void DropCurtain() {
 	g_haveCurtainFrame = false;
 }
 
-// Up, and with a word on it. Raised where the automatic sequences are ASKED for rather than where
-// they start, so there is no frame of the game's menu opening in front of the player.
+// Up, and with a word on it - or without one, for a menu transition. Raised where a sequence is
+// ASKED for rather than where it starts, so there is no frame of the game showing between this
+// fork's menu closing and the game's opening.
+//
+// Callable from ANY thread, which is why it sets two atomics and nothing else: the counters
+// belong to the emu thread and are initialised by the tick when it sees the raise. Menu rows ask
+// for this from the UI thread.
 void RaiseCurtain(CurtainKind kind) {
-	g_curtainSawSequence = false;
-	g_curtainSettle = kCurtainSettleFrames;
-	g_curtainVblanks = 0;
-	g_haveCurtainFrame = false;
 	g_curtainKind.store((int)kind, std::memory_order_relaxed);
+	g_curtainFresh.store(true, std::memory_order_relaxed);
 }
 
 void CurtainTick() {
-	if (g_curtainKind.load(std::memory_order_relaxed) == (int)CurtainKind::None) {
+	const int kind = g_curtainKind.load(std::memory_order_relaxed);
+	if (kind == (int)CurtainKind::None) {
+		g_curtainFresh.store(false, std::memory_order_relaxed);
 		return;
+	}
+	if (g_curtainFresh.exchange(false, std::memory_order_relaxed)) {
+		g_curtainSawSequence = false;
+		// A load or a save hands back a world that is still streaming itself in, and a second of
+		// that is worth hiding. A menu transition hands back a MENU, which is finished the moment
+		// it is there - so it comes down as soon as the walk does, or the page the player asked
+		// for spends a second behind a backdrop.
+		g_curtainSettle = kind == (int)CurtainKind::Menu ? 0 : kCurtainSettleFrames;
+		g_curtainVblanks = 0;
+		g_haveCurtainFrame = false;
 	}
 	if (++g_curtainVblanks >= kCurtainMaxVblanks) {
 		DropCurtain();
@@ -350,8 +369,18 @@ void CurtainTick() {
 	// stored and the machine taking it. Both are "keep it up", and telling them apart is what
 	// g_curtainSawSequence is for: without it the gap before the walk starts looks exactly like
 	// the walk having finished.
-	if (!g_curtainSawSequence || g_phase != Phase::Idle) {
-		g_curtainSettle = kCurtainSettleFrames;
+	//
+	// **Done counts as finished**, and that is not a detail. A walk to one of the game's PAGES
+	// ends in Done and stays there for as long as the player is reading the page - it is the
+	// hand-over, not a step - so a curtain waiting for Idle waits for them to close the menu, and
+	// what they get in the meantime is a backdrop over the map they asked for. Measured: the map
+	// open behind a curtain that had no intention of coming down.
+	if (!g_curtainSawSequence || (g_phase != Phase::Idle && g_phase != Phase::Done)) {
+		g_curtainSettle = kind == (int)CurtainKind::Menu ? 0 : kCurtainSettleFrames;
+		return;
+	}
+	if (g_curtainSettle <= 0) {
+		DropCurtain();
 		return;
 	}
 	if (GameFrameAdvancedForCurtain() && --g_curtainSettle <= 0) {
@@ -980,7 +1009,32 @@ void BeginWalk() {
 
 }  // namespace
 
+std::atomic<bool> g_menuAfterClose{false};
+
+void SetMenuAfterClose() {
+	g_menuAfterClose.store(true, std::memory_order_relaxed);
+}
+
+bool TakeMenuAfterClose() {
+	return g_menuAfterClose.exchange(false, std::memory_order_relaxed);
+}
+
 void RequestGameMenu(FrontEndTarget target) {
+	// The curtain goes up with the request, not when the walk starts, so there is no frame of the
+	// world between this fork's menu closing and the game's opening. Only for the pages: Load,
+	// Save and Close raise their own, and a target that turns out to have nothing to do drops it
+	// again within a tick.
+	switch (target) {
+	case FrontEndTarget::Map:
+	case FrontEndTarget::Brief:
+	case FrontEndTarget::Game:
+	case FrontEndTarget::Stats:
+	case FrontEndTarget::Menu:
+		RaiseCurtain(CurtainKind::Menu);
+		break;
+	default:
+		break;
+	}
 	g_request.store((int)target, std::memory_order_relaxed);
 }
 
@@ -990,8 +1044,16 @@ void RequestCloseGameMenu() {
 	// to closing the screen would have its request overwritten by the teardown that follows it.
 	// Asked for by a row: go there. Asked for by nothing: shut the game's menu.
 	int expected = -1;
-	g_request.compare_exchange_strong(expected, (int)FrontEndTarget::Close,
-		std::memory_order_relaxed);
+	if (!g_request.compare_exchange_strong(expected, (int)FrontEndTarget::Close,
+			std::memory_order_relaxed)) {
+		return;
+	}
+	// Only when one is actually up. This runs on EVERY way out of this fork's menu, so raising it
+	// unconditionally would put a backdrop over the world for a frame or two every time somebody
+	// pressed RESUME.
+	if (g_gameMenuUpCached.load(std::memory_order_relaxed)) {
+		RaiseCurtain(CurtainKind::Menu);
+	}
 }
 
 void RequestSaveMenu() {
@@ -1755,6 +1817,9 @@ void FrontEndTick() {
 			g_zoomMask = 0;
 		}
 	}
+
+	// What the UI thread is allowed to know, refreshed before anything can return early.
+	g_gameMenuUpCached.store(GameMenuActive(), std::memory_order_relaxed);
 
 	// The curtain first of all: it hides a walk that has not started yet as readily as one in
 	// progress, and every path below this can return early.

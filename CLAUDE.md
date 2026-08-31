@@ -953,6 +953,36 @@ the game in exactly the state a first run is in, and the story starts. Verified 
 end: the mission key empty, `$ONMISSION` 1 with mission 8 running, the player at Fort Baxter, and
 the front end never opened.
 
+### The questions are pages, not popups
+
+Deleting a save, starting a new game and quitting each ask first, and all three ask on a page of
+this menu rather than through `MessagePopupScreen`. PPSSPP's popup is a perfectly good dialog and
+it is the wrong one here: it is a blue box in PPSSPP's own font over a menu that is neither.
+
+One page serves all three, because a confirmation IS a page with two rows on it and this menu
+already knows how to draw one. It carries the heading of whatever page asked - Delete Game, Game,
+Quit Game - so the screen does not appear to jump somewhere else to ask, and Back on it goes to
+the page that asked, which the page table expresses by making `ParentPage` a member rather than a
+static: the parent of a question is wherever it was asked from.
+
+The shape is San Andreas's, from the screenshots that prompted it: the question left-aligned under
+the heading, wrapped in a box so a save's name can be as long as it likes, and NO above YES,
+centred, with NO focused. **NO first is not a style choice** - the default answer to a question
+nobody has read yet should be the one that changes nothing, and the game's own confirm page does
+the same.
+
+Every affirmative only RECORDS what to do; `update` acts on it a frame later. That is the same
+rule the popups needed and for the same reason: a row that finishes the screen or rebuilds it from
+inside its own click handler leaves the menu rendering and taking no input at all.
+
+### The save list is a column, not a stack of centred names
+
+Rows on the two save pages start at ONE x rather than being centred on their own length -
+`VCSMenuItem::SetLeftAligned`, and it is the only page that asks for it. Eight titles of eight
+different lengths, each centred on itself, read as a ragged pile; started at the same x they read
+as the list they are. BACK stays centred, because it is an action rather than an entry in the
+list.
+
 ### Saving after a mission, and how the game says one was passed
 
 `01EB register_mission_passed` is the trigger, resolved from the script command table the usual
