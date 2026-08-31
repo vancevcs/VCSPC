@@ -18,8 +18,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <string>
 
+#include "Common/TimeUtil.h"
 #include "Common/Data/Color/RGBAUtil.h"
 #include "Common/Log.h"
 #include "Common/Data/Text/I18n.h"
@@ -244,7 +246,8 @@ static void DrawTexture(UIContext &dc, Draw::Texture *tex, const Bounds &bounds,
 // Fill `bounds` with the image, keeping its proportions and cropping the overflow - what CSS calls
 // "cover". Stretching instead would be one line shorter and would distort the art on any window
 // that is not the image's own aspect, which on a resizable desktop window is most of them.
-static void DrawCover(UIContext &dc, Draw::Texture *tex, const Bounds &bounds) {
+static void DrawCover(UIContext &dc, Draw::Texture *tex, const Bounds &bounds,
+                      float alpha = 1.0f) {
 	const float texW = (float)tex->Width();
 	const float texH = (float)tex->Height();
 	if (texW <= 0.0f || texH <= 0.0f || bounds.h <= 0.0f) {
@@ -263,7 +266,7 @@ static void DrawCover(UIContext &dc, Draw::Texture *tex, const Bounds &bounds) {
 		v0 = (1.0f - span) * 0.5f;
 		v1 = v0 + span;
 	}
-	DrawTexture(dc, tex, bounds, 0xFFFFFFFF, u0, v0, u1, v1);
+	DrawTexture(dc, tex, bounds, colorAlpha(0xFFFFFFFF, alpha), u0, v0, u1, v1);
 }
 
 // A value shown as a row of blocks rather than a number, which is how this front end renders
@@ -1214,6 +1217,58 @@ void VCSMenuScreen::OnGameSettings(UI::EventParams &e) {
 
 void VCSMenuScreen::OnRestoreDefaults(UI::EventParams &e) {
 	VCS::ResetPage(ToOptionPage(page_));
+}
+
+// --- The loading screen over the boot's auto-load ---------------------------------------------
+//
+// The same backdrop the menu draws, one word, and nothing else. It is not a screen: pushing one
+// would pause the emulator, and the game has to keep running behind this - the walk it hides is
+// the game's own menu being driven.
+//
+// Its own art object rather than a screen's, because nothing here has a lifetime to hang it on.
+// Created on the first draw, when there is a device to make a texture on, and released by
+// ReleaseVCSBootCurtainArt when that device goes.
+static std::unique_ptr<VCSMenuArt> g_curtainArt;
+
+// Big, because it is the only thing on the screen and it is set in a display face. Not the menu's
+// item size: a row is one of eight, this is one of one.
+static const FontStyle kCurtainFont(FontFamily::Display, 44, FontStyleFlags::Default);
+
+void ReleaseVCSBootCurtainArt() {
+	g_curtainArt.reset();
+}
+
+void DrawVCSBootCurtain(UIContext &dc, float alpha, const char *word) {
+	if (alpha <= 0.0f) {
+		return;
+	}
+	if (alpha > 1.0f) {
+		alpha = 1.0f;
+	}
+	if (!g_curtainArt) {
+		g_curtainArt.reset(new VCSMenuArt());
+	}
+	const Bounds &bounds = dc.GetBounds();
+
+	// The flat fill first and always, exactly as the menu does it: it is the artwork's own base
+	// colour, so a build without assets/vcs deployed gets a plain purple loading screen rather
+	// than a transparent one with the menu walk visible through it. A curtain that can fail open
+	// is worse than no curtain.
+	dc.FillRect(UI::Drawable(colorAlpha(kBackgroundColor, alpha)), bounds);
+	if (Draw::Texture *backdrop = g_curtainArt->Background(dc)) {
+		DrawCover(dc, backdrop, bounds, alpha);
+	}
+
+	// The word, bottom right, where this game and every game like it puts it. The dots are not
+	// decoration: a still screen with a word on it and a ten-second wait behind it is a screen
+	// that looks like a hang.
+	const int dots = (int)(time_now_d() * 2.0) % 4;
+	char text[24];
+	snprintf(text, sizeof(text), "%s%.*s", word ? word : "LOADING", dots, "...");
+	dc.SetFontStyle(kCurtainFont);
+	dc.DrawTextShadow(text, bounds.x2() - kTitleLeft, bounds.y2() - kTitleTop,
+		colorAlpha(kItemColor, alpha), ALIGN_RIGHT | ALIGN_BOTTOM);
+	dc.Flush();
 }
 
 UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending) {

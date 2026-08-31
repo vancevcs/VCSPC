@@ -262,3 +262,16 @@ UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending);
 // and PPSSPP's ordinary game browser until then - there is nothing to put behind LOAD GAME
 // before we have been told which disc that is.
 UIScreen *CreateStartScreen();
+
+// The loading screen over the boot's auto-load, drawn straight onto EmuScreen rather than pushed
+// as a screen of its own: a screen would pause the emulator, and the whole point of this one is
+// that the game carries on working behind it.
+//
+// Here rather than in EmuScreen because this file owns the menu's artwork and its font - the
+// curtain is the menu's backdrop with one word on it, and a second copy of the art loader is the
+// thing worth avoiding. `alpha` fades it out at the end; 1.0 is fully opaque.
+void DrawVCSBootCurtain(UIContext &dc, float alpha, const char *word);
+
+// Let go of the curtain's texture. Called when the graphics device goes, beside the other VCS
+// overlay textures EmuScreen owns.
+void ReleaseVCSBootCurtainArt();

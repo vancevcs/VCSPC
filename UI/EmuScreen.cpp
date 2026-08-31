@@ -1893,6 +1893,46 @@ static void VCSReleaseOverlayTextures() {
 		g_vcsPlayerIcon = nullptr;
 	}
 	g_vcsPlayerIconTried = false;
+	ReleaseVCSBootCurtainArt();
+}
+
+// The loading screen over the boot's auto-load, and its fade.
+//
+// The fade is kept here rather than in the front-end bridge because it is the only part of this
+// that is about frames rather than about the game: the bridge says whether the load is still
+// hidden, in game terms, and this turns the end of that into half a second of screen time instead
+// of a cut. Wall clock rather than frames, because it has to run at the same speed on a machine
+// that is not keeping up.
+static const float kVCSCurtainFadeSeconds = 0.5f;
+static bool g_vcsCurtainWasUp = false;
+static double g_vcsCurtainFadeStart = 0.0;
+
+static const char *g_vcsCurtainWord = "LOADING";
+
+static void DrawVCSCurtain(UIContext *ctx) {
+	const VCS::CurtainKind kind = VCS::AutoCurtain();
+	const double now = time_now_d();
+	if (kind != VCS::CurtainKind::None) {
+		// Remembered rather than asked for during the fade: the sequence is over by then and the
+		// word would otherwise change on the last half second of its own way out.
+		g_vcsCurtainWord = kind == VCS::CurtainKind::Saving ? "SAVING" : "LOADING";
+		g_vcsCurtainWasUp = true;
+		g_vcsCurtainFadeStart = 0.0;
+		DrawVCSBootCurtain(*ctx, 1.0f, g_vcsCurtainWord);
+		return;
+	}
+	if (!g_vcsCurtainWasUp) {
+		return;
+	}
+	if (g_vcsCurtainFadeStart == 0.0) {
+		g_vcsCurtainFadeStart = now;
+	}
+	const float t = (float)(now - g_vcsCurtainFadeStart) / kVCSCurtainFadeSeconds;
+	if (t >= 1.0f) {
+		g_vcsCurtainWasUp = false;
+		return;
+	}
+	DrawVCSBootCurtain(*ctx, 1.0f - t, g_vcsCurtainWord);
 }
 
 static Draw::Texture *VCSPlayerIcon(UIContext *ctx) {
@@ -2052,6 +2092,10 @@ void EmuScreen::renderUI() {
 		}
 		if (VCS::IsActive()) {
 			DrawVCSRouteOverlay(ctx);
+			// Last, so it covers the route line and the radar icons too. Everything drawn
+			// before this point is something the player is meant to be looking at; the curtain
+			// is there for the moments they are not.
+			DrawVCSCurtain(ctx);
 		}
 	}
 

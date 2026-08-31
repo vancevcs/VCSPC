@@ -860,6 +860,43 @@ Three things worth keeping from working it out:
 walked into a save icon yet - which an auto-save fired by the first mission passed will meet. The
 player's own position is used there instead, because restarting at the map's origin is not a place.
 
+### A loading screen over both of them, because the machinery is not the game
+
+Neither automatic sequence is something the player did, and both of them put the game's own menus
+on screen: a tab strip being walked, a save list, a firmware dialog answering its own prompts.
+Reported, fairly, as "kind of clunky looking". So both go behind a curtain - the menu's own
+backdrop with one word on it, LOADING or SAVING - and the player sees a loading screen where they
+would otherwise have watched a menu being driven by nobody.
+
+**It is drawn onto EmuScreen, not pushed as a screen.** A `UIScreen` pauses the emulator, and the
+one thing this curtain cannot do is stop the game: what it is hiding is the game working. So it is
+a draw call at the end of `EmuScreen::render`, after the route overlay, over everything.
+
+**The same answer hides the walk and silences the pad.** A key pressed during a walk lands in
+whichever page the walk has reached - it could pick a different save, or answer the prompt with No
+- so `NativeKey` swallows presses whole while the curtain is up, before the mapper, before the VCS
+layer and before the UI queue. Two exceptions, both deliberate:
+
+- **Releases still go through**, keys and axes alike. A player who skipped the credits is still
+  holding that key when the curtain goes up a few seconds later, and a release nobody is told
+  about is a key that stays down forever - in this fork's held-key set and in PPSSPP's mapper. A
+  release can select nothing.
+- **The VCS layer is still told about axes**, and only the route to the mapper is cut, for the
+  reason `NativeAxis` already documents: an axis carries its whole state in every event.
+
+**It comes down on the GAME's clock, not on a timer**, and that is what makes it fit. The curtain
+waits for the sequence to finish and then for thirty game frames - and the game's frame counter
+does not advance while the world is being loaded, so those thirty frames cannot start counting
+until there is a world again. Measured over a boot: up at the seam, and down as the first frame of
+the safe house arrives, eleven seconds later, most of which is the game's own load.
+
+There is a hard ceiling of 1800 vblanks on top of that, and it is not defensive habit: this thing
+covers the screen AND holds the pad, so a curtain that can get stuck is a game that cannot be
+played.
+
+**A save the player asks for is not covered.** `RequestSaveMenu` raises nothing - somebody who
+opened the save menu went looking for it. Only the auto-save does.
+
 ### Saving after a mission, and how the game says one was passed
 
 `01EB register_mission_passed` is the trigger, resolved from the script command table the usual

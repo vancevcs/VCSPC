@@ -241,6 +241,86 @@ constexpr int kMaxSeqPresses = 12;
 int g_startAttempts = 0;
 constexpr int kMaxStartAttempts = 3;
 
+// --- The curtain over the boot load -----------------------------------------------------------
+//
+// Atomic because the input gate reads it from the input thread; everything else here is the emu
+// thread's.
+std::atomic<int> g_curtainKind{(int)CurtainKind::None};
+bool g_curtainSawSequence = false;
+int g_curtainSettle = 0;
+int g_curtainVblanks = 0;
+
+// Game frames of a running world before the curtain comes down. The load hands back a world that
+// is still streaming itself in, and a second of that is the difference between arriving somewhere
+// and watching it arrive.
+constexpr int kCurtainSettleFrames = 30;
+
+// And a hard ceiling in vblanks, because a curtain that can get stuck is a game that cannot be
+// played: it hides the screen AND holds the pad. Every timeout inside the sequence is far shorter
+// than this, so reaching it means something happened that none of them describe.
+constexpr int kCurtainMaxVblanks = 1800;
+
+// Its own read of the game clock, for the reason the auto-save has one: the edge is consumed by
+// whoever reads it.
+u32 g_curtainFrame = 0;
+bool g_haveCurtainFrame = false;
+
+bool GameFrameAdvancedForCurtain() {
+	const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
+	if (!frame) {
+		return false;
+	}
+	if (!g_haveCurtainFrame) {
+		g_haveCurtainFrame = true;
+		g_curtainFrame = *frame;
+		return false;
+	}
+	if (*frame == g_curtainFrame) {
+		return false;
+	}
+	g_curtainFrame = *frame;
+	return true;
+}
+
+void DropCurtain() {
+	g_curtainKind.store((int)CurtainKind::None, std::memory_order_relaxed);
+	g_curtainSawSequence = false;
+	g_curtainSettle = 0;
+	g_curtainVblanks = 0;
+	g_haveCurtainFrame = false;
+}
+
+// Up, and with a word on it. Raised where the automatic sequences are ASKED for rather than where
+// they start, so there is no frame of the game's menu opening in front of the player.
+void RaiseCurtain(CurtainKind kind) {
+	g_curtainSawSequence = false;
+	g_curtainSettle = kCurtainSettleFrames;
+	g_curtainVblanks = 0;
+	g_haveCurtainFrame = false;
+	g_curtainKind.store((int)kind, std::memory_order_relaxed);
+}
+
+void CurtainTick() {
+	if (g_curtainKind.load(std::memory_order_relaxed) == (int)CurtainKind::None) {
+		return;
+	}
+	if (++g_curtainVblanks >= kCurtainMaxVblanks) {
+		DropCurtain();
+		return;
+	}
+	// Still walking - or not started yet, which is the tick or two between the request being
+	// stored and the machine taking it. Both are "keep it up", and telling them apart is what
+	// g_curtainSawSequence is for: without it the gap before the walk starts looks exactly like
+	// the walk having finished.
+	if (!g_curtainSawSequence || g_phase != Phase::Idle) {
+		g_curtainSettle = kCurtainSettleFrames;
+		return;
+	}
+	if (GameFrameAdvancedForCurtain() && --g_curtainSettle <= 0) {
+		DropCurtain();
+	}
+}
+
 // The mission-passed watch. Eight bytes, because the keys differ in their last character.
 u32 g_missionKeyLo = 0;
 u32 g_missionKeyHi = 0;
@@ -862,8 +942,13 @@ bool RequestAutoLoad() {
 	if (!AnySaveOnMemoryStick()) {
 		return false;
 	}
+	RaiseCurtain(CurtainKind::Loading);
 	RequestGameMenu(FrontEndTarget::Load);
 	return true;
+}
+
+CurtainKind AutoCurtain() {
+	return (CurtainKind)g_curtainKind.load(std::memory_order_relaxed);
 }
 
 bool AutoSavePending() {
@@ -1556,6 +1641,10 @@ void FrontEndTick() {
 		}
 	}
 
+	// The curtain first of all: it hides a walk that has not started yet as readily as one in
+	// progress, and every path below this can return early.
+	CurtainTick();
+
 	// The mission-passed watch and the auto-save's delay, both before anything that can return
 	// early below - a tick that finds nothing to do is still a tick a mission can have been
 	// passed on.
@@ -1568,6 +1657,11 @@ void FrontEndTick() {
 			// pad. Anything else and it waits, because a save asked for on top of another
 			// sequence is two things pressing buttons at one game.
 			g_autoSaveArmed = false;
+			// Behind the curtain, same as the boot load and for the same reason: what is about to
+			// be on screen is the game's save menu opening by itself and a firmware dialog being
+			// walked through. RequestSaveMenu deliberately does not do this - a player who asked
+			// for the save menu went looking for it.
+			RaiseCurtain(CurtainKind::Saving);
 			g_request.store((int)FrontEndTarget::Save, std::memory_order_relaxed);
 			g_OSD.Show(OSDType::MESSAGE_INFO, "Auto-saving", 2.0f, "vcs_frontend");
 		} else if (++g_autoSaveWaited >= kAutoSavePatience) {
@@ -1599,6 +1693,10 @@ void FrontEndTick() {
 		g_dialogWaited = 0;
 		g_sawDialog = false;
 		g_startAttempts = 0;
+		// A sequence has begun, which is what the curtain waits to see before it starts counting
+		// its way back down. It covers whichever one raised it and nothing else - a request that
+		// arrives with no curtain up simply never sets this. See CurtainTick.
+		g_curtainSawSequence = true;
 
 		if (g_target == FrontEndTarget::Save) {
 			// The save UI has an inbox and the load list does not, so this half walks nothing at
@@ -1646,7 +1744,9 @@ void FrontEndTick() {
 		case FrontEndTarget::Stats: g_wantPage = s.statsPage; break;
 		// LOAD GAME is an entry ON the Game page, not a page of its own, so the load walks to
 		// exactly where the GAME row walks to and then carries on pressing.
-		case FrontEndTarget::Load:  g_wantPage = s.gamePage; break;
+		case FrontEndTarget::Load:
+			g_wantPage = s.gamePage;
+			break;
 		default:                    g_wantPage = -1; break;
 		}
 
@@ -2045,6 +2145,7 @@ void FrontEndReset() {
 	// would land in whatever replaces it.
 	g_savePrepared = false;
 	g_scriptGlobals = 0;
+	DropCurtain();
 }
 
 const char *FrontEndStatus() {

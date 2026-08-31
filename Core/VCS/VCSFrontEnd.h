@@ -455,6 +455,30 @@ void MapCursorReset();
 // it from; the filesystem check happens there and the rest is queued like every other request.
 bool RequestAutoLoad();
 
+// Whether a sequence the player did not ask for is running, and should be hidden while it does.
+//
+// Both automatic sequences drive the game's own menus, which means both of them put a menu being
+// tabbed through on screen - a save list, a yes/no prompt, a firmware dialog - none of which is
+// something the player did. So both go behind the same curtain, and the only difference is the
+// word on it.
+//
+// It stays up longer than the walk itself: through the load, and through the first frames of a
+// world still streaming itself in.
+//
+// It is also the input gate. A key pressed during a walk lands in whichever page the walk has
+// reached - a keystroke could pick a different save, or answer a prompt with No - so the same
+// answer that hides the sequence has to be what silences the pad.
+//
+// A save the PLAYER asks for is deliberately not covered: they went looking for that menu.
+//
+// Read from the input thread as well as the emu thread, hence the atomic behind it.
+enum class CurtainKind {
+	None,
+	Loading,
+	Saving,
+};
+CurtainKind AutoCurtain();
+
 // Whether an auto-save is waiting for its delay to run out. For the debugger, and for anything
 // that wants to keep out of the way of one.
 bool AutoSavePending();

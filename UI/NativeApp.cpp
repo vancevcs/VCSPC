@@ -101,6 +101,7 @@
 #include "Core/CmdLine.h"
 #include "Core/ControlMapper.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/Config.h"
@@ -1564,6 +1565,23 @@ bool NativeKey(const KeyInput &key) {
 		return false;
 	}
 
+	// Fork-specific: no key PRESS gets through while the boot's auto-load is hidden behind its
+	// loading screen. Not to the mapper, not to the VCS layer, and not to the UI either -
+	// swallowed here rather than at any of those, because a key that reaches ANY of them reaches
+	// a game whose own menu is mid-walk: a press lands on whichever page the walk has got to, and
+	// could pick a different save or answer the prompt with No.
+	//
+	// Releases are let through, and that is the same rule the axes below follow. A player who
+	// skipped the credits is still holding that key when the curtain goes up a few seconds later,
+	// and a release nobody is told about is a key that stays down forever - in this fork's own
+	// held-key set, and in PPSSPP's mapper. A release can select nothing; there is nothing to gain
+	// by eating it.
+	//
+	// The curtain has a hard ceiling of its own, so none of this can become permanent.
+	if (VCS::AutoCurtain() != VCS::CurtainKind::None && !(key.flags & KeyInputFlags::UP)) {
+		return true;
+	}
+
 	// Filtering, detailed rules needed for good imgui behavior without having to ask the screen about what to do.
 	InputMode inputMode = g_screenManager->PassInputToMapper();
 
@@ -1749,7 +1767,12 @@ void NativeAxis(const AxisInput *axes, size_t count) {
 	// believing aim is held, the Aiming context latches for the rest of the session, and the
 	// symptom is that Enter stops confirming in the game's own menus, because Aiming has no row
 	// for it. Seeing the input and being allowed to act on it are different questions.
+	// The boot's loading screen silences the axes as well, but only on the way OUT to the mapper -
+	// the VCS layer is still told, for the reason the paragraph above gives. An axis carries its
+	// whole state in every event, so recording one costs nothing and a trigger released behind the
+	// curtain is a release that would otherwise never arrive.
 	const bool toMapper =
+		VCS::AutoCurtain() == VCS::CurtainKind::None &&
 		(g_screenManager->PassInputToMapper() & (InputMode::Other | InputMode::ImDebuggerToggle)) != 0;
 	for (size_t i = 0; i < count; i++) {
 		const bool claimed = VCS::HandleHostAxis(axes[i]);
