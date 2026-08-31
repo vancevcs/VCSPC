@@ -1454,11 +1454,13 @@ void EmuScreen::update() {
 		pauseTrigger_ = true;
 	}
 
-	// VCS has no front end of its own - it runs logos, credits, then drops straight into
-	// the story. This is that seam, and it is where our main menu belongs.
-	if (VCS::GetBootPhase() == VCS::BootPhase::AtMenu && !bootPending_ &&
-			screenManager()->topScreen() == this) {
-		screenManager()->push(new VCSMenuScreen(gamePath_, false, VCSMenuMode::Startup));
+	// The seam: logos, credits, and then the world starts. A menu used to be raised here, in
+	// VCSMenuMode::Startup, and is not any more - launching the game is already the request, and
+	// answering it with a screen that has to be dismissed asks the player to start the game
+	// twice. The phase is still marked, both to stop the boot watch and because this is where
+	// loading the most recent save belongs.
+	if (VCS::GetBootPhase() == VCS::BootPhase::AtMenu && !bootPending_) {
+		VCS::NotifyMenuDismissed();
 	}
 
 	if (pauseTrigger_) {
