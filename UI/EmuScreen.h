@@ -98,6 +98,11 @@ private:
 
 	UI::Event OnDevMenu;
 	bool bootPending_ = true;
+
+	// Fork-specific: Back was pressed while the GAME's own menu was up, so this fork's menu opens
+	// as soon as that one has closed. Two steps because closing is a queued walk - see the
+	// REQUEST_GAME_PAUSE arm in sendMessage.
+	bool vcsMenuAfterGameMenu_ = false;
 	bool bootIsReset_ = false;
 	Path gamePath_;
 

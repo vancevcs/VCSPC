@@ -802,7 +802,12 @@ bool VCSMenuScreen::key(const KeyInput &key) {
 	// cancel fell through to UIDialogScreen::key, which asks IsEscapeKey, agrees, and finishes
 	// the whole screen - so on a pad every Back closed the menu from wherever you were, while
 	// Escape walked up one page at a time. Same intent, two devices, one question now.
-	const bool back = UI::IsEscapeKey(key);
+	// Backspace answers the same question, because it is what Back IS everywhere else in this
+	// port: the key the controls card lists, and the key that brings you here from the game's own
+	// map and stats. `IsEscapeKey` does not include it - that is PPSSPP's question about its own
+	// UI - so it is asked separately rather than by changing what Escape means everywhere.
+	const bool backspace = key.keyCode == NKCODE_DEL;
+	const bool back = UI::IsEscapeKey(key) || backspace;
 	if ((key.flags & KeyInputFlags::DOWN) && back) {
 		if (page_ != VCSMenuPage::Root) {
 			GoToPage(ParentPage(page_));
@@ -811,6 +816,13 @@ bool VCSMenuScreen::key(const KeyInput &key) {
 		// The main menu is the bottom of the stack. Letting the dialog base finish it would pop
 		// the last screen and leave the app with nothing to draw.
 		if (mode_ == VCSMenuMode::MainMenu) {
+			return true;
+		}
+		// And on the root of the pause menu, Back leaves for the world. The dialog base does that
+		// for Escape and cannot do it for Backspace, which it has never heard of - so the second
+		// press of the key that got you here has to be finished off by hand.
+		if (backspace) {
+			TriggerFinish(DR_CANCEL);
 			return true;
 		}
 	}
@@ -1076,7 +1088,7 @@ void VCSMenuScreen::CreateViews() {
 		// house, which is a thing you do in the world rather than in a menu - so a menu row for it
 		// would be a second way to do something the game already has a place for.
 		if (mode_ == VCSMenuMode::Pause) {
-			AddPageRow(list, "GAME", VCSMenuPage::Game);
+			AddPageRow(list, "START NEW GAME", VCSMenuPage::Game);
 			AddGameMenuRow(list, "MAP", VCS::FrontEndTarget::Map,
 				"The city map, with your position and the places you have found.");
 			AddGameMenuRow(list, "STATS", VCS::FrontEndTarget::Stats,

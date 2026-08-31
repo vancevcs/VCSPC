@@ -500,7 +500,12 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::Menu,      NKCODE_EXT_MOUSEWHEEL_UP,   0,             "Map zoom in (latched)" },
 	{ VCSInputContext::Menu,      NKCODE_EXT_MOUSEWHEEL_DOWN, 0,             "Map zoom out (latched)" },
 	{ VCSInputContext::Menu,      NKCODE_ENTER,              CTRL_CROSS,     "Confirm" },
-	{ VCSInputContext::Menu,      NKCODE_DEL,                CTRL_CIRCLE,    "Back (Backspace)" },
+	// Claimed and mapped to nothing, because what it does is not a PSP button at all: while the
+	// game's own menu is up, Back means "back to THIS fork's menu", posted as a UI message on the
+	// press edge in HandleHostKey. Sending the game its own Circle instead is what it used to do,
+	// and that lifts focus back to the tab strip - leaving the player inside a menu this port
+	// navigates for them, in front of a row of tabs it deliberately hides.
+	{ VCSInputContext::Menu,      NKCODE_DEL,                0,              "Back to the menu (Backspace)" },
 	{ VCSInputContext::Menu,      NKCODE_W,                  CTRL_UP,        "Up" },
 	{ VCSInputContext::Menu,      NKCODE_S,                  CTRL_DOWN,      "Down" },
 	{ VCSInputContext::Menu,      NKCODE_A,                  CTRL_LEFT,      "Left" },
@@ -1291,6 +1296,18 @@ static bool HandlePadKey(const KeyInput &key) {
 
 	const VCSInputContext context = g_currentContext.load(std::memory_order_relaxed);
 
+	// B is Back, and in the game's own menu Back is this fork's menu - the pad's half of the
+	// Backspace rule in HandleHostKey. Answered before the held set below and outside its lock,
+	// because posting a UI message with an input mutex held is an ordering nothing else here
+	// takes. Claimed on the release as well, so it cannot reach PPSSPP's mapper and arrive at the
+	// game as a Circle a moment later.
+	if (key.keyCode == NKCODE_BUTTON_B && context == VCSInputContext::Menu) {
+		if (down) {
+			System_PostUIMessage(UIMessage::REQUEST_GAME_PAUSE);
+		}
+		return true;
+	}
+
 	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 	if (down) {
 		g_heldPadButtons.insert(key.keyCode);
@@ -1487,6 +1504,16 @@ bool HandleHostKey(const KeyInput &key) {
 	// than left for the emu tick to notice - see TakeWheelNotches.
 	if (down) {
 		NoteWheelNotch(key.keyCode);
+	}
+
+	// Back, out of one of the game's own pages and into ours.
+	//
+	// Posted here on the press edge rather than mapped in the table, for the same reason Start is
+	// posted from the pad path: a UI message is not something a button mask can say. EmuScreen
+	// shuts the game's menu and raises this fork's once it has gone, so the two are one step from
+	// the player's side - and the same key pressed again in that menu leaves for the world.
+	if (down && context == VCSInputContext::Menu && key.keyCode == NKCODE_DEL) {
+		System_PostUIMessage(UIMessage::REQUEST_GAME_PAUSE);
 	}
 
 	std::lock_guard<std::mutex> guard(g_hostKeyMutex);

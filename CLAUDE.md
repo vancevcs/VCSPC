@@ -619,13 +619,30 @@ mouse-to-analog path and spent on the map. `MapDragTick` runs from `FrontEndTick
 `CameraTick` in `VCSGame::Tick`, and that ordering is what lets it take the delta before the camera
 drains it.
 
-### Escape means "put this away", not "open another menu"
+### Back comes back HERE, one level at a time
 
-With the game's own menu up, Escape closes it rather than pushing this fork's menu over the top.
-That is the last piece of the two-menus-feel-like-one problem: the pages are reached FROM our menu,
-so stacking ours on them again is how a player ends up pressing RESUME and landing back on a tab.
-Handled in `EmuScreen::sendMessage`'s `REQUEST_GAME_PAUSE` arm, which is the one place every
-Escape, pad Start and Windows-menu pause funnels through.
+With the game's own menu up, Back shuts it and raises this fork's menu - the one those pages were
+reached from - and the next Back leaves for the world. Two presses, two levels, and the row you
+came from still has focus when you arrive.
+
+It used to close the game's menu and drop straight into the world, on the reasoning that stacking
+two menus is how one comes to feel like two. That reasoning still holds for STACKING and does not
+hold for returning: the map is one row down from where the player was, and being sent two levels
+for one press is how somebody loses their place.
+
+**It cannot be done in one step**, and that is the shape of the code rather than a preference.
+Closing the game's menu is a queued walk that presses the game's own Back control, and a menu of
+ours on top pauses the emulator that walk needs to run. So `EmuScreen`'s `REQUEST_GAME_PAUSE` arm -
+the one place every Escape, pad Start and Windows-menu pause funnels through - closes and sets a
+flag, and `update` raises our menu on a later frame, once `GameMenuActive` has actually gone false
+and the bridge has stopped driving.
+
+**Backspace and the pad's B are what get you there, and neither is a PSP button any more.** Both
+used to reach the game as Circle, which inside one of its pages lifts focus back to the TAB STRIP -
+leaving the player standing in a menu this port navigates for them, in front of a row of tabs it
+deliberately hides. They are claimed in the Menu context now and post `REQUEST_GAME_PAUSE` on the
+press edge instead, the way the pad's Start already did. `VCSMenuScreen` answers Backspace as Back
+as well, because `UI::IsEscapeKey` is PPSSPP's question about its own UI and has never heard of it.
 
 ### The Menu context finally triggers, and not the way it was tried before
 

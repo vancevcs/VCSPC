@@ -550,11 +550,18 @@ void EmuScreen::sendMessage(UIMessage message, const char *value) {
 	// External commands, like from the Windows UI.
 	// This happens on the main thread.
 	if (message == UIMessage::REQUEST_GAME_PAUSE && screenManager()->topScreen() == this) {
-		// With the GAME's own menu up - the map, the briefs, its Game page - Escape means "put
-		// this away", not "open a second menu on top of the first". Those pages are reached from
-		// the VCS menu, so stacking ours over them is how one menu came to feel like two.
+		// With the GAME's own menu up - the map, the briefs, its Game page - Back shuts it and
+		// comes back HERE, to the menu those pages were reached from. Not straight to the world,
+		// which is what it used to do: the map is one row down from where you were, and being
+		// dropped two levels for one press is how a player loses their place.
+		//
+		// Two steps, one press each: this closes the game's menu, and the flag below raises ours
+		// once it has actually gone. It cannot be done in one - closing is a queued walk that
+		// presses the game's own Back control, and a menu of ours on top pauses the emulator that
+		// walk needs to run.
 		if (VCS::GameMenuActive()) {
 			VCS::RequestCloseGameMenu();
+			vcsMenuAfterGameMenu_ = true;
 			return;
 		}
 		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
@@ -1468,6 +1475,15 @@ void EmuScreen::update() {
 		VCS::RequestAutoLoad();
 	}
 
+	// The second half of Back: the game's menu has closed, so this fork's opens. Waits for the
+	// bridge to have finished as well as for the menu to be gone - the close is the last thing it
+	// was doing, and a menu raised while it is still pressing would pause the game underneath it.
+	if (vcsMenuAfterGameMenu_ && !bootPending_ && !VCS::GameMenuActive() &&
+			!VCS::FrontEndDriving() && screenManager()->topScreen() == this) {
+		vcsMenuAfterGameMenu_ = false;
+		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
+	}
+
 	if (pauseTrigger_) {
 		pauseTrigger_ = false;
 		// With the GAME's own menu up - the map, the briefs, its Game page - Escape means "put
@@ -1478,7 +1494,9 @@ void EmuScreen::update() {
 		// and it is consumed here. The REQUEST_GAME_PAUSE arm in sendMessage is a different
 		// route - the Windows menu, mostly - and carries the same check.
 		if (VCS::GameMenuActive()) {
+			// Shut the game's menu, then come back to ours - see the arm in sendMessage.
 			VCS::RequestCloseGameMenu();
+			vcsMenuAfterGameMenu_ = true;
 		} else {
 			screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 		}
