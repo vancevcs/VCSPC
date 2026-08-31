@@ -188,6 +188,7 @@
     <ClInclude Include="..\..\Core\VCS\VCSAddresses.h" />
     <ClInclude Include="..\..\Core\VCS\VCSFrontEnd.h" />
     <ClInclude Include="..\..\Core\VCS\VCSRoute.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSSaveDialog.h" />
     <ClInclude Include="..\..\Core\VCS\VCSRadar.h" />
     <ClInclude Include="..\..\Core\VCS\VCSGame.h" />
     <ClInclude Include="..\..\Core\VCS\VCSInput.h" />

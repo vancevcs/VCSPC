@@ -543,6 +543,24 @@ static int sceUtilitySavedataInitStart(u32 paramAddr) {
 	return hleLogDebug(Log::sceUtility, saveDialog->Init(paramAddr));
 }
 
+// The VCS fork's window into the savedata dialog. Here rather than anywhere else because the
+// dialog object and the "is one up" flag are both file-static in this translation unit.
+//
+// Emu thread only, which is where everything that asks lives: this reads the dialog while it is
+// being updated, and the fork's front-end bridge runs on the same thread as that update.
+namespace VCS {
+bool PeekSaveDialog(SaveDialogPeek *out) {
+	if (out) {
+		*out = SaveDialogPeek();
+	}
+	if (!currentDialogActive || currentDialogType != UtilityDialogType::SAVEDATA || !saveDialog) {
+		return false;
+	}
+	saveDialog->VCSPeek(out);
+	return out && out->active;
+}
+}  // namespace VCS
+
 static int sceUtilitySavedataShutdownStart() {
 	if (currentDialogType != UtilityDialogType::SAVEDATA)
 		return hleLogWarning(Log::sceUtility, SCE_ERROR_UTILITY_WRONG_TYPE, "wrong dialog type");

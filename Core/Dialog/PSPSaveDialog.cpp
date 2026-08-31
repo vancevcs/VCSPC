@@ -1341,3 +1341,64 @@ void PSPSaveDialog::DoState(PointerWrap &p) {
 pspUtilityDialogCommon *PSPSaveDialog::GetCommonParam() {
 	return &param.GetPspParam()->common;
 }
+
+// Read-only, for the VCS fork. See Core/VCS/VCSSaveDialog.h.
+//
+// `busy` deliberately folds three different reasons to keep your hands off the pad into one
+// answer - the IO thread is working, the dialog is fading in or out, or it is on a screen this
+// does not recognise - because the caller does the same thing with all three: wait.
+void PSPSaveDialog::VCSPeek(VCS::SaveDialogPeek *out) {
+	if (!out) {
+		return;
+	}
+	*out = VCS::SaveDialogPeek();
+	out->active = GetStatus() == SCE_UTILITY_STATUS_RUNNING;
+	if (!out->active) {
+		return;
+	}
+	out->selected = currentSelectedSave;
+	out->count = param.GetFilenameCount();
+	out->yesno = yesnoChoice;
+	out->okButton = (u32)okButtonFlag;
+	out->cancelButton = (u32)cancelButtonFlag;
+	// The dialog's own idea of what it is doing. Only the screens the fork drives are named;
+	// everything else - the delete flow, the failures, the "no data" notices - reports busy, so a
+	// sequence that meets one waits rather than pressing something at it.
+	switch (display) {
+	case DS_SAVE_LIST_CHOICE:
+		out->save = true;
+		out->list = true;
+		break;
+	case DS_SAVE_CONFIRM:
+	case DS_SAVE_CONFIRM_OVERWRITE:
+		out->save = true;
+		out->confirm = true;
+		break;
+	case DS_SAVE_DONE:
+		out->save = true;
+		out->done = true;
+		break;
+	case DS_SAVE_SAVING:
+		out->save = true;
+		out->busy = true;
+		break;
+	case DS_LOAD_LIST_CHOICE:
+		out->list = true;
+		break;
+	case DS_LOAD_CONFIRM:
+		out->confirm = true;
+		break;
+	case DS_LOAD_DONE:
+		out->done = true;
+		break;
+	default:
+		out->busy = true;
+		break;
+	}
+	if (isFading) {
+		// A press landing in a fade is a press the screen underneath never sees, and the sequence
+		// goes on believing it was made.
+		out->busy = true;
+		out->list = out->confirm = out->done = false;
+	}
+}

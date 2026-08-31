@@ -22,16 +22,23 @@
 #include <vector>
 
 #include "Common/System/OSD.h"
+#include "Common/File/DirListing.h"
+#include "Common/File/Path.h"
+#include "Common/StringUtils.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Common/Input/KeyCodes.h"
 #include "Core/MIPS/MIPS.h"
 #include "Core/MemMap.h"
+#include "Core/System.h"
 #include <mutex>
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
+#include "Core/VCS/VCSSaveDialog.h"
 
 namespace VCS {
 
@@ -169,6 +176,23 @@ enum class Phase {
 	Settle,       // nothing pressed, letting the world see the release before the player acts
 	JumpVerify,   // wrote the page index; waiting a game frame to see whether it held
 	Done,         // handed over; the player is working the menu now
+
+	// The load sequence, past the point the map and stats rows stop at. Both of these look at
+	// the page's SELECTED WIDGET by name rather than counting presses, for the reason the chrome
+	// pass works by name: the entries are LoadGame_MI and BTN_SPECIAL_CONFIRM whatever order the
+	// page happens to build them in.
+	LoadPick,     // inside the Game page, putting the highlight on LOAD GAME
+	LoadPrompt,   // on the "all unsaved progress will be lost" page, answering it
+
+	// The firmware's savedata dialog - the slot list, the overwrite prompt, the acknowledgement.
+	// Paced in VBLANKS, not game frames: the world is stopped behind that dialog, so the clock
+	// every other phase here runs on has stopped with it.
+	Dialog,
+
+	// A press with somewhere to go afterwards. The phases above predate this and keep their own
+	// hold/gap pairs; there was no reason to rewrite them.
+	PressHold,
+	PressGap,
 };
 
 Phase g_phase = Phase::Idle;
@@ -194,7 +218,41 @@ bool g_haveFrame = false;
 int g_vblanks = 0;
 
 std::atomic<int> g_request{-1};       // a FrontEndTarget, or -1
-std::atomic<bool> g_saveRequest{false};
+
+// --- The load and save sequences --------------------------------------------------------------
+
+// Where a scheduled press goes when it is done, and how long it lasts. `g_pressOnVblank` decides
+// which clock counts it down - the game's logic frames for the menu steps, vblanks for the
+// firmware dialog, which the game's clock does not run behind.
+Phase g_pressReturn = Phase::Idle;
+int g_pressHold = 0;
+int g_pressGap = 0;
+bool g_pressOnVblank = false;
+
+// Bounded everywhere, because every one of these loops is "press something and look again" and
+// the failure mode without a bound is a fork holding the player's pad forever.
+int g_seqPresses = 0;
+int g_dialogWaited = 0;
+bool g_sawDialog = false;
+constexpr int kMaxSeqPresses = 12;
+
+// Retries of the Start press, for the auto-load only. The boot seam lands in the opening scene,
+// where the first Start may be spent skipping something rather than opening the menu.
+int g_startAttempts = 0;
+constexpr int kMaxStartAttempts = 3;
+
+// The mission-passed watch. Eight bytes, because the keys differ in their last character.
+u32 g_missionKeyLo = 0;
+u32 g_missionKeyHi = 0;
+bool g_haveMissionKey = false;
+u32 g_asLastFrame = 0;
+int g_autoSaveDelay = 0;
+bool g_autoSaveArmed = false;
+int g_autoSaveWaited = 0;
+// A minute of game frames. If the world never becomes a good moment to save in - the player is
+// in another menu, or a cheat sequence never ends - the auto-save gives up rather than firing at
+// some unrelated moment much later.
+constexpr int kAutoSavePatience = 1800;
 
 bool GameFrameAdvanced() {
 	const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
@@ -223,6 +281,7 @@ bool GameFrameAdvanced() {
 // belong beside the chrome pass that is their main user.
 void ShowPagesAgain();
 void HidePagesForWalk();
+bool WidgetName(u32 widget, char *out, size_t size);
 
 // How many times the descend loop will press Cross before giving up. Three is generous - one
 // press moves focus - and the bound matters more than the number: Cross means SELECT once
@@ -252,9 +311,85 @@ bool GameFrameAdvancedForWaypoint() {
 	return true;
 }
 
+// The third consumer of the same edge, and it needs its own copy for the reason the waypoint
+// does: the edge is CONSUMED by whoever reads it, so a shared one would have the state machine
+// and the auto-save delay each seeing half the frames.
+//
+// The auto-save's delay is counted on the game's clock rather than in vblanks on purpose. That
+// clock stops for a load and for the fades a mission ends into, so a delay measured on it waits
+// for the world to be running again instead of expiring inside a black screen.
+u32 g_asFrame = 0;
+bool g_haveAsFrame = false;
+
+bool GameFrameAdvancedForAutoSave() {
+	const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
+	if (!frame) {
+		return false;
+	}
+	if (!g_haveAsFrame) {
+		g_haveAsFrame = true;
+		g_asFrame = *frame;
+		return false;
+	}
+	if (*frame == g_asFrame) {
+		return false;
+	}
+	g_asFrame = *frame;
+	return true;
+}
+
 int Frames(int value) {
 	return std::max(value, 1);
 }
+
+// The page object the front end is showing, or 0. The same lookup the game's own accessor at
+// 0x0882e950 does, minus the root-page branch: everything here works on a real page.
+u32 CurrentPageObject() {
+	const int page = GameMenuPage();
+	if (page < 0) {
+		return 0;
+	}
+	const std::optional<u32> begin = ReadAddrU32(VCSAddr::MenuPagesBegin);
+	const std::optional<u32> end = ReadAddrU32(VCSAddr::MenuPagesEnd);
+	if (!begin || !end || *end < *begin || (u32)page >= (*end - *begin) / 4) {
+		return 0;
+	}
+	return ReadU32(*begin + (u32)page * 4).value_or(0);
+}
+
+// What the page has highlighted, by name. This is what makes the load sequence a closed loop
+// rather than a count of presses: every step asks "is the thing I want selected yet".
+bool SelectedWidgetName(char *out, size_t size) {
+	out[0] = '\0';
+	const u32 page = CurrentPageObject();
+	if (page == 0) {
+		return false;
+	}
+	const std::optional<u32> sel = ReadU32(page + kVCSWidgetSelected);
+	if (!sel || *sel == 0) {
+		return false;
+	}
+	return WidgetName(*sel, out, size);
+}
+
+// Hold a button, release it, then go to `back`. Both halves are counted on whichever clock the
+// caller says, because the firmware's dialog runs with the game's logic stopped.
+void Press(u32 mask, Phase back, int hold, int gap, bool onVblank) {
+	g_mask = mask;
+	g_pressHold = Frames(hold);
+	g_pressGap = Frames(gap);
+	g_pressReturn = back;
+	g_pressOnVblank = onVblank;
+	g_phase = Phase::PressHold;
+}
+
+// Give up on a sequence and put the player back in the WORLD rather than leaving them standing
+// in a menu they never opened - which is what an auto-load failing halfway would otherwise do,
+// on the first screen of a session, to someone who has pressed nothing.
+//
+// The close goes through the ordinary request path so it is taken from Idle on the next tick,
+// exactly like a row asking for it.
+void AbandonSequence(const char *why, const char *message);
 
 void Finish(const char *why) {
 	// Everything Finish is reached from is the bridge having put a page on screen.
@@ -318,7 +453,13 @@ void Arrive(const char *why) {
 	Finish(why);
 }
 
+void RestoreScriptAfterSave();
+
 void GoIdle(const char *why) {
+	// Every way a sequence ends comes through here, which is why the save's script flags are put
+	// back here rather than on the one path that succeeds. Leaving `$ONMISSION` at 1 because a
+	// save was abandoned halfway would quietly stop every mission trigger in the city.
+	RestoreScriptAfterSave();
 	g_bridgeOwnsMenu = false;
 	ShowPagesAgain();
 	g_phase = Phase::Idle;
@@ -326,7 +467,285 @@ void GoIdle(const char *why) {
 	g_presses = 0;
 	g_waited = 0;
 	g_remaining = 0;
+	g_seqPresses = 0;
+	g_dialogWaited = 0;
+	g_sawDialog = false;
+	g_startAttempts = 0;
 	g_status = why;
+}
+
+void AbandonSequence(const char *why, const char *message) {
+	if (message) {
+		g_OSD.Show(OSDType::MESSAGE_WARNING, message, 4.0f, "vcs_frontend");
+	}
+	const bool menuUp = GameMenuActive();
+	GoIdle(why);
+	if (menuUp) {
+		g_request.store((int)FrontEndTarget::Close, std::memory_order_relaxed);
+	}
+}
+
+// --- Driving the firmware's savedata dialog ---------------------------------------------------
+//
+// One phase rather than five, because the dialog is already a state machine and this is the
+// closed loop around it: look at what is on screen, press the one thing that moves it on, look
+// again. See Core/VCS/VCSSaveDialog.h for where the answer comes from and why a fork needs it.
+//
+// Everything about it is bounded - the wait for it to appear, the number of presses, the walk to
+// a slot - because it can end up on screens this does not drive: a memory stick error, a "no
+// data" notice, a mode nobody here anticipated. The player's pad is taken away while this runs,
+// so the sequence has to be able to give up.
+void DialogTick() {
+	const VCSFrontEndSettings &s = FrontEndSettings();
+
+	SaveDialogPeek peek;
+	const bool up = PeekSaveDialog(&peek);
+
+	if (!up) {
+		if (g_sawDialog) {
+			// It came and went. For a load that means the world is restarting under us, and for
+			// a save that the write is done - either way there is nothing left to press.
+			//
+			// The game's own menu is usually gone with it, and where it is not - a save that
+			// returns to the page it was asked from - closing it is the difference between
+			// "saved" and "saved, and now you are in a menu".
+			const bool menuUp = GameMenuActive();
+			GoIdle(g_target == FrontEndTarget::Load ? "loaded" : "saved");
+			if (menuUp) {
+				g_request.store((int)FrontEndTarget::Close, std::memory_order_relaxed);
+			}
+			return;
+		}
+		if (++g_dialogWaited >= Frames(s.dialogTimeoutFrames)) {
+			AbandonSequence("dialog never appeared", "The save browser did not open");
+		}
+		return;
+	}
+
+	g_sawDialog = true;
+	if (++g_dialogWaited >= Frames(s.dialogTimeoutFrames)) {
+		// Up, but not moving through anything this knows how to answer. Hand it back rather than
+		// pressing at it: the dialog is the player's now, and it is on screen for them to use.
+		GoIdle("dialog not answered");
+		g_OSD.Show(OSDType::MESSAGE_WARNING, "Finish in the save browser - see the VCS debugger",
+			5.0f, "vcs_frontend");
+		return;
+	}
+
+	// Never press into IO or a fade. A press the screen underneath does not see is one this
+	// sequence goes on believing it made.
+	if (peek.busy) {
+		return;
+	}
+
+	const int hold = s.dialogHoldFrames;
+	const int gap = s.dialogGapFrames;
+	// The dialog's own idea of which button is which, because it is a firmware setting and not a
+	// constant. Falling back to the western layout only matters if a build ever reports neither.
+	const u32 ok = peek.okButton ? peek.okButton : (u32)CTRL_CROSS;
+	const u32 back = peek.cancelButton ? peek.cancelButton : (u32)CTRL_CIRCLE;
+
+	if (peek.list) {
+		// The load list is left exactly as the game asked for it - VCS focuses the LATEST save,
+		// which is the whole definition of "load the most recent". The save list is walked to the
+		// dedicated slot instead, one press at a time, watching the index rather than counting.
+		if (peek.save && peek.selected >= 0 && peek.count > 0) {
+			int want = s.autoSaveSlot;
+			if (want < 0) want = 0;
+			if (want >= peek.count) want = peek.count - 1;
+			if (peek.selected != want) {
+				if (++g_seqPresses > kMaxSeqPresses) {
+					GoIdle("could not reach the save slot");
+					g_OSD.Show(OSDType::MESSAGE_ERROR, "Could not reach the auto-save slot", 4.0f,
+						"vcs_frontend");
+					return;
+				}
+				Press(peek.selected > want ? CTRL_UP : CTRL_DOWN, Phase::Dialog, hold, gap, true);
+				return;
+			}
+		}
+		Press(ok, Phase::Dialog, hold, gap, true);
+		return;
+	}
+
+	if (peek.confirm) {
+		// The prompt opens on NO and LEFT is what moves it to YES. An OK sent without that press
+		// cancels the very save it was meant to confirm.
+		if (peek.yesno != 1) {
+			Press(CTRL_LEFT, Phase::Dialog, hold, gap, true);
+			return;
+		}
+		Press(ok, Phase::Dialog, hold, gap, true);
+		return;
+	}
+
+	if (peek.done) {
+		// BACK, not OK. "Save completed" offers one button and it is that one - measured, with
+		// the save already on the memory stick and the sequence pressing OK at a screen that
+		// ignores it until the whole thing timed out.
+		Press(back, Phase::Dialog, hold, gap, true);
+		return;
+	}
+}
+
+// --- Making a save a save ---------------------------------------------------------------------
+//
+// The request byte opens the save menu; it does not prepare a save. The script does that, in the
+// eight instructions before it calls `0260`, and without them the file that gets written loads
+// into the opening mission with your money and your clothes on. See the note over
+// kVCSGlobalLoadedGame in VCSAddresses.h for the decoded original and the evidence.
+//
+// So this does what those instructions do, and puts back what it changed afterwards - which is
+// also what the script does, four lines further down its own routine.
+
+u32 g_scriptGlobals = 0;      // the space these were written in, so the restore cannot cross a load
+bool g_savePrepared = false;
+u32 g_savedOnMission = 0;
+u32 g_savedLoadedFlag = 0;
+
+u32 GlobalAddr(u32 base, u32 index) {
+	return base + index * 4;
+}
+
+// Returns false when the script space cannot be read, which is the one case where asking for a
+// save is worse than not: the menu would open and write a file that starts the game over.
+bool PrepareScriptForSave() {
+	const std::optional<u32> space = ReadAddrU32(VCSAddr::ScriptSpace);
+	if (!space || *space == 0) {
+		return false;
+	}
+	const u32 g = *space;
+	const std::optional<u32> onMission = ReadU32(GlobalAddr(g, kVCSGlobalOnMission));
+	const std::optional<u32> loaded = ReadU32(GlobalAddr(g, kVCSGlobalLoadedGame));
+	if (!onMission || !loaded) {
+		return false;
+	}
+
+	// The restart position, copied exactly as `$284 = $783` does. `$783..785` is where the last
+	// save pickup was collected, and the load path copies it straight back out again.
+	float x = 0.0f, y = 0.0f, z = 0.0f;
+	const std::optional<float> sx = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX));
+	const std::optional<float> sy = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX + 1));
+	const std::optional<float> sz = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX + 2));
+	if (sx && sy && sz) {
+		x = *sx; y = *sy; z = *sz;
+	}
+	// Zero means the player has never used a safe house in this game, which for an auto-save
+	// fired by a mission is entirely possible - the first one passes long before anyone walks
+	// into a save icon. Restarting at the map's origin is not a place; where they are standing
+	// is. The game's own routine cannot meet this case, because collecting the pickup is what
+	// sets those globals in the first place.
+	if (x == 0.0f && y == 0.0f && z == 0.0f) {
+		if (const std::optional<u32> player = ReadAddrU32(VCSAddr::PlayerBase)) {
+			const std::optional<float> px = ReadFloat(*player + kVCSEntityPositionOffset);
+			const std::optional<float> py = ReadFloat(*player + kVCSEntityPositionOffset + 4);
+			const std::optional<float> pz = ReadFloat(*player + kVCSEntityPositionOffset + 8);
+			if (px && py && pz) {
+				x = *px; y = *py; z = *pz;
+			}
+		}
+	}
+
+	g_scriptGlobals = g;
+	g_savedOnMission = *onMission;
+	g_savedLoadedFlag = *loaded;
+	g_savePrepared = true;
+
+	WriteU32(GlobalAddr(g, kVCSGlobalOnMission), 1);
+	WriteU32(GlobalAddr(g, kVCSGlobalLoadedGame), 1);
+	WriteFloat(GlobalAddr(g, kVCSGlobalRestartX), x);
+	WriteFloat(GlobalAddr(g, kVCSGlobalRestartX + 1), y);
+	WriteFloat(GlobalAddr(g, kVCSGlobalRestartX + 2), z);
+	return true;
+}
+
+// Put the two flags back, whatever happened to the save. Their PREVIOUS values rather than zero:
+// the script's own routine can assume it was called with no mission running, and this cannot -
+// an auto-save that gave up halfway must not be the reason a mission stops being one.
+//
+// Skipped when the script space has moved under us, which is what a load looks like: the flags
+// belong to a game that no longer exists, and the game that replaced it has its own.
+void RestoreScriptAfterSave() {
+	if (!g_savePrepared) {
+		return;
+	}
+	g_savePrepared = false;
+	const std::optional<u32> space = ReadAddrU32(VCSAddr::ScriptSpace);
+	if (!space || *space != g_scriptGlobals) {
+		return;
+	}
+	WriteU32(GlobalAddr(g_scriptGlobals, kVCSGlobalOnMission), g_savedOnMission);
+	WriteU32(GlobalAddr(g_scriptGlobals, kVCSGlobalLoadedGame), g_savedLoadedFlag);
+}
+
+// Whether the memory stick holds a save for this disc at all. Asked before the auto-load presses
+// anything, because the alternative is walking the whole menu to a list with nothing in it and
+// then having to find the way back out of a screen this does not drive.
+bool AnySaveOnMemoryStick() {
+	const std::string &disc = GetDiscID();
+	if (disc.empty()) {
+		return false;
+	}
+	const Path dir = GetSysDirectory(PSPDirectories::DIRECTORY_SAVEDATA);
+	std::vector<File::FileInfo> entries;
+	if (!File::GetFilesInDir(dir, &entries)) {
+		return false;
+	}
+	for (const File::FileInfo &e : entries) {
+		if (!e.isDirectory || !startsWith(e.name, disc)) {
+			continue;
+		}
+		// PARAM.SFO rather than the game's own DATA.BIN: it is what makes a directory a save as
+		// far as the firmware is concerned, and it is what the list the dialog builds reads.
+		if (File::Exists(dir / e.name / "PARAM.SFO")) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The mission-passed watch, once per tick.
+//
+// The trigger is the eight-byte GXT key at LatestMissionKey, which `01EB register_mission_passed`
+// writes - see the note over the address. Odd jobs move the counter beside it and leave the key
+// alone, so races and empire work deliberately do not fire this.
+void MissionWatchTick() {
+	const std::optional<u32> lo = ReadAddrU32(VCSAddr::LatestMissionKey);
+	const std::optional<u32> hi = ReadAddrU32(VCSAddr::LatestMissionKey2);
+	if (!lo || !hi) {
+		g_haveMissionKey = false;
+		return;
+	}
+
+	// A world that RESTARTED - a load, or NEW GAME - brings a different key with it, and the
+	// frame counter rewinding is how that is told from a mission being passed. Without this the
+	// first thing an auto-load does is fire an auto-save over the save it just loaded.
+	bool restarted = false;
+	if (const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter)) {
+		restarted = *frame < g_asLastFrame;
+		g_asLastFrame = *frame;
+	}
+
+	const bool changed = g_haveMissionKey && (*lo != g_missionKeyLo || *hi != g_missionKeyHi);
+	g_missionKeyLo = *lo;
+	g_missionKeyHi = *hi;
+	const bool first = !g_haveMissionKey;
+	g_haveMissionKey = true;
+
+	if (restarted) {
+		g_autoSaveArmed = false;
+		g_autoSaveDelay = 0;
+		return;
+	}
+	if (first || !changed || *lo == 0) {
+		return;
+	}
+	if (!FrontEndSettings().autoSaveOnMissionPassed || g_autoSaveArmed) {
+		return;
+	}
+	g_autoSaveArmed = true;
+	g_autoSaveDelay = Frames(FrontEndSettings().autoSaveDelayFrames);
+	g_autoSaveWaited = 0;
 }
 
 // Pages already visited since the last row change. The walk uses this to notice it has been
@@ -426,7 +845,55 @@ void RequestCloseGameMenu() {
 }
 
 void RequestSaveMenu() {
-	g_saveRequest.store(true, std::memory_order_relaxed);
+	// Forwarded rather than poking the request byte directly, which is what this used to do. On
+	// its own that byte opens the save menu and writes a file that loads into the opening
+	// mission - see PrepareScriptForSave. There is one way to save here now, and it is the one
+	// that works.
+	RequestGameMenu(FrontEndTarget::Save);
+}
+
+bool RequestAutoLoad() {
+	if (!FrontEndSettings().autoLoadOnBoot) {
+		return false;
+	}
+	// The filesystem question is answered HERE, on the thread that asked, rather than inside the
+	// sequence: it is the one part of this that has nothing to do with the game, and a first run
+	// with an empty memory stick should press nothing at all rather than walk to an empty list.
+	if (!AnySaveOnMemoryStick()) {
+		return false;
+	}
+	RequestGameMenu(FrontEndTarget::Load);
+	return true;
+}
+
+bool AutoSavePending() {
+	return g_autoSaveArmed;
+}
+
+int AutoSaveDelayLeft() {
+	return g_autoSaveDelay;
+}
+
+void LatestMissionKey(char *out, size_t size) {
+	if (!out || size == 0) {
+		return;
+	}
+	out[0] = '\0';
+	const std::optional<u32> lo = ReadAddrU32(VCSAddr::LatestMissionKey);
+	const std::optional<u32> hi = ReadAddrU32(VCSAddr::LatestMissionKey2);
+	if (!lo || !hi) {
+		return;
+	}
+	const u32 words[2] = { *lo, *hi };
+	size_t n = 0;
+	for (size_t i = 0; i < 8 && n + 1 < size; i++) {
+		const char c = (char)((words[i / 4] >> ((i % 4) * 8)) & 0xff);
+		if (c == 0) {
+			break;
+		}
+		out[n++] = (c >= 32 && c < 127) ? c : '?';
+	}
+	out[n] = '\0';
 }
 
 bool FrontEndDriving() {
@@ -442,6 +909,13 @@ bool FrontEndDriving() {
 	case Phase::JumpVerify:
 	case Phase::Settle:
 	case Phase::EnterWait:
+	// The load and save sequences hold the pad for the same reason the walk does, and they hold
+	// it for longer: a stray press from the player lands in a list of save slots.
+	case Phase::LoadPick:
+	case Phase::LoadPrompt:
+	case Phase::Dialog:
+	case Phase::PressHold:
+	case Phase::PressGap:
 		return true;
 	default:
 		return false;
@@ -1082,14 +1556,25 @@ void FrontEndTick() {
 		}
 	}
 
-	// The save request is a write rather than a walk, so it is not part of the state machine at
-	// all - see the header. Done first and unconditionally, because it costs one store and the
-	// front end is what decides when to act on it.
-	if (g_saveRequest.exchange(false, std::memory_order_relaxed)) {
-		if (WriteAddrU8(VCSAddr::SaveMenuRequest, 1)) {
-			g_OSD.Show(OSDType::MESSAGE_INFO, "Opening the save menu", 2.0f, "vcs_frontend");
-		} else {
-			g_OSD.Show(OSDType::MESSAGE_ERROR, "Save menu address unset", 3.0f, "vcs_frontend");
+	// The mission-passed watch and the auto-save's delay, both before anything that can return
+	// early below - a tick that finds nothing to do is still a tick a mission can have been
+	// passed on.
+	MissionWatchTick();
+	if (g_autoSaveArmed && GameFrameAdvancedForAutoSave()) {
+		if (g_autoSaveDelay > 0) {
+			g_autoSaveDelay--;
+		} else if (g_phase == Phase::Idle && !GameMenuActive() && !CheatEntryInProgress()) {
+			// Only from a standing start: the world running, no menu up, nothing else driving the
+			// pad. Anything else and it waits, because a save asked for on top of another
+			// sequence is two things pressing buttons at one game.
+			g_autoSaveArmed = false;
+			g_request.store((int)FrontEndTarget::Save, std::memory_order_relaxed);
+			g_OSD.Show(OSDType::MESSAGE_INFO, "Auto-saving", 2.0f, "vcs_frontend");
+		} else if (++g_autoSaveWaited >= kAutoSavePatience) {
+			// A minute of never being a good moment. Firing much later, at some unrelated point,
+			// would be worse than not firing at all.
+			g_autoSaveArmed = false;
+			g_status = "auto-save gave up waiting";
 		}
 	}
 
@@ -1110,6 +1595,37 @@ void FrontEndTick() {
 		}
 		g_target = (FrontEndTarget)req;
 		const VCSFrontEndSettings &s = FrontEndSettings();
+		g_seqPresses = 0;
+		g_dialogWaited = 0;
+		g_sawDialog = false;
+		g_startAttempts = 0;
+
+		if (g_target == FrontEndTarget::Save) {
+			// The save UI has an inbox and the load list does not, so this half walks nothing at
+			// all: one write, and the game's own front end does the opening. From there it is the
+			// same dialog the load ends at, driven the same way.
+			//
+			// The script state goes FIRST and the request second, in that order for the reason
+			// the script does it in that order: the menu can start writing the file the moment it
+			// is asked for, and a flag set afterwards is a flag that did not get saved.
+			if (!PrepareScriptForSave()) {
+				GoIdle("script globals unreadable");
+				g_OSD.Show(OSDType::MESSAGE_ERROR, "Could not prepare the save", 3.0f,
+					"vcs_frontend");
+				return;
+			}
+			if (!WriteAddrU8(VCSAddr::SaveMenuRequest, 1)) {
+				RestoreScriptAfterSave();
+				GoIdle("save menu address unset");
+				g_OSD.Show(OSDType::MESSAGE_ERROR, "Save menu address unset", 3.0f,
+					"vcs_frontend");
+				return;
+			}
+			g_phase = Phase::Dialog;
+			g_mask = 0;
+			g_status = "saving";
+			return;
+		}
 
 		if (g_target == FrontEndTarget::Close) {
 			if (!GameMenuActive()) {
@@ -1128,6 +1644,9 @@ void FrontEndTick() {
 		case FrontEndTarget::Brief: g_wantPage = s.briefPage; break;
 		case FrontEndTarget::Game:  g_wantPage = s.gamePage; break;
 		case FrontEndTarget::Stats: g_wantPage = s.statsPage; break;
+		// LOAD GAME is an entry ON the Game page, not a page of its own, so the load walks to
+		// exactly where the GAME row walks to and then carries on pressing.
+		case FrontEndTarget::Load:  g_wantPage = s.gamePage; break;
 		default:                    g_wantPage = -1; break;
 		}
 
@@ -1175,6 +1694,25 @@ void FrontEndTick() {
 		g_status = "closed";
 	}
 
+	// The savedata half runs on VBLANKS and returns before the gate below, because the world is
+	// stopped behind that dialog: the game's logic clock, which everything else in this machine
+	// is paced by, has stopped with it and would never hand out another frame.
+	if (g_phase == Phase::Dialog) {
+		DialogTick();
+		return;
+	}
+	if (g_pressOnVblank && (g_phase == Phase::PressHold || g_phase == Phase::PressGap)) {
+		if (g_phase == Phase::PressHold) {
+			if (--g_pressHold <= 0) {
+				g_mask = 0;
+				g_phase = Phase::PressGap;
+			}
+		} else if (--g_pressGap <= 0) {
+			g_phase = g_pressReturn;
+		}
+		return;
+	}
+
 	if (!GameFrameAdvanced()) {
 		return;
 	}
@@ -1182,6 +1720,80 @@ void FrontEndTick() {
 	const VCSFrontEndSettings &s = FrontEndSettings();
 
 	switch (g_phase) {
+	case Phase::PressHold:
+		if (--g_pressHold <= 0) {
+			g_mask = 0;
+			g_phase = Phase::PressGap;
+		}
+		break;
+
+	case Phase::PressGap:
+		if (--g_pressGap <= 0) {
+			g_phase = g_pressReturn;
+		}
+		break;
+
+	// Put the highlight on LOAD GAME and press it. The Game page opens with that entry selected
+	// anyway - it is the first - so the usual path is one read and one Cross; the press up is
+	// there for the case where it is not, and it is bounded because a page that will not move its
+	// highlight is not going to start.
+	case Phase::LoadPick: {
+		if (!GameMenuActive()) {
+			GoIdle("menu closed");
+			break;
+		}
+		char name[32];
+		const bool have = SelectedWidgetName(name, sizeof(name));
+		if (have && strcmp(name, "LoadGame_MI") == 0) {
+			g_seqPresses = 0;
+			g_waited = 0;
+			Press(CTRL_CROSS, Phase::LoadPrompt, s.enterFrames, s.gapFrames, false);
+			break;
+		}
+		if (++g_seqPresses > kMaxSeqPresses) {
+			AbandonSequence("could not select LOAD GAME", "Could not reach LOAD GAME");
+			break;
+		}
+		// Up, because LOAD GAME is the first entry on the page - see the widget list in
+		// docs/VCS_ADDRESSES.md. A page that reports no selection at all gets the same press:
+		// moving is what makes it name one.
+		Press(CTRL_UP, Phase::LoadPick, s.holdFrames, s.gapFrames, false);
+		break;
+	}
+
+	// "All unsaved progress in your current game will be lost. Proceed with loading?" - a page
+	// the front end pushes, whose two entries are BTN_SPECIAL_CANCEL and BTN_SPECIAL_CONFIRM. It
+	// opens on CANCEL, which is the right default for a player and one press short for us.
+	case Phase::LoadPrompt: {
+		if (!GameMenuActive()) {
+			GoIdle("menu closed");
+			break;
+		}
+		char name[32];
+		const bool have = SelectedWidgetName(name, sizeof(name));
+		if (!have || strncmp(name, "BTN_SPECIAL_", 12) != 0) {
+			// Not up yet. Waiting is the whole answer: the press that asks for it has been made
+			// and the page is built on the game's own schedule.
+			if (++g_waited >= Frames(s.openTimeoutFrames)) {
+				AbandonSequence("load prompt never appeared", "LOAD GAME did not respond");
+			}
+			break;
+		}
+		if (strcmp(name, "BTN_SPECIAL_CONFIRM") == 0) {
+			g_seqPresses = 0;
+			g_dialogWaited = 0;
+			g_sawDialog = false;
+			Press(CTRL_CROSS, Phase::Dialog, s.enterFrames, s.gapFrames, false);
+			break;
+		}
+		if (++g_seqPresses > kMaxSeqPresses) {
+			AbandonSequence("could not answer the prompt", "Could not answer the load prompt");
+			break;
+		}
+		Press(CTRL_DOWN, Phase::LoadPrompt, s.holdFrames, s.gapFrames, false);
+		break;
+	}
+
 	case Phase::PressStart:
 		if (--g_remaining > 0) {
 			break;
@@ -1202,6 +1814,19 @@ void FrontEndTick() {
 		if (++g_waited >= Frames(s.openTimeoutFrames)) {
 			// Start did not open anything. Nothing is half-done - we pressed a button and the
 			// game declined - so there is nothing to undo, and saying so beats retrying.
+			//
+			// Except at the boot seam, which is the one place a first Start really can be spent
+			// on something else: the world starts inside the opening scene, where the button
+			// skips rather than opens. So the auto-load gets a few goes before it gives up, and
+			// nothing else does.
+			if (g_target == FrontEndTarget::Load && ++g_startAttempts < kMaxStartAttempts) {
+				g_waited = 0;
+				g_phase = Phase::PressStart;
+				g_remaining = Frames(s.holdFrames);
+				g_mask = CTRL_START;
+				g_status = "pressing start again";
+				break;
+			}
 			GoIdle("menu never opened");
 			g_OSD.Show(OSDType::MESSAGE_ERROR, "The game's menu did not open", 3.0f,
 				"vcs_frontend");
@@ -1296,12 +1921,26 @@ void FrontEndTick() {
 			}
 			// Already inside the page. Pressing Cross here would not descend, it would activate
 			// whatever is selected - on the Game page, LOAD GAME.
+			//
+			// Which is exactly what the load wants next, so that is where it goes rather than
+			// handing over: same walk, four more presses.
+			if (g_target == FrontEndTarget::Load) {
+				g_seqPresses = 0;
+				g_waited = 0;
+				g_phase = Phase::LoadPick;
+				g_status = "picking load game";
+				break;
+			}
 			Finish("arrived");
 			break;
 		}
 		if (++g_presses > kMaxEnterPresses) {
 			// Focus will not move. Leaving the player on the page at strip level is a working
 			// outcome; pressing a select button repeatedly at a menu that is ignoring it is not.
+			if (g_target == FrontEndTarget::Load) {
+				AbandonSequence("could not enter the game page", "Could not open LOAD GAME");
+				break;
+			}
 			Finish("could not enter page");
 			break;
 		}
@@ -1386,8 +2025,26 @@ void FrontEndReset() {
 	g_haveFrame = false;
 	g_lastFrame = 0;
 	g_vblanks = 0;
+	g_pressOnVblank = false;
+	g_pressHold = 0;
+	g_pressGap = 0;
+	g_pressReturn = Phase::Idle;
+	// The mission key is dropped rather than kept: the next reading becomes the baseline, so a
+	// game that boots with a key already in it - which is every load - does not read as a mission
+	// having been passed while nobody was watching.
+	g_haveMissionKey = false;
+	g_missionKeyLo = 0;
+	g_missionKeyHi = 0;
+	g_asLastFrame = 0;
+	g_haveAsFrame = false;
+	g_autoSaveArmed = false;
+	g_autoSaveDelay = 0;
+	g_autoSaveWaited = 0;
 	g_request.store(-1, std::memory_order_relaxed);
-	g_saveRequest.store(false, std::memory_order_relaxed);
+	// Dropped rather than restored: the game these belonged to is going away, and the write
+	// would land in whatever replaces it.
+	g_savePrepared = false;
+	g_scriptGlobals = 0;
 }
 
 const char *FrontEndStatus() {

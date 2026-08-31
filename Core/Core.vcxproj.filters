@@ -1578,6 +1578,9 @@
     <ClInclude Include="VCS\VCSRoute.h">
       <Filter>VCS</Filter>
     </ClInclude>
+    <ClInclude Include="VCS\VCSSaveDialog.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
     <ClInclude Include="VCS\VCSRadar.h">
       <Filter>VCS</Filter>
     </ClInclude>

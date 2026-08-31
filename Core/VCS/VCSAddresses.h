@@ -251,6 +251,14 @@ inline constexpr u32 kVCSWidgetAlpha = 0x1c;    // float
 inline constexpr u32 kVCSWidgetVisible = 0x20;  // u8; zero means the draw loop skips it
 inline constexpr u32 kVCSWidgetsBegin = 0x24;   // a page/group's own widget vector
 inline constexpr u32 kVCSWidgetsEnd = 0x28;
+// The entry a page has highlighted - a pointer to one of its own children, so its NAME says
+// which one. Read live: the Game page holds LoadGame_MI on arrival, and the confirm page
+// BTN_SPECIAL_CANCEL, moving to BTN_SPECIAL_CONFIRM on a d-pad down.
+//
+// This is the field the direct page jump got wrong: writing MenuPage moves what is drawn and
+// leaves +0x30 pointing at a widget belonging to the page you came from, which is a real object
+// of the wrong type and dies on the third dereference. See jumpDirectlyToPage.
+inline constexpr u32 kVCSWidgetSelected = 0x30;
 
 // The PSP framebuffer, which is what the front end lays itself out in - and NOT what is actually
 // displayed here, which measures about 330 rows. That gap is the whole reason a backdrop sized to
@@ -462,6 +470,47 @@ inline constexpr u32 kVCSMapCursorOffsetY = 0xd4;
 inline constexpr u32 kVCSMapPanX = 0xc0;
 inline constexpr u32 kVCSMapPanY = 0xc4;
 
+// --- The script globals a save is made of -----------------------------------------------------
+//
+// Indices into the global block at `ScriptSpace` - global N is at `ScriptSpace + N*4`.
+//
+// **A save is not just the world; it is these.** The engine writes the global block into the save
+// file, and the main script reads them back on boot to decide what kind of game this is. Setting
+// the save-menu request byte and nothing else produces a file that loads into the OPENING MISSION
+// with the player's money and outfit, which is what "the save game button worked but loading it
+// started the game over" turned out to be - measured twice, and confirmed by reading `$4` as 0 in
+// the game that came back.
+//
+// The names are the decompiled script's. Every index below was decoded from MAIN.SCM at 0xc65c,
+// which is the run-up to `0260 activate_save_menu` in the safehouse save routine:
+//
+//     04 00 d0 15 07 01     0004: $789 = 1        ONMISSION
+//     04 00 cd 04 07 01     0004: $4   = 1        "this game came from a save"
+//     36 00 ce 1c d0 0f     0036: $284 = $783     the restart position, x
+//     36 00 ce 1d d0 10     0036: $285 = $784                           y
+//     36 00 ce 1e d0 11     0036: $286 = $785                           z
+//     c0 02 d0 0e ce 12     02C0: weapon  -> $274
+//     fe 02 d0 0e ce 13     02FE: armour  -> $275
+//     96 00 d0 0e ce 14     0096: money   -> $276
+//     5a 00 d5 78 d5 77     005A: get_time_of_day $2168 $2167
+//     60 02                 0260: activate_save_menu
+//
+// The main script's first decision is on `$4`:
+//
+//     $_4 == 0 && $2 == 0  ->  $ONMISSION = 1; 0289: load_and_launch_mission_internal 8 // Soldier
+//
+// - which is the bug, in the game's own words.
+//
+// The last three are NOT written here, and that is a decision rather than an omission: the load
+// path (MAIN_2139) restores the player's weapons from the engine's own save data and only reads
+// `$274`/`$275` again on the wasted-and-busted path, which the script refreshes for itself at
+// every mission start. Position is different - the load path copies `$284..286` straight back
+// into `$783..785` - so it is written.
+inline constexpr u32 kVCSGlobalLoadedGame = 4;     // $_4
+inline constexpr u32 kVCSGlobalOnMission = 789;    // $ONMISSION
+inline constexpr u32 kVCSGlobalRestartX = 284;     // $_284, $_285, $_286
+inline constexpr u32 kVCSGlobalSavePointX = 783;   // $783, $784, $785 - the last save pickup
+
 inline constexpr u32 kVCSEntityPositionOffset = 0x30;
 inline constexpr u32 kVCSEntityFlagsOffset = 0x48;
 inline constexpr u32 kVCSEntityTypeMask = 0x0e;
@@ -623,6 +672,16 @@ enum class VCSAddr {
 	MenuActive,        // Nonzero while the game's own pause menu is up. The Menu context's gate.
 	MenuPage,          // s8. Which of its pages is showing; -1 when the menu is closed.
 	SaveMenuRequest,   // Set to 1 to ask the front end to open the save menu. It clears it itself.
+
+	// What the script writes when a mission is passed - the auto-save's trigger. See the note
+	// over the rows in the table below for where these came from.
+	LatestMissionKey,  // First word of the 8-byte GXT key of the last STORY mission passed.
+	LatestMissionKey2, // Its second word. Eight bytes have to be compared, not four - LAN_C01.
+	MissionsPassed,    // Count of missions passed, odd jobs included. Not restored by a load.
+
+	// The loaded SCM, which is where the script's global variables live. A POINTER, and a heap
+	// one - it reads 0x09f68400 on one run and will read something else on the next.
+	ScriptSpace,
 
 	Count,
 };
@@ -858,6 +917,39 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// gp + 0x1076. `0260 activate_save_menu` (0x089dee68) writes 1 here; the front end's update
 	// reads it at 0x0882e23c/0x0882e284 and clears it at 0x0882e290 as it opens the save menu.
 	{ VCSAddr::SaveMenuRequest, "SaveMenuRequest", VCSAddrType::U8, 0x08bb2dd6,   kNoBase,              "gp+0x1076. Write 1 to ask for the save menu; the front end clears it when it opens" },
+
+	// Straight out of `01EB register_mission_passed`, resolved from the script command table the
+	// usual way - u32(0x08b846e0 + 0x1eb*8 + 4) = 0x08886064 - and read there rather than hunted
+	// for. It memcpys eight bytes of GXT key to gp+0x1fc0 and increments gp+0x1fc8:
+	//
+	//     088860e0  addiu $a0, $gp, 0x1fc0
+	//     088860e8  jal   0x8b58ba0          ; memcpy(gp+0x1fc0, key, 8)
+	//     088860f0  lw    $a0, 0x1fc8($gp)
+	//     088860f4  addiu $a0, $a0, 1
+	//     088860fc  sw    $a0, 0x1fc8($gp)
+	//
+	// The decompiled MAIN.SCM calls that opcode from exactly ONE place - a shared subroutine every
+	// mission ends through - so this is the game's own definition of "a mission was passed", not a
+	// correlation with one.
+	//
+	// `036A register_oddjob_mission_passed` (0x0888640c) bumps the COUNTER and leaves the key
+	// alone, which is what separates the two: a story mission changes the key, a race or an empire
+	// job only moves the count.
+	//
+	// Read live at gp = 0x08bb1d60: the key held "LAN_C01" on a 14.4% save, and the counter read 0
+	// because a load does not restore it - it counts this session. Only the EDGE is used, so that
+	// costs nothing, but do not display it as a total.
+	{ VCSAddr::LatestMissionKey,  "LatestMissionKey",  VCSAddrType::U32, 0x08bb3d20, kNoBase,        "gp+0x1fc0. First 4 bytes of the last story mission's GXT key" },
+	{ VCSAddr::LatestMissionKey2, "LatestMissionKey2", VCSAddrType::U32, 0x08bb3d24, kNoBase,        "gp+0x1fc4. Second 4. LAN_C01 and LAN_C02 share the first word" },
+	{ VCSAddr::MissionsPassed,    "MissionsPassed",    VCSAddrType::U32, 0x08bb3d28, kNoBase,        "gp+0x1fc8. Missions passed this session, odd jobs included. Zeroed by a load" },
+
+	// Where the script keeps its global variables, from the operand decoder at 0x08861a7c: an
+	// operand byte >= 0xcd is a global, its index is `(type - 0xcd) << 8 | nextByte`, and the
+	// address is `[gp - 0x71dc] + index * 4`. Read as a pointer, never baked: the value is a
+	// heap address that differs every run.
+	//
+	// This is what makes a save a save. See kVCSGlobalLoadedGame below.
+	{ VCSAddr::ScriptSpace,       "ScriptSpace",       VCSAddrType::U32, 0x08baab84, kNoBase,        "gp-0x71dc. Pointer to the loaded SCM; global N lives at [this] + N*4" },
 };
 
 static_assert(ARRAY_SIZE(kVCSAddresses) == (size_t)VCSAddr::Count,

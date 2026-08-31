@@ -1198,6 +1198,80 @@ removed the tab labels *and* the backdrop, which left the map ghosting over its 
 - and that told us the root page is backdrop-plus-chrome rather than a container, which is what
 made the per-widget flag the right lever instead.
 
+### The script's global variables, and what a save is made of
+
+Needed by the auto-save, and the answer to a bug that had been blamed on the save list twice.
+
+**Global N lives at `[gp - 0x71dc] + N*4`.** From the operand decoder at `0x08861a7c`, which every
+variable-taking opcode reaches through `0x088623d0`:
+
+```
+08861b64  addiu $a0, $a2, -0xcd      ; operand type byte, >= 0xcd means a global
+08861b68  sll   $a0, $a0, 8
+08861b70  addu  $a3, $a3, $a0        ; index = (type - 0xcd) << 8 | nextByte
+08861be4  lw    $v0, -0x71dc($gp)    ; the loaded SCM
+08861be8  sll   $a0, $a3, 2
+08861bf0  addu  $v0, $v0, $a0        ; -> address
+```
+
+The base is a **heap pointer** - `0x09f68400` on one run - so read it every time; baking it is the
+one mistake this address cannot survive. Types below `0xcd` are thread locals, at
+`thread + 0x54 + i*4`, offset by the thread's own base index at `thread + 0x1fc` (which is the
+`locals_base_index` a Sanny listing prints on every `call_func`).
+
+**`$_N` and `$N` in a decompiled listing are the same numbering.** `$_274` encodes as `ce 12`,
+which is index 274. The underscore is notation, not a second address space.
+
+| global | | |
+|---|---|---|
+| `$4` | `$_4` | **1 while a save is being written.** Zero on boot means new game |
+| `$782` | `$PLAYER_CHAR` | the player's script handle - read 257 |
+| `$789` | `$ONMISSION` | 1 while a mission - or a save - is in progress |
+| `$284`..`$286` | `$_284..286` | the restart position; the load path copies it into `$783..785` |
+| `$783`..`$785` | | where the last save pickup was collected. Zero until one is |
+| `$274`/`$275`/`$276` | | weapon, armour, money, for the wasted-and-busted restore |
+
+**`$4` is what makes a save a save.** The engine writes the global block into the file, and the
+main script's first decision on boot is:
+
+```
+$_4 == 0 && $2 == 0  ->  $ONMISSION = 1; 0289: load_and_launch_mission_internal 8 // Soldier
+```
+
+So a save written by poking the save-menu request byte and nothing else loads into the opening
+mission carrying the player's money and clothes. That is a symptom worth recognising: it looks
+like the wrong save was loaded, and it is not - the right file loaded, and it said to start over.
+The script sets `$4` (and `$ONMISSION`, and the restart position) in the eight instructions before
+`0260 activate_save_menu`, at `0xc65c` in MAIN.SCM; `PrepareScriptForSave` in `VCSFrontEnd.cpp`
+does the same and puts them back afterwards.
+
+### `01EB register_mission_passed`, and the two globals it writes
+
+The auto-save's trigger, resolved from the command table the usual way -
+`u32(0x08b846e0 + 0x1eb*8 + 4)` = `0x08886064`:
+
+```
+088860e0  addiu $a0, $gp, 0x1fc0
+088860e8  jal   0x8b58ba0          ; memcpy(gp+0x1fc0, key, 8)   the GXT key of the mission
+088860f0  lw    $a0, 0x1fc8($gp)
+088860f4  addiu $a0, $a0, 1
+088860fc  sw    $a0, 0x1fc8($gp)   ; and the count
+```
+
+| address | | |
+|---|---|---|
+| `0x08bb3d20` | `LatestMissionKey` | `gp+0x1fc0`. Eight bytes of GXT key - `LAN_C01` on a 14.4% save |
+| `0x08bb3d28` | `MissionsPassed` | `gp+0x1fc8`. This SESSION's count; a load does not restore it |
+| `0x08baab84` | `ScriptSpace` | `gp-0x71dc`. Pointer to the SCM; globals live at its start |
+
+The decompiled script calls that opcode from **exactly one place**, the subroutine every mission
+ends through, which is why the key changing is the game's own statement that a mission was passed
+rather than a correlation with one. `036A register_oddjob_mission_passed` (`0x0888640c`) bumps the
+counter and leaves the key alone - so races and empire jobs move the count and not the key, and
+watching one or the other is how you choose which of them counts.
+
+Compare all eight bytes. `LAN_C01` and `LAN_C02` share their first word.
+
 #### The menu is laid out for a screen shorter than the one it is on
 
 Hiding the eight `*_t` widgets and the `BUTTONS*` children left a black band across the bottom, and

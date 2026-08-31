@@ -1612,6 +1612,21 @@ void ImVCSWindow::DrawFrontEnd() {
 	// widget names differ would look like - as opposed to the setting simply being off.
 	ImGui::Text("Chrome hidden: %d widget(s)", VCS::HiddenChromeCount());
 	{
+		// The auto-save, and the two things that say why it has not fired: whether the
+		// mission-passed edge was seen at all, and whether the delay is still running. The key
+		// itself is here because a wrong or unreadable address looks exactly like a game where
+		// no mission has been passed yet.
+		char key[16];
+		VCS::LatestMissionKey(key, sizeof(key));
+		char state[32];
+		if (VCS::AutoSavePending()) {
+			snprintf(state, sizeof(state), "armed, %d frames", VCS::AutoSaveDelayLeft());
+		} else {
+			snprintf(state, sizeof(state), "idle");
+		}
+		ImGui::Text("Auto-save   : %s  (mission %s)", state, key[0] ? key : "-");
+	}
+	{
 		float wx = 0.0f, wy = 0.0f;
 		if (VCS::FindWaypoint(&wx, &wy)) {
 			ImGui::Text("Waypoint    : %.1f, %.1f", wx, wy);

@@ -93,6 +93,15 @@ enum class FrontEndTarget {
 	Game,
 	Stats,
 
+	// The two that carry on past the game's own menu and into the firmware's savedata dialog.
+	//
+	// They are targets rather than a module of their own because the first half of each is the
+	// walk this file already does - Load is the Game page plus four more presses, and Save is the
+	// inbox write plus the same dialog - and two things pressing buttons at one game is how a
+	// sequence ends up racing another. One state machine, one pad.
+	Load,
+	Save,
+
 	// Shut the game's menu, so that leaving this fork's menu always means going back to the world.
 	// Without it the two read as two menus stacked on each other: RESUME dropped you back onto
 	// whichever game tab you had been looking at, rather than into the game.
@@ -317,6 +326,56 @@ struct VCSFrontEndSettings {
 	// and still bounded.
 	int openTimeoutFrames = 90;
 	int maxTabPresses = 22;
+
+	// --- Loading and saving without being asked ---------------------------------------------
+	//
+	// Two halves of one idea: the game is entered by carrying on from where you were, and it
+	// keeps that place by itself. The startup menu that used to stand between the boot and the
+	// world is gone, so this is what replaces it.
+
+	// At the boot seam, walk the game's own front end to LOAD GAME and take the save the dialog
+	// offers.
+	//
+	// **The dialog's own default IS the most recent save**, and that is the game's choice rather
+	// than ours: VCS asks the firmware to focus the latest entry, so the list comes up on it.
+	// Measured - with eight slots on the memory stick the list opened on the one written at 12:25
+	// that day, not on slot 0. So "load the most recent save" needs no slot bookkeeping here at
+	// all, and a player who wants a different one gets the ordinary list to move through.
+	bool autoLoadOnBoot = true;
+
+	// Save after every story mission passed.
+	//
+	// The trigger is the eight-byte GXT key at `LatestMissionKey`, which `01EB
+	// register_mission_passed` writes and which the decompiled script calls from exactly one
+	// place - the subroutine every mission ends through. Odd jobs bump `MissionsPassed` without
+	// touching the key, so races and empire work deliberately do not fire this.
+	bool autoSaveOnMissionPassed = true;
+
+	// Which slot the auto-save overwrites, as an index into the game's own eight (S92F0..S92F7,
+	// a fixed list built into the EBOOT at 0x08ba30d8 - there is no ninth slot to hide in).
+	//
+	// One dedicated slot rather than a rolling one, so an auto-save can only ever overwrite the
+	// previous auto-save and the other seven stay the player's. Loading still takes whatever is
+	// newest, so an auto-save and a manual save compete on equal terms - which is the whole point
+	// of the pair.
+	int autoSaveSlot = 0;
+
+	// Game frames between the mission-passed flag and asking for the save menu. A mission ends
+	// into its own fanfare, a cutscene, a phone call; opening the save UI on the same frame lands
+	// on top of all of it.
+	int autoSaveDelayFrames = 150;
+
+	// Vblanks a press is held / released while driving the FIRMWARE's dialog, which does not run
+	// on the game's logic clock the rest of this file is paced by - the world is stopped behind
+	// it. See the dialog note in VCSSaveDialog.h.
+	int dialogHoldFrames = 4;
+	int dialogGapFrames = 8;
+
+	// A bound on the whole savedata half of either sequence, in vblanks. It exists because that
+	// dialog can end up somewhere this fork does not drive - a memory stick error, a "no data"
+	// notice - and a sequence with no way out would sit there pressing nothing forever with the
+	// player's pad still taken away.
+	int dialogTimeoutFrames = 900;
 };
 
 VCSFrontEndSettings &FrontEndSettings();
@@ -386,12 +445,35 @@ bool MapCursorScreen(float *x, float *y);
 // Undo the crosshair patch. Shutdown, and whenever the feature is turned off.
 void MapCursorReset();
 
-// Ask the front end to open its SAVE menu, the way script opcode `0260 activate_save_menu` does -
-// by setting the request flag the front end polls. This one really is a single write, and it is
-// the exception that proves the rule above: the flag is not a claim that the menu is open, it is
-// the game's own inbox for that request, and the front end does all of the opening itself.
+// Load the most recent save, all the way through: Start, the Game page, LOAD GAME, the "you will
+// lose unsaved progress" prompt, and the firmware's slot list. Meant for the boot seam, and it is
+// what replaced the startup menu.
 //
-// Deliberately NOT how the map and load rows work. There is no equivalent inbox for those.
+// Returns false, having done nothing, when the setting is off or the memory stick holds no save
+// for this disc - which is the first run, and the honest answer there is to leave the player in
+// the story the game has already started. Safe from the UI thread, which is where EmuScreen calls
+// it from; the filesystem check happens there and the rest is queued like every other request.
+bool RequestAutoLoad();
+
+// Whether an auto-save is waiting for its delay to run out. For the debugger, and for anything
+// that wants to keep out of the way of one.
+bool AutoSavePending();
+
+// Game frames still to wait, and the mission key being watched - the two things that say whether
+// a mission-passed edge was seen at all, and whether the delay is the reason nothing has happened
+// yet. `out` gets the eight-byte key as ASCII, empty when it cannot be read.
+int AutoSaveDelayLeft();
+void LatestMissionKey(char *out, size_t size);
+
+// Save, the whole way: the script state a save is made of, the request byte `0260
+// activate_save_menu` sets, and then the firmware's dialog driven to the auto-save slot.
+//
+// **The request byte on its own is not a save**, and that is the correction worth carrying: it
+// opens the menu, and the file that gets written from a game whose `$4` is 0 loads into the
+// OPENING MISSION carrying your money and your clothes. Reported as "the save button worked, and
+// loading it started the game over"; measured, and confirmed by reading that global as 0 in the
+// game that came back. See PrepareScriptForSave in the .cpp and the note over
+// kVCSGlobalLoadedGame in VCSAddresses.h.
 void RequestSaveMenu();
 
 // Whether the bridge is currently driving the pad - pressing Start, or walking to a page. While

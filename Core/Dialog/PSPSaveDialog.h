@@ -22,6 +22,7 @@
 
 #include "Core/Dialog/PSPDialog.h"
 #include "Core/Dialog/SavedataParam.h"
+#include "Core/VCS/VCSSaveDialog.h"
 
 class PSPSaveDialog : public PSPDialog {
 public:
@@ -35,6 +36,10 @@ public:
 	pspUtilityDialogCommon *GetCommonParam() override;
 
 	void ExecuteIOAction();
+
+	// Report what is on screen, for the VCS fork's auto-save and auto-load. Read-only; see
+	// Core/VCS/VCSSaveDialog.h for why a fork needs to ask.
+	void VCSPeek(VCS::SaveDialogPeek *out);
 
 protected:
 	bool UseAutoStatus() override {

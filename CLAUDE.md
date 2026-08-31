@@ -766,14 +766,146 @@ to fast-forward anything, which is why there is still a few seconds of wait afte
 though only the edge is used.
 
 **The flow, as built.** `CreateStartScreen` boots the remembered disc with no menu in front of
-it; `VCS::UpdateBootPhase` watches for the edge; `EmuScreen` raises the menu in
-`VCSMenuMode::Startup` when it lands; START GAME just resumes. Any key during the intro calls
-`RequestIntroSkip`, hooked in `NativeKey` next to the existing VCS key claim.
+it; `VCS::UpdateBootPhase` watches for the edge; `EmuScreen` acts on it when it lands. Any key
+during the intro calls `RequestIntroSkip`, hooked in `NativeKey` next to the existing VCS key
+claim.
+
+(What `EmuScreen` did there was raise a menu. It loads the most recent save now - see the next
+section but one.)
 
 Do not trust a reading taken from a session that has been running a while: mid-investigation this
 looked disproven, because the sample was taken from an instance that had already crossed the seam
 and was showing the gameplay values. The credits really do run with both clocks at zero; check
 what is on screen before believing a reading.
+
+### There is no menu at the seam any more, because the game is what you asked for
+
+The startup menu is gone. It was raised at the seam, over a game that was already running, and it
+offered START GAME - which is a screen asking you to start the game you started. What happens
+there now is the thing its LOAD GAME row was for: `RequestAutoLoad` walks the game's own front end
+to LOAD GAME and takes the save the dialog offers, with no key pressed. `VCSMenuMode::Startup` is
+still defined and nothing raises it.
+
+Two things make that a small change rather than a feature:
+
+**The dialog's own default IS the most recent save, and the game chose that, not us.** VCS asks
+the firmware to focus the latest entry, so the list comes up on it. Measured with eight saves on
+the memory stick: the list opened on the one written at 12:25 that day rather than on slot 0. So
+"load the most recent" needs no slot bookkeeping at all - and a player who wants a different one
+gets the ordinary list to move through, because the sequence stops pressing the moment the load
+starts.
+
+**A first run has nothing to load, and asks for nothing.** `RequestAutoLoad` checks the memory
+stick for a `PARAM.SFO` under this disc's ID before it presses anything, and the story the game
+has already started just runs.
+
+The one place the sequence is patient rather than strict is the very first Start: the seam lands
+inside the opening scene, where that button may be spent skipping something. It gets three goes,
+and only the auto-load does - everything else still gives up after one.
+
+### What a save is actually made of, and the bug that hid in it
+
+**The save-menu request byte is not a save.** Setting `gp+0x1076` opens the save UI and the game
+writes a file, and that file loads into the OPENING MISSION carrying your money, your clothes and
+your percentage. Reported once as "the save game button worked, but loading it started the game
+over", and reproduced here twice before the cause turned up.
+
+The cause is in the script, eight instructions before it asks for the menu. The safehouse save
+routine reads:
+
+```
+04 00 d0 15 07 01     0004: $789 = 1        ONMISSION
+04 00 cd 04 07 01     0004: $4   = 1        "this game came from a save"
+36 00 ce 1c d0 0f     0036: $284 = $783     the restart position, x
+36 00 ce 1d d0 10     0036: $285 = $784                           y
+36 00 ce 1e d0 11     0036: $286 = $785                           z
+c0 02 d0 0e ce 12     02C0: weapon  -> $274
+fe 02 d0 0e ce 13     02FE: armour  -> $275
+96 00 d0 0e ce 14     0096: money   -> $276
+5a 00 d5 78 d5 77     005A: get_time_of_day $2168 $2167
+60 02                 0260: activate_save_menu
+```
+
+and the main script's first decision, on boot, is on the second of those:
+
+```
+$_4 == 0 && $2 == 0  ->  $ONMISSION = 1; 0289: load_and_launch_mission_internal 8 // Soldier
+```
+
+**`$4` is the whole bug, in the game's own words.** The engine writes the script's global block
+into the save file; a save taken without that preamble carries `$4 = 0`, and the game that loads
+it does exactly what the script says to do with a zero there. Confirmed from the other end too:
+after loading such a save, `$4` reads 0 and `$789` reads 1 - a game running mission 8.
+
+So `PrepareScriptForSave` does what those instructions do and `RestoreScriptAfterSave` puts back
+what it changed, which is also what the script does four lines further down its own routine. The
+restore runs from `GoIdle`, the one funnel every sequence ends through, because leaving
+`$ONMISSION` at 1 after an abandoned save would quietly stop every mission trigger in the city.
+
+Three things worth keeping from working it out:
+
+- **Global N lives at `[gp - 0x71dc] + N*4`**, from the operand decoder at `0x08861a7c`: an
+  operand byte `>= 0xcd` is a global and its index is `(type - 0xcd) << 8 | nextByte`. The base is
+  a heap pointer - `0x09f68400` on one run - so it is read every time and never baked.
+- **`$_N` and `$N` in a Sanny listing are the same numbering.** `$_274` decoded to `ce 12`, which
+  is index 274. The underscore is notation, not a second address space, and assuming otherwise
+  would have cost a day.
+- **The weapons, armour and money at the end of that preamble are deliberately not written.** The
+  load path (`MAIN_2139`) restores weapons from the engine's own save data and only reads `$274` /
+  `$275` again on the wasted-and-busted path, which the script refreshes for itself at every
+  mission start. The position is different - the load path copies `$284..286` straight back into
+  `$783..785` - so that one is written.
+
+`$783..785` is where the last save pickup was collected, and it is zero in a game where nobody has
+walked into a save icon yet - which an auto-save fired by the first mission passed will meet. The
+player's own position is used there instead, because restarting at the map's origin is not a place.
+
+### Saving after a mission, and how the game says one was passed
+
+`01EB register_mission_passed` is the trigger, resolved from the script command table the usual
+way - `u32(0x08b846e0 + 0x1eb*8 + 4)` = `0x08886064`. It memcpys eight bytes of GXT key to
+`gp+0x1fc0` and increments `gp+0x1fc8`, and **the decompiled MAIN.SCM calls it from exactly one
+place** - a shared subroutine every mission ends through. That is the game's own definition of a
+mission being passed rather than a correlation with one.
+
+`036A register_oddjob_mission_passed` bumps the counter and leaves the key alone, which is what
+separates the two: a story mission changes the key, a race or an empire job only moves the count.
+The auto-save watches the KEY, so odd jobs deliberately do not fire it.
+
+Eight bytes get compared, not four. `LAN_C01` and `LAN_C02` share their first word.
+
+**The counter is not a total.** It reads 0 on a 14.4% save, because a load does not restore it -
+it counts the session. Only the edge is used, so that costs nothing, but do not put it on screen
+as "missions passed".
+
+**A load looks exactly like a mission being passed**, and that is the one trap in the watch: the
+world restarting brings a different key with it. The frame counter rewinding is what tells the two
+apart, and without that check the first thing an auto-load does is fire an auto-save over the save
+it just loaded.
+
+### Driving a dialog the game does not own
+
+The load and the save both end at the firmware's savedata dialog - the slot list, the "overwrite?"
+prompt, the progress bar - and PPSSPP draws all of it. So the doctrine the rest of this fork
+follows, drive the mechanic and watch the state, runs out of state to watch: `FrontEndMenuManager`
+freezes at whatever page it was on and nothing in PSP memory says which screen is up.
+
+`Core/VCS/VCSSaveDialog.h` is the answer - a read-only report of what the dialog is showing,
+filled in by `PSPSaveDialog::VCSPeek`. The alternative was pressing Cross on a timer, which is the
+class of thing that works on the machine it was written on. Three things it has to carry:
+
+- **The buttons, because which is which is a setting.** "Save completed" offers Back alone
+  (`DS_SAVE_DONE` accepts only the cancel button), so a sequence pressing OK at it sits there with
+  the save already written until it times out. Measured, from a run that did exactly that.
+- **`yesnoChoice`, because the overwrite prompt opens on NO.** LEFT is what moves it to YES, and
+  an OK sent without that press cancels the save it was meant to confirm.
+- **Busy, which folds the IO thread and the fades into one answer**, because the caller does the
+  same thing with both: wait. A press that lands in a fade is a press the screen underneath never
+  sees, and the sequence goes on believing it was made.
+
+**The dialog phases are paced in vblanks, not game frames**, and that is not a preference: the
+world is stopped behind that dialog, so the logic clock every other phase here runs on has stopped
+with it and would never hand out another frame.
 
 ### A menu we own sidesteps the GameState problem entirely
 

@@ -1127,6 +1127,7 @@
     <ClInclude Include="VCS\VCSAddresses.h" />
     <ClInclude Include="VCS\VCSFrontEnd.h" />
     <ClInclude Include="VCS\VCSRoute.h" />
+    <ClInclude Include="VCS\VCSSaveDialog.h" />
     <ClInclude Include="VCS\VCSRadar.h" />
     <ClInclude Include="VCS\VCSGame.h" />
     <ClInclude Include="VCS\VCSInput.h" />

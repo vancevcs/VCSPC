@@ -1457,10 +1457,15 @@ void EmuScreen::update() {
 	// The seam: logos, credits, and then the world starts. A menu used to be raised here, in
 	// VCSMenuMode::Startup, and is not any more - launching the game is already the request, and
 	// answering it with a screen that has to be dismissed asks the player to start the game
-	// twice. The phase is still marked, both to stop the boot watch and because this is where
-	// loading the most recent save belongs.
+	// twice.
+	//
+	// What happens instead is the thing that menu's LOAD GAME row was for: the most recent save
+	// is loaded, through the game's own front end, without being asked. With no save on the
+	// memory stick RequestAutoLoad does nothing and the story it has already started just runs -
+	// which is the right answer for a first run.
 	if (VCS::GetBootPhase() == VCS::BootPhase::AtMenu && !bootPending_) {
 		VCS::NotifyMenuDismissed();
+		VCS::RequestAutoLoad();
 	}
 
 	if (pauseTrigger_) {
