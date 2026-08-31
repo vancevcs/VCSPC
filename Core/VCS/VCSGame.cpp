@@ -23,7 +23,6 @@
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
-#include "Core/VCS/VCSBlips.h"
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSRoute.h"
 #include "Core/VCS/VCSFireHook.h"
@@ -110,7 +109,6 @@ void Init() {
 	MapCursorReset();
 	RouteReset();
 	RadarReset();
-	ClearRouteBlips();
 
 	g_discID = g_paramSFO.GetDiscID();
 
@@ -226,14 +224,6 @@ void Tick() {
 	// range, projects the route through the game's own transform and leaves screen-space segments
 	// for the UI thread to draw. It writes no PSP memory.
 	RadarTick();
-
-	// The old blip markers, still here behind their own default-off switch as a fallback. ShowRoute
-	// only queues; BlipTick is what talks to the game, at most one call per frame through the world
-	// query's own safe dispatch point.
-	if (BlipSettings().showRoute) {
-		ShowRoute(RouteToWaypoint());
-	}
-	BlipTick();
 
 	ApplyMapping(context);
 

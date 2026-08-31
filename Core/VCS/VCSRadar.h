@@ -28,7 +28,9 @@
 // Drawing the line ourselves is strictly better on every axis that matters: it is a line rather
 // than dots, its colour and thickness are ours, it costs the game's blip pool nothing, and it
 // writes no PSP memory at all - which is what makes the faults go away rather than get fixed.
-// VCSBlips is still there, behind its own default-off switch, as a fallback.
+// That first version is gone as of this change - it was dead code with a memory fault in it, which
+// is a trap for whoever reads this next. The technique it proved out survives in VCSMips.h, which
+// VCSWorld still uses for the ground probe.
 //
 // ---------------------------------------------------------------------------------------------
 // THE TRANSFORM IS THE GAME'S

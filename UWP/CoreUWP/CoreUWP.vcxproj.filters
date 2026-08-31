@@ -98,7 +98,6 @@
     <ClCompile Include="..\..\Core\VCS\VCSGame.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSFrontEnd.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSRoute.cpp" />
-    <ClCompile Include="..\..\Core\VCS\VCSBlips.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSRadar.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSInput.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSMemory.cpp" />
@@ -531,7 +530,6 @@
     <ClInclude Include="..\..\Core\VCS\VCSAddresses.h" />
     <ClInclude Include="..\..\Core\VCS\VCSFrontEnd.h" />
     <ClInclude Include="..\..\Core\VCS\VCSRoute.h" />
-    <ClInclude Include="..\..\Core\VCS\VCSBlips.h" />
     <ClInclude Include="..\..\Core\VCS\VCSRadar.h" />
     <ClInclude Include="..\..\Core\VCS\VCSGame.h" />
     <ClInclude Include="..\..\Core\VCS\VCSInput.h" />

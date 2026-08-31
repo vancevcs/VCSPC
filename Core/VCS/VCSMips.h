@@ -19,7 +19,7 @@
 // sidesteps the limitation, and copies the game's own calling convention rather than assuming one.
 //
 // Encoders only - no state, no allocation. Where the programs live and how they are called is each
-// caller's business; see VCSWorld.h for the ground probe and VCSBlips.h for the route markers.
+// caller's business; see VCSWorld.h for the ground probe, which is what uses these now.
 
 namespace VCS {
 

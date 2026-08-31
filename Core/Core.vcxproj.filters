@@ -246,9 +246,6 @@
     <ClCompile Include="VCS\VCSRoute.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
-    <ClCompile Include="VCS\VCSBlips.cpp">
-      <Filter>VCS</Filter>
-    </ClCompile>
     <ClCompile Include="VCS\VCSRadar.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -1579,9 +1576,6 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSRoute.h">
-      <Filter>VCS</Filter>
-    </ClInclude>
-    <ClInclude Include="VCS\VCSBlips.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSRadar.h">

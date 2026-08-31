@@ -35,7 +35,6 @@
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSState.h"
 #include "Core/VCS/VCSFrontEnd.h"
-#include "Core/VCS/VCSBlips.h"
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSRoute.h"
 #include "Core/VCS/VCSVault.h"
@@ -1486,16 +1485,6 @@ void ImVCSWindow::DrawRoute() {
 	ImGui::SliderFloat("Radar centre Y", &rs.centreY, 0.0f, 272.0f, "%.1f");
 	ImGui::SliderFloat("Radar radius", &rs.radius, 4.0f, 120.0f, "%.1f");
 	ImGui::SliderFloat("Line thickness", &rs.thickness, 0.5f, 8.0f, "%.2f");
-
-	ImGui::Separator();
-
-	VCS::VCSBlipSettings &bs = VCS::BlipSettings();
-	ImGui::Checkbox("Mark the route on the radar (old blip markers)", &bs.showRoute);
-	ImGui::SameLine();
-	ImGui::Text("(maker: %s, %d placed, %d slots free)", VCS::BlipStatus(),
-		VCS::RouteBlipCount(), VCS::FreeBlipSlots());
-	ImGui::InputInt("Markers", &bs.maxMarkers);
-	ImGui::InputFloat("Spacing", &bs.spacing);
 
 	const std::vector<VCS::RoutePoint> route = VCS::RouteToWaypoint();
 	VCS::RoutePoint player{}, marker{};

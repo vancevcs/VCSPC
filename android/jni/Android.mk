@@ -711,7 +711,6 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/VCS/VCSCheats.cpp.arm \
   $(SRC)/Core/VCS/VCSFrontEnd.cpp.arm \
   $(SRC)/Core/VCS/VCSRoute.cpp.arm \
-  $(SRC)/Core/VCS/VCSBlips.cpp.arm \
   $(SRC)/Core/VCS/VCSRadar.cpp.arm \
   $(SRC)/Core/VCS/VCSFireHook.cpp.arm \
   $(SRC)/Core/VCS/VCSGame.cpp.arm \
