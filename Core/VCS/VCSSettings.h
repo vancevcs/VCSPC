@@ -54,6 +54,10 @@ enum class OptionPage {
 	Aiming,
 	Audio,
 	Graphics,
+	// The things the fork ADDS to the game, as opposed to the ways it lets you drive it. Every
+	// row here turns one of this port's own inventions off and hands that behaviour back to the
+	// PSP game, which is the honest test for what belongs on the page.
+	Gameplay,
 };
 
 struct Option {

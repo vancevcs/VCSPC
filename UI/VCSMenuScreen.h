@@ -58,6 +58,8 @@ enum class VCSMenuPage {
 	Aiming,
 	Audio,
 	Graphics,
+	// What this port adds to the game, each row a switch that hands one of them back.
+	Gameplay,
 
 	// The read-only controls listing: the device switch and a menu of the four situations, then
 	// a page of bindings for each. Nothing on those pages can be edited - they are a reference

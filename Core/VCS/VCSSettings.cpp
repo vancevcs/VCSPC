@@ -26,8 +26,11 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
+#include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSInput.h"
+#include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSSettings.h"
+#include "Core/VCS/VCSVault.h"
 
 namespace VCS {
 
@@ -74,7 +77,8 @@ const std::vector<Option> &Options() {
 
 		auto addBool = [&opts](OptionPage page, const char *iniKey, const char *label,
 				const char *help, bool *value, bool external = false,
-				bool defaultValue = false) {
+				bool defaultValue = false, void (*onChange)() = nullptr,
+				std::string (*valueText)(const Option &) = nullptr) {
 			Option opt{};
 			opt.page = page;
 			opt.type = OptionType::Bool;
@@ -83,6 +87,10 @@ const std::vector<Option> &Options() {
 			opt.help = help;
 			opt.boolValue = value;
 			opt.external = external;
+			opt.onChange = onChange;
+			// A flag that does not read as ON and OFF. Texture quality is the case it was added
+			// for: it is one bool, and what it means to a player is HIGH and LOW.
+			opt.valueText = valueText;
 			// For a setting we own, the compiled-in value IS the default and capturing it here is
 			// right. For one PPSSPP owns, the live value at table-build time is whatever the user
 			// last saved, so capturing it would make "restore defaults" mean "restore what I had
@@ -292,6 +300,46 @@ const std::vector<Option> &Options() {
 			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
 			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
+
+		// The HD pack, under the name a player would look for it by. It is PPSSPP's texture
+		// replacement underneath - the same flag its own developer tools expose - and this is the
+		// one place in this port where that switch is a GAME setting rather than a developer one:
+		// with a pack installed it is the difference between the PSP's textures and this port's,
+		// which is most of what "PC version" means from three feet away.
+		//
+		// HIGH and LOW rather than ON and OFF, because nobody chooses "texture replacement off";
+		// they choose the lower setting when the higher one costs too much.
+		//
+		// The change takes effect on the next frame rather than needing a restart:
+		// GPU_CONFIG_CHANGED makes the GPU clear its texture cache and re-ask the replacer what
+		// it has, which is exactly what happens when the same flag is flipped in PPSSPP's own
+		// settings.
+		addBool(OptionPage::Graphics, nullptr, "Texture quality",
+			"HIGH uses the installed HD texture pack. LOW draws the PSP's own textures.",
+			&g_Config.bReplaceTextures, true, true, []() {
+				System_PostUIMessage(UIMessage::GPU_CONFIG_CHANGED);
+			}, [](const Option &opt) {
+				return std::string(*opt.boolValue ? "HIGH" : "LOW");
+			});
+
+		// --- Gameplay ---
+		//
+		// Three switches, and what they have in common is the page's whole reason for existing:
+		// each one turns off something this port ADDED and hands that behaviour back to the game
+		// as Rockstar shipped it. None of them is a preference about how to drive the port - that
+		// is what the other four pages are - and none of them belongs on a page named after a
+		// device.
+		addBool(OptionPage::Gameplay, "Vaulting", "Vaulting",
+			"Pull up onto ledges and hop over fences with the jump button. The PSP game cannot "
+			"climb at all.",
+			&VaultSettings().enabled);
+		addBool(OptionPage::Gameplay, "AutoSave", "Auto-save",
+			"Save after every story mission, over the auto-save slot. Starting the game always "
+			"loads the most recent save, whichever it is.",
+			&FrontEndSettings().autoSaveOnMissionPassed);
+		addBool(OptionPage::Gameplay, "GPS", "GPS route",
+			"Draw a route to your marker on the radar, along the roads the game itself uses.",
+			&RadarSettings().drawRoute);
 
 		return opts;
 	}();

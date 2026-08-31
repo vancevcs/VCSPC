@@ -54,6 +54,7 @@ TITLES = {
     "pedestrians": "Pedestrians",
     "world": "World",
     "options": "Options",
+    "gameplay": "Gameplay",
     "controllersetup": "Controller Setup",
     "mousesettings": "Mouse Settings",
     "keybindings": "Key Bindings",
