@@ -460,10 +460,14 @@ void ResetPage(OptionPage page) {
 		case OptionType::Int:
 		case OptionType::Choice:
 			*opt.intValue = opt.defaultInt;
-			if (opt.onChange) {
-				opt.onChange();
-			}
 			break;
+		}
+		// Fired for every type, not just the numeric ones. Restoring a page's defaults moves
+		// the same values the controls move, so it owes the same notifications -- a reset that
+		// turned texture quality back on without telling the GPU would leave the page reading
+		// HIGH over the PSP's own textures.
+		if (opt.onChange) {
+			opt.onChange();
 		}
 	}
 }
@@ -514,6 +518,22 @@ void SetInt(const Option &opt, int value) {
 	*opt.intValue = value;
 	// Only on a real change: dragging the strip calls this every frame, and resizing the
 	// framebuffer once per frame for a value that did not move is not free.
+	if (opt.onChange) {
+		opt.onChange();
+	}
+}
+
+void SetBool(const Option &opt, bool value) {
+	if (opt.type != OptionType::Bool) {
+		return;
+	}
+	if (value == *opt.boolValue) {
+		return;
+	}
+	*opt.boolValue = value;
+	// Only on a real change, for the same reason SetInt is careful about it: onChange is where
+	// the expensive consequences live, and a click that lands on the value already showing is
+	// not a change.
 	if (opt.onChange) {
 		opt.onChange();
 	}

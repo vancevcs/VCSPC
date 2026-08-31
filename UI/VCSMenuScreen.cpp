@@ -325,7 +325,7 @@ void VCSMenuItem::Adjust(int direction) {
 	}
 	switch (option_->type) {
 	case VCS::OptionType::Bool:
-		*option_->boolValue = !*option_->boolValue;
+		VCS::SetBool(*option_, !*option_->boolValue);
 		break;
 	case VCS::OptionType::Float:
 		// One block per press for the block-rendered values, so the readout and the control
@@ -454,7 +454,7 @@ void VCSMenuItem::ClickInternal() {
 	// Clicking a toggle flips it. Block-rendered values are edited through the strip and the
 	// arrow keys, so a click elsewhere on one deliberately does nothing.
 	if (option_ && IsEnabled() && option_->type == VCS::OptionType::Bool) {
-		*option_->boolValue = !*option_->boolValue;
+		VCS::SetBool(*option_, !*option_->boolValue);
 	}
 	UI::ClickableItem::ClickInternal();
 }

@@ -174,6 +174,12 @@ void SetNormalized(const Option &opt, float t);
 // stays correct no matter which control moved it.
 void SetInt(const Option &opt, int value);
 
+// The same write path for Bool, and it exists for the same reason. A toggle that flips
+// boolValue directly changes what the menu reads back without telling anything else, which for
+// a setting the GPU has to hear about -- texture quality is the one -- means the label moves to
+// LOW while the frame carries on being drawn with the HD pack.
+void SetBool(const Option &opt, bool value);
+
 // What the right-hand column shows: "ON", "OFF", "63", or a formatted value.
 std::string ValueText(const Option &opt);
 
