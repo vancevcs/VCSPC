@@ -297,13 +297,16 @@ std::vector<int> FindRoute(int fromNode, int toNode) {
 	return path;
 }
 
-std::vector<RoutePoint> RouteToWaypoint() {
+std::vector<RoutePoint> RouteToWaypoint(bool *isMission) {
 	std::vector<RoutePoint> out;
+	if (isMission) {
+		*isMission = false;
+	}
 	if (!EnsureGraph()) {
 		return out;
 	}
 	float wpx = 0.0f, wpy = 0.0f;
-	if (!FindWaypoint(&wpx, &wpy)) {
+	if (!FindRouteDestination(&wpx, &wpy, isMission)) {
 		return out;
 	}
 	const std::optional<u32> player = ReadAddrU32(VCSAddr::PlayerBase);

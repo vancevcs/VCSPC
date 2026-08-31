@@ -99,7 +99,9 @@ std::vector<int> FindRoute(int fromNode, int toNode);
 
 // The whole job in one call: from where the player is to where the marker is, as world points
 // ready to draw. Empty when there is no marker, no graph, or no path between them.
-std::vector<RoutePoint> RouteToWaypoint();
+// `isMission` may be null; it says whether the route went to the game's objective marker rather
+// than to a marker the player dropped, which is what the line's colour is picked from.
+std::vector<RoutePoint> RouteToWaypoint(bool *isMission = nullptr);
 
 // Read one road node's position, and one of its links. For drawing the network itself - the
 // debugger's map view uses these to show the roads the route was found over, which is what turns

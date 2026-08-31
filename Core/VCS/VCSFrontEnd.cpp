@@ -44,17 +44,36 @@ bool MenuOnTabStrip() {
 	return ReadAddrBool(VCSAddr::MenuUseRoot).value_or(true);
 }
 
-bool FindWaypoint(float *x, float *y) {
+// Find a blip of one kind. The NEAREST one rather than the first, which only matters for mission
+// markers - a mission can have several up at once, and the one you are being sent to next is the
+// one closest to you. There is only ever a single dropped waypoint, so it costs nothing there.
+static bool FindBlipOfType(u32 wantType, float *x, float *y, bool requireNoIcon = false) {
 	const std::optional<u32> store = ReadAddrU32(VCSAddr::BlipManager);
 	if (!store || *store == 0) {
 		return false;
 	}
+	float px = 0.0f, py = 0.0f;
+	bool havePlayer = false;
+	if (const std::optional<u32> pb = ReadAddrU32(VCSAddr::PlayerBase)) {
+		const std::optional<float> fx = ReadFloat(*pb + kVCSEntityPositionOffset);
+		const std::optional<float> fy = ReadFloat(*pb + kVCSEntityPositionOffset + 4);
+		if (fx && fy) { px = *fx; py = *fy; havePlayer = true; }
+	}
+
+	bool found = false;
+	float bestSq = 0.0f;
 	for (int i = 0; i < kVCSBlipMaxEntries; i++) {
 		const u32 entry = *store + kVCSBlipArray + (u32)i * kVCSBlipStride;
 		const std::optional<u32> type = ReadU32(entry + kVCSBlipType);
 		const std::optional<u32> active = ReadU32(entry + kVCSBlipActive);
-		if (!type || !active || *type != kVCSBlipMarkerType || *active == 0) {
+		if (!type || !active || *type != wantType || *active == 0) {
 			continue;
+		}
+		if (requireNoIcon) {
+			const std::optional<u8> icon = ReadU8(entry + kVCSBlipIcon);
+			if (!icon || *icon != 0) {
+				continue;
+			}
 		}
 		const std::optional<float> bx = ReadFloat(entry + kVCSBlipX);
 		const std::optional<float> by = ReadFloat(entry + kVCSBlipY);
@@ -66,8 +85,52 @@ bool FindWaypoint(float *x, float *y) {
 		if (*bx < -4000.0f || *bx > 4000.0f || *by < -4000.0f || *by > 4000.0f) {
 			continue;
 		}
-		*x = *bx;
-		*y = *by;
+		const float dx = *bx - px;
+		const float dy = *by - py;
+		const float d = havePlayer ? (dx * dx + dy * dy) : 0.0f;
+		if (!found || d < bestSq) {
+			found = true;
+			bestSq = d;
+			*x = *bx;
+			*y = *by;
+		}
+		if (!havePlayer) {
+			break;   // no way to rank them; first will do
+		}
+	}
+	return found;
+}
+
+bool FindWaypoint(float *x, float *y) {
+	return FindBlipOfType(kVCSBlipMarkerType, x, y);
+}
+
+bool FindMissionMarker(float *x, float *y) {
+	// The icon test is what makes this "a mission is sending you somewhere" rather than "the game
+	// has an objective marker up" - see the note over kVCSBlipIcon.
+	return FindBlipOfType(kVCSBlipMissionType, x, y, true);
+}
+
+bool FindRouteDestination(float *x, float *y, bool *isMission) {
+	const bool preferMission = FrontEndSettings().preferMissionMarker;
+	if (isMission) {
+		*isMission = false;
+	}
+	if (preferMission && FindMissionMarker(x, y)) {
+		if (isMission) {
+			*isMission = true;
+		}
+		return true;
+	}
+	if (FindWaypoint(x, y)) {
+		return true;
+	}
+	// Only reached when the preference is off: the dropped marker wins, and the mission is the
+	// fallback rather than the other way round.
+	if (FindMissionMarker(x, y)) {
+		if (isMission) {
+			*isMission = true;
+		}
 		return true;
 	}
 	return false;

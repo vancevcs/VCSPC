@@ -1505,10 +1505,24 @@ void ImVCSWindow::DrawRoute() {
 		const std::optional<float> py = VCS::ReadFloat(*pb + VCS::kVCSEntityPositionOffset + 4);
 		if (px && py) { player = {*px, *py, 0.0f}; havePlayer = true; }
 	}
+	bool markerIsMission = false;
 	{
 		float wx = 0.0f, wy = 0.0f;
-		if (VCS::FindWaypoint(&wx, &wy)) { marker = {wx, wy, 0.0f}; haveMarker = true; }
+		if (VCS::FindRouteDestination(&wx, &wy, &markerIsMission)) {
+			marker = {wx, wy, 0.0f}; haveMarker = true;
+		}
 	}
+	{
+		// Both, separately, so it is obvious which one the route picked and which one it passed over.
+		float mx = 0.0f, my = 0.0f, px = 0.0f, py = 0.0f;
+		const bool haveMission = VCS::FindMissionMarker(&mx, &my);
+		const bool havePoint = VCS::FindWaypoint(&px, &py);
+		ImGui::Text("mission %s   waypoint %s   routing to %s",
+			haveMission ? "yes" : "-", havePoint ? "yes" : "-",
+			!haveMarker ? "nothing" : (markerIsMission ? "the mission" : "the waypoint"));
+	}
+	ImGui::Checkbox("Mission marker wins over a dropped waypoint",
+		&VCS::FrontEndSettings().preferMissionMarker);
 
 	if (route.empty()) {
 		if (!haveMarker) {

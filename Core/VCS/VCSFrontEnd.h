@@ -203,6 +203,24 @@ struct VCSFrontEndSettings {
 	// an inference from one observation, not a measurement: if a notch zooms the wrong way, swap
 	// them here rather than anywhere else.
 	bool mapZoomWithWheel = true;
+
+	// Route to the game's objective marker ahead of a marker the player dropped, when both are up.
+	//
+	// ON, by request, and there is a known rough edge in it that is worth stating rather than
+	// leaving to be rediscovered. `0x66` is not "a mission is sending you somewhere" - it is the
+	// game's current OBJECTIVE marker, and between jobs the game keeps one pointing at the
+	// player's safe house. So outside a mission this preference routes to that hint rather than
+	// to a waypoint, which is a real complaint that has already been made once.
+	//
+	// The two cannot be told apart by kind: the safe-house hint carries the same flag byte and the
+	// same empty icon id as a live mission target. Separating them needs either a field that
+	// differs between the two - which wants one dump of the store taken while NOT on a mission,
+	// to compare against the mid-mission one that identified `0x66` in the first place - or an
+	// "is a mission running" script global, which has not been hunted for.
+	//
+	// Until then this is a straight preference, and turning it off gives waypoint-first with the
+	// objective marker as the fallback.
+	bool preferMissionMarker = true;
 	int zoomInFrames = 2;
 
 	bool mapWaypoint = true;
@@ -315,6 +333,15 @@ void RequestCloseGameMenu();
 // Scans the blip store for an entry of the marker's type rather than reading a fixed slot - see
 // the constants in VCSAddresses.h for why that distinction cost a wrong route once already.
 bool FindWaypoint(float *x, float *y);
+
+// Where the mission is sending the player - the pink dot. The nearest one, because a mission can
+// have several markers up and the next objective is the close one.
+bool FindMissionMarker(float *x, float *y);
+
+// What the GPS should actually route to, resolving the two against each other by way of
+// `preferMissionMarker`. `isMission` may be null; it says which of the two won, for the debugger
+// and for anything that wants to colour the line differently.
+bool FindRouteDestination(float *x, float *y, bool *isMission);
 
 // Ask the front end to open its SAVE menu, the way script opcode `0260 activate_save_menu` does -
 // by setting the request flag the front end polls. This one really is a single write, and it is

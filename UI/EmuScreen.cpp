@@ -1944,6 +1944,9 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 		                  ox + s.centreX * sx, oy + (s.centreY + 4.0f) * sy, 1.0f, 0xC0FFFFFF);
 	}
 
+	// Which destination this line is going to decides its colour.
+	const uint32_t lineColor = VCS::RouteIsMission() ? s.missionLineColor : s.lineColor;
+
 	// Drawn twice: a dark casing first, then the line over it. The radar's own artwork is busy and
 	// a single bright stroke disappears against the road tiles wherever they happen to be pale.
 	for (const VCS::RadarSegment &g : segments) {
@@ -1952,7 +1955,7 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 	}
 	for (const VCS::RadarSegment &g : segments) {
 		ctx->Draw()->Line(white, ox + g.x1 * sx, oy + g.y1 * sy,
-		                  ox + g.x2 * sx, oy + g.y2 * sy, thickness, COLOR(s.lineColor));
+		                  ox + g.x2 * sx, oy + g.y2 * sy, thickness, COLOR(lineColor));
 	}
 
 	// And the player's arrow back on top of it. The radar turns with the player, so the arrow

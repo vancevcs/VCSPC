@@ -343,7 +343,37 @@ inline constexpr u32 kVCSBlipActive = 0x04;
 inline constexpr u32 kVCSBlipX = 0x10;
 inline constexpr u32 kVCSBlipY = 0x14;
 inline constexpr u32 kVCSBlipType = 0x20;
+// The byte at +0x20 is flags, and its value sorts a blip into a kind. Three are known, read off a
+// live store with a mission running:
+//
+//   0x56  the marker the player drops on the pause map
+//   0x66  a mission destination - a coord blip with no icon id, drawn as a plain coloured marker,
+//         which is the pink dot a mission points you at
+//   0x7e  a permanent map icon: shops, safe houses, the things with their own artwork
+//
+// The low bits are shared and are set by the creator itself (0x02 on create, 0x04 in use), so the
+// kind lives in the high ones. Matched whole rather than by bit, because which bit means what is
+// not established and a wrong mask would quietly pick up the safe houses - which is exactly the
+// bug that had the route pointing at one.
 inline constexpr u32 kVCSBlipMarkerType = 0x56;
+inline constexpr u32 kVCSBlipMissionType = 0x66;
+
+// The icon a blip draws, and the field that separates a live mission destination from the hint the
+// game leaves pointing at your safe house between jobs. Both are `0x66`; measured, the difference
+// is here:
+//
+//   mid-mission, being sent somewhere   +0x20 = 0x66   +0x29 = 0x00
+//   between jobs, go-home hint          +0x20 = 0x66   +0x29 = 0x06
+//
+// A blip with an icon is a PLACE - a shop, a safe house, the character who starts the next job -
+// and it has artwork of its own. A mission destination is a bare coordinate with no icon, which is
+// precisely why it draws as a plain coloured dot. So "objective marker with no icon" is the live
+// one, and requiring the zero is what stops the GPS overriding a dropped waypoint to send the
+// player home.
+//
+// If a mission ever marks its destination WITH an icon, this stops matching it and the route falls
+// back to the waypoint - which is a quiet failure rather than a wrong one.
+inline constexpr u32 kVCSBlipIcon = 0x29;
 inline constexpr u32 kVCSBlipSerial = 0x2a;      // u16; the high half of a blip handle
 
 // 75 slots, and "in use" is bit 2 of the type byte. Both come from the creator's own free-slot
@@ -359,6 +389,37 @@ inline constexpr u32 kVCSBlipInUseBit = 0x04;
 
 // From the radar object, which is the same object as the blip store. The range is the world
 // radius the radar shows, and it changes with the zoom - 96.0 at the default.
+// Whether the HUD - and therefore the radar - is on screen at all.
+//
+// `+0x2436` is the FIRST thing the HUD draw reads and a zero returns immediately, so it is
+// reVC's CHud::m_Wants_To_Draw_Hud by behaviour if not by name. Two further gates sit just
+// below it, and `+0x2be8 == 2` is the one of them that is a plain field rather than a call.
+//
+// This is what a cutscene turns off. Without it the route line and the player arrow went on
+// being drawn over a screen with no radar under them - which is the one failure mode an overlay
+// painted onto the finished frame cannot notice by itself.
+// The one field that tracked a cutscene, and it was found by diffing rather than by reasoning.
+//
+// The three gates the HUD draw actually tests were all chased down and NONE of them is this:
+//   +0x2436          read first, zero returns immediately - stayed 1 across a whole cutscene
+//   +0x2be8 == 2     never took the value 2
+//   FrontEndMenuManager+0x20 != 0        that is MenuActive, handled separately
+//   *(float*)(CCamera+0xa54) == 255.0    a full fade to black, not a cutscene
+//
+// So the HUD draw runs during a cutscene and the radar is suppressed somewhere below it. Rather
+// than guess a fourth time, all 11328 bytes of the HUD object were sampled four times a second
+// for five minutes with one cutscene in the middle. Exactly one non-text field went to zero for
+// the cutscene's duration and was non-zero either side of it: this one.
+//
+// It is a CORRELATION over a single cutscene, not a gate anyone has read in the code, and it is
+// labelled that way on purpose. If the line ever hides during ordinary play, this is the reason
+// and removing it costs nothing.
+inline constexpr u32 kVCSHudCutscene = 0x0c;
+
+inline constexpr u32 kVCSHudDrawFlag = 0x2436;
+inline constexpr u32 kVCSHudSuppressState = 0x2be8;
+inline constexpr u32 kVCSHudSuppressValue = 2;
+
 inline constexpr u32 kVCSRadarRange = 0x1ab8;
 
 inline constexpr u32 kVCSMapPanX = 0xc0;
@@ -517,6 +578,7 @@ enum class VCSAddr {
 
 	// The radar's own view of the world, for drawing a route line over it. Read out of the
 	// transform at 0x0880edb0 - see VCSRadar.h for the arithmetic these three feed.
+	HudObject,         // Pointer to the HUD. Says whether it is drawing itself at all.
 	RadarOrigin,       // Two floats: the world point the radar is centred on. Tracks the player.
 	RadarForward,      // Two floats: a unit vector, the direction the radar treats as up.
 
@@ -743,6 +805,10 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// gp+0x1744 and gp+0x174c, found by sweeping the globals for a float pair that tracked the
 	// player and then confirmed from the code: 0x0880edb0 loads exactly these two pairs, and the
 	// second reads as a unit vector to four decimal places.
+	// gp+0x16d8, four bytes before the blip store. Traced from the radar draw at 0x0880d548 up
+	// through its single caller each time - HUD draw 0x089bd32c, HUD update 0x089ba6ec - to
+	// 0x08936530, which loads it from here and passes it down as `this`.
+	{ VCSAddr::HudObject,     "HudObject",     VCSAddrType::U32,   0x08bb3438,    kNoBase,              "gp+0x16d8. CHud. +0x2436 is whether it draws at all" },
 	{ VCSAddr::RadarOrigin,   "RadarOrigin",   VCSAddrType::Float, 0x08bb34a4,    kNoBase,              "gp+0x1744. Radar centre in world units; Y follows at +4" },
 	{ VCSAddr::RadarForward,  "RadarForward",  VCSAddrType::Float, 0x08bb34ac,    kNoBase,              "gp+0x174c. Unit vector the radar rotates by; Y follows at +4" },
 	{ VCSAddr::MenuUseRoot,   "MenuUseRoot",   VCSAddrType::U8,    0x08bc911e,    kNoBase,              "FrontEndMenuManager+0x1e. 1 = focus on the tab strip, 0 = inside the page" },

@@ -76,6 +76,11 @@ struct VCSRadarSettings {
 	// the mission arrows are drawn in, so the route reads as part of the HUD rather than as
 	// something bolted over it.
 	u32 lineColor = 0xCE3C37;
+
+	// The objective marker gets its own colour, so the line says which of the two it is going to
+	// without anyone having to open the debugger to find out. Matched to the pink the game draws
+	// that marker in.
+	u32 missionLineColor = 0xC7719A;
 	float thickness = 1.0f;
 
 	// Redraw the game's own player marker over the top of the line.
@@ -115,6 +120,14 @@ void GetRouteSegments(std::vector<RadarSegment> *out);
 // it was going. The arrow has to show the car's heading relative to the camera's, or it ends up
 // tracking the mouse instead of the driving. Returns false when the facing could not be read.
 bool GetPlayerFacing(float *angle);
+
+// Render thread. Whether this frame's line is going to the objective marker rather than to a
+// dropped waypoint - which colour to draw it in.
+bool RouteIsMission();
+
+// Whether the game is drawing its HUD - and so its radar - at all. False during cutscenes, which
+// is the one state where everything else this reads stays valid while the radar is gone.
+bool RadarOnScreen();
 
 // For the debugger: what the transform last read, and why nothing is drawing if nothing is.
 const char *RadarStatus();

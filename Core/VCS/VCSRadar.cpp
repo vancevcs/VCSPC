@@ -27,10 +27,12 @@ std::mutex g_lock;
 std::vector<RadarSegment> g_segments;   // guarded by g_lock
 float g_facing = 0.0f;                  // guarded by g_lock
 bool g_haveFacing = false;              // guarded by g_lock
+bool g_isMission = false;               // guarded by g_lock
 
 // The route, in world units. Held between recomputes because A* over three thousand nodes is not
 // a per-frame cost, and the projection that IS per-frame is a dozen multiplies a point.
 std::vector<RoutePoint> g_route;
+bool g_routeIsMission = false;
 int g_recompute = 0;
 
 const char *g_status = "idle";
@@ -77,6 +79,31 @@ bool ClipToDisc(float x0, float y0, float x1, float y1,
 }
 
 }  // namespace
+
+bool RadarOnScreen() {
+	const std::optional<u32> hud = ReadAddrU32(VCSAddr::HudObject);
+	if (!hud || *hud == 0) {
+		// No HUD object to ask. Draw rather than hide: an overlay that vanishes because an address
+		// went stale is a worse failure than one that stays up a moment too long, and every other
+		// address in this fork degrades the same way.
+		return true;
+	}
+	const std::optional<u8> wants = ReadU8(*hud + kVCSHudDrawFlag);
+	if (wants && *wants == 0) {
+		return false;
+	}
+	const std::optional<u32> suppress = ReadU32(*hud + kVCSHudSuppressState);
+	if (suppress && *suppress == kVCSHudSuppressValue) {
+		return false;
+	}
+	// The measured one - see the note over kVCSHudCutscene. Last because it is the least
+	// understood of the four, so anything the documented gates can answer, they answer first.
+	const std::optional<u32> cutscene = ReadU32(*hud + kVCSHudCutscene);
+	if (cutscene && *cutscene == 0) {
+		return false;
+	}
+	return true;
+}
 
 VCSRadarSettings &RadarSettings() {
 	return g_settings;
@@ -127,9 +154,19 @@ void RadarTick() {
 		return;
 	}
 
+	// And nothing at all while the HUD is hidden. A cutscene takes the radar away without taking
+	// the world away, so every other signal this uses - origin, facing, range - stays perfectly
+	// valid and the line would go on being drawn over nothing.
+	if (!RadarOnScreen()) {
+		std::lock_guard<std::mutex> guard(g_lock);
+		g_segments.clear();
+		g_status = "hud hidden";
+		return;
+	}
+
 	if (--g_recompute <= 0) {
 		g_recompute = kRecomputeTicks;
-		g_route = RouteToWaypoint();
+		g_route = RouteToWaypoint(&g_routeIsMission);
 	}
 
 	float ox, oy, fx, fy, range;
@@ -207,6 +244,7 @@ void RadarTick() {
 		g_segments.swap(built);
 		g_facing = facing;
 		g_haveFacing = haveFacing;
+		g_isMission = g_routeIsMission;
 		g_status = g_segments.empty() ? "route off radar" : "drawing";
 	}
 }
@@ -214,6 +252,11 @@ void RadarTick() {
 void GetRouteSegments(std::vector<RadarSegment> *out) {
 	std::lock_guard<std::mutex> guard(g_lock);
 	*out = g_segments;
+}
+
+bool RouteIsMission() {
+	std::lock_guard<std::mutex> guard(g_lock);
+	return g_isMission;
 }
 
 bool GetPlayerFacing(float *angle) {
@@ -235,6 +278,8 @@ void RadarReset() {
 	g_route.clear();
 	g_haveFacing = false;
 	g_facing = 0.0f;
+	g_isMission = false;
+	g_routeIsMission = false;
 	g_recompute = 0;
 	g_status = "idle";
 }
