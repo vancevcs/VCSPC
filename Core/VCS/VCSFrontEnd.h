@@ -221,6 +221,23 @@ struct VCSFrontEndSettings {
 	// Until then this is a straight preference, and turning it off gives waypoint-first with the
 	// objective marker as the fallback.
 	bool preferMissionMarker = true;
+
+	// Replace the map's full-screen pink cross with a small one of our own. See the note over
+	// kVCSMapCrosshairCall for why the game's cannot simply be shrunk.
+	bool smallMapCursor = true;
+	float mapCursorArm = 7.0f;        // half-length of each arm, in PSP pixels
+	float mapCursorThickness = 1.0f;
+
+	// Put the map's cursor at the middle of the SCREEN rather than the middle of the widget.
+	//
+	// The two stopped being the same thing when the chrome fix stretched Map_AE to 400 rows to
+	// kill the black bar: the game puts its cursor at half the widget's height, so it sits at 200
+	// on a 272-row screen - about three quarters of the way down. This writes the widget's cursor
+	// offset at +0xd4 to make up the difference.
+	//
+	// It moves the GAME's cursor, not our drawing of it, which is the only version worth having -
+	// a cross drawn somewhere the marker does not land would be worse than one sitting low.
+	bool centreMapCursor = true;
 	int zoomInFrames = 2;
 
 	bool mapWaypoint = true;
@@ -342,6 +359,17 @@ bool FindMissionMarker(float *x, float *y);
 // `preferMissionMarker`. `isMission` may be null; it says which of the two won, for the debugger
 // and for anything that wants to colour the line differently.
 bool FindRouteDestination(float *x, float *y, bool *isMission);
+
+// Per-frame, emu thread. Puts the game's crosshair away while the map is up and works out where
+// our own should go.
+void MapCursorTick();
+
+// Render thread. Where to draw our cross, in the PSP's 480x272 screen coordinates. False when the
+// map is not showing, or when the replacement is switched off.
+bool MapCursorScreen(float *x, float *y);
+
+// Undo the crosshair patch. Shutdown, and whenever the feature is turned off.
+void MapCursorReset();
 
 // Ask the front end to open its SAVE menu, the way script opcode `0260 activate_save_menu` does -
 // by setting the request flag the front end polls. This one really is a single write, and it is

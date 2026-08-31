@@ -422,6 +422,35 @@ inline constexpr u32 kVCSHudSuppressValue = 2;
 
 inline constexpr u32 kVCSRadarRange = 0x1ab8;
 
+// The map's cursor - the pink cross - and how it is put away.
+//
+// The whole crosshair is one call: `jal 0x0897bcc8` at 0x0897ba2c, inside the map's draw. That
+// helper draws two quads through 0x089d1b1c (build a rect) and 0x08af5130 (draw it), tinted by
+// 0x08a3550c(rect, 0xff, 0x8b, 0xc2, 0xb4) - RGBA 255,139,194,180, which is the pink on screen and
+// is how the helper was identified. Half-thickness is a literal 1.0 at 0x0897bd1c.
+//
+// Its extents are the screen, by construction rather than by data:
+//
+//   horizontal   x from 0 to Map_AE+0x14 (the widget's width), at centreY +/- 1
+//   vertical     y from 0 to screenHeight - 47,                 at centreX +/- 1
+//
+// so there is no field to shrink and nothing short of rewriting the arithmetic would make it
+// smaller. Nopping the one call removes all of it, which leaves a cross of our own free to be any
+// size - and is a single instruction to install and to undo.
+inline constexpr u32 kVCSMapCrosshairCall = 0x0897ba2c;
+
+// Where the cursor sits, which the same helper computes as
+//
+//   centre = (Map_AE.width / 2 + [0xd0],  Map_AE.height / 2 + [0xd4])
+//
+// in the PSP's own 480x272 screen coordinates. Both offsets read zero in play, so the cursor is
+// the middle of the WIDGET - and the widget's height is 400 because the chrome fix stretches it to
+// kill the black bar, which puts the cursor at y=200 on a 272-row screen rather than at 136. That
+// is where the game really does place a waypoint, so it is where our cross has to go: drawing at
+// the visual centre would put the cross somewhere the marker does not land.
+inline constexpr u32 kVCSMapCursorOffsetX = 0xd0;
+inline constexpr u32 kVCSMapCursorOffsetY = 0xd4;
+
 inline constexpr u32 kVCSMapPanX = 0xc0;
 inline constexpr u32 kVCSMapPanY = 0xc4;
 

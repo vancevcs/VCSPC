@@ -107,6 +107,7 @@ void Init() {
 	CameraReset();
 	CheatReset();
 	FrontEndReset();
+	MapCursorReset();
 	RouteReset();
 	RadarReset();
 	ClearRouteBlips();
@@ -216,6 +217,10 @@ void Tick() {
 	// And the bridge into the game's own front end, on the same terms and in the same place: it
 	// decides on this tick whether it owns the pad, and ApplyMapping has to already know.
 	FrontEndTick();
+
+	// The map's own cursor: put the game's full-screen cross away while the map is up, and work
+	// out where ours goes. Emu thread, because it patches an instruction and reads the widget.
+	MapCursorTick();
 
 	// The GPS line. RadarTick is the one that matters: it reads the radar's origin, facing and
 	// range, projects the route through the game's own transform and leaves screen-space segments

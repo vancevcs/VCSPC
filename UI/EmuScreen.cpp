@@ -1906,12 +1906,15 @@ static Draw::Texture *VCSPlayerIcon(UIContext *ctx) {
 
 static void DrawVCSRouteOverlay(UIContext *ctx) {
 	const VCS::VCSRadarSettings &s = VCS::RadarSettings();
-	if (!s.drawRoute) {
-		return;
-	}
 	std::vector<VCS::RadarSegment> segments;
-	VCS::GetRouteSegments(&segments);
-	if (segments.empty() && !s.showCalibration) {
+	if (s.drawRoute) {
+		VCS::GetRouteSegments(&segments);
+	}
+	// The map cursor is not part of the route and must not be gated on it - the map is usually
+	// open with no route to draw at all.
+	float cursorX = 0.0f, cursorY = 0.0f;
+	const bool haveCursor = VCS::MapCursorScreen(&cursorX, &cursorY);
+	if (segments.empty() && !haveCursor && !s.showCalibration) {
 		return;
 	}
 
@@ -1956,6 +1959,24 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 	for (const VCS::RadarSegment &g : segments) {
 		ctx->Draw()->Line(white, ox + g.x1 * sx, oy + g.y1 * sy,
 		                  ox + g.x2 * sx, oy + g.y2 * sy, thickness, COLOR(lineColor));
+	}
+
+	// The map's cursor, when the map is what is on screen. Drawn from the same rect mapping as
+	// everything else here, in the PSP's own 480x272 coordinates.
+	{
+		const float cx = cursorX, cy = cursorY;
+		const VCS::VCSFrontEndSettings &fs = VCS::FrontEndSettings();
+		if (haveCursor) {
+			const float arm = std::max(1.0f, fs.mapCursorArm);
+			const float th = std::max(1.0f, fs.mapCursorThickness * sy);
+			// The game's own pink, so the replacement reads as the same cursor rather than as
+			// something new bolted on: RGBA 255,139,194 at 180.
+			const uint32_t col = 0xB4C28BFF;
+			const float px = ox + cx * sx;
+			const float py = oy + cy * sy;
+			ctx->Draw()->Line(white, px - arm * sx, py, px + arm * sx, py, th, col);
+			ctx->Draw()->Line(white, px, py - arm * sy, px, py + arm * sy, th, col);
+		}
 	}
 
 	// And the player's arrow back on top of it. The radar turns with the player, so the arrow

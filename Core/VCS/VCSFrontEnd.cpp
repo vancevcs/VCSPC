@@ -24,6 +24,9 @@
 #include "Common/System/OSD.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Common/Input/KeyCodes.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/MemMap.h"
+#include <mutex>
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFrontEnd.h"
@@ -627,6 +630,74 @@ void PlaceWaypoint() {
 	}
 }
 
+namespace {
+
+// The nopped-out crosshair call, and where our replacement goes.
+bool g_crosshairPatched = false;
+u32 g_crosshairOriginal = 0;
+
+std::mutex g_cursorLock;
+bool g_haveCursor = false;         // guarded by g_cursorLock
+float g_cursorX = 0.0f;            // guarded by g_cursorLock
+float g_cursorY = 0.0f;            // guarded by g_cursorLock
+
+// Put the game's crosshair away, or bring it back.
+//
+// One instruction either way. The read goes through Memory::Read_Instruction rather than a raw
+// load because once a block has been compiled the raw word at its first instruction is PPSSPP's
+// own RUNBLOCK marker rather than the game's opcode - and the restore checks nothing else, so a
+// stored original that was really a marker would be written back as one.
+//
+// It refuses anything that is not the `jal` it expects. A wrong address here does not produce a
+// wrong crosshair, it produces a nop somewhere in the middle of the map's draw.
+void SetCrosshairHidden(bool hide) {
+	if (hide == g_crosshairPatched) {
+		return;
+	}
+	if (!Memory::IsValidAddress(kVCSMapCrosshairCall)) {
+		return;
+	}
+	if (hide) {
+		const MIPSOpcode op = Memory::Read_Instruction(kVCSMapCrosshairCall, true);
+		if ((op.encoding >> 26) != 3) {
+			return;
+		}
+		g_crosshairOriginal = op.encoding;
+		WriteU32(kVCSMapCrosshairCall, 0);
+		currentMIPS->InvalidateICache(kVCSMapCrosshairCall, 4);
+		g_crosshairPatched = true;
+	} else {
+		WriteU32(kVCSMapCrosshairCall, g_crosshairOriginal);
+		currentMIPS->InvalidateICache(kVCSMapCrosshairCall, 4);
+		g_crosshairPatched = false;
+	}
+}
+
+// The Map_AE widget, or 0. Same walk the drag uses.
+u32 MapWidget() {
+	const VCSFrontEndSettings &s = FrontEndSettings();
+	if (s.mapPage < 0) {
+		return 0;
+	}
+	const std::optional<u32> begin = ReadAddrU32(VCSAddr::MenuPagesBegin);
+	if (!begin) {
+		return 0;
+	}
+	const std::optional<u32> page = ReadU32(*begin + (u32)s.mapPage * 4);
+	if (!page || *page == 0) {
+		return 0;
+	}
+	char name[32];
+	for (u32 w : ChildWidgets(*page)) {
+		if (WidgetName(w, name, sizeof(name)) && strcmp(name, "Map_AE") == 0) {
+			return w;
+		}
+	}
+	return 0;
+}
+
+}  // namespace
+
 void MapDragTick() {
 	const VCSFrontEndSettings &s = FrontEndSettings();
 	if (!GameMenuActive() || MenuOnTabStrip()) {
@@ -852,6 +923,70 @@ void ChromeTick() {
 }
 
 }  // namespace
+
+void MapCursorTick() {
+	const VCSFrontEndSettings &s = FrontEndSettings();
+	const bool onMap = s.smallMapCursor && GameMenuActive() && s.mapPage >= 0 &&
+	                   GameMenuPage() == s.mapPage;
+
+	// Patched only while the map is actually up. The map's draw is the only caller, so leaving it
+	// nopped would be harmless - but a game whose code differs from ours only while a particular
+	// screen is open is far easier to reason about than one that is permanently altered.
+	SetCrosshairHidden(onMap);
+
+	if (!onMap) {
+		std::lock_guard<std::mutex> guard(g_cursorLock);
+		g_haveCursor = false;
+		return;
+	}
+
+	const u32 ae = MapWidget();
+	float x = 0.0f, y = 0.0f;
+	bool ok = false;
+	if (ae != 0) {
+		const std::optional<u32> w = ReadU32(ae + kVCSWidgetW);
+		const std::optional<u32> h = ReadU32(ae + kVCSWidgetH);
+		if (s.centreMapCursor && h) {
+			// Half the difference between the widget the game centres on and the screen actually
+			// shown. Written every frame while the map is up rather than once, because the widget
+			// is rebuilt when the page is entered and would take its zero back with it.
+			const float wanted = (float)kVCSScreenHeight * 0.5f - (float)((int)*h / 2);
+			const std::optional<float> now = ReadFloat(ae + kVCSMapCursorOffsetY);
+			if (now && *now != wanted) {
+				WriteFloat(ae + kVCSMapCursorOffsetY, wanted);
+			}
+		}
+		const std::optional<float> ox = ReadFloat(ae + kVCSMapCursorOffsetX);
+		const std::optional<float> oy = ReadFloat(ae + kVCSMapCursorOffsetY);
+		if (w && h && ox && oy) {
+			// The game's own arithmetic - see the note over kVCSMapCursorOffsetX.
+			x = (float)((int)*w / 2) + *ox;
+			y = (float)((int)*h / 2) + *oy;
+			ok = x > 0.0f && y > 0.0f && x < 1024.0f && y < 1024.0f;
+		}
+	}
+	std::lock_guard<std::mutex> guard(g_cursorLock);
+	g_haveCursor = ok;
+	g_cursorX = x;
+	g_cursorY = y;
+}
+
+bool MapCursorScreen(float *x, float *y) {
+	std::lock_guard<std::mutex> guard(g_cursorLock);
+	if (!g_haveCursor) {
+		return false;
+	}
+	*x = g_cursorX;
+	*y = g_cursorY;
+	return true;
+}
+
+void MapCursorReset() {
+	SetCrosshairHidden(false);
+	std::lock_guard<std::mutex> guard(g_cursorLock);
+	g_haveCursor = false;
+}
+
 
 u32 MapWaypointButtonMask() {
 	return g_waypointFrames > 0 ? (u32)CTRL_SQUARE : 0u;
