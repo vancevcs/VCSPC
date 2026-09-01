@@ -15,6 +15,7 @@
 #include "Core/HLE/Plugins.h"
 #include "Core/ControlMapper.h"
 #include "Core/Config.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/MemFault.h"
 #include "Core/Reporting.h"
 #include "Core/CwCheat.h"
@@ -486,18 +487,27 @@ void DrawFPS(UIContext *ctx, const Bounds &bounds) {
 	char temp[256];
 	StringWriter w(temp);
 
-	if ((g_Config.iShowStatusFlags & ((int)ShowStatusFlags::FPS_COUNTER | (int)ShowStatusFlags::SPEED_COUNTER)) == ((int)ShowStatusFlags::FPS_COUNTER | (int)ShowStatusFlags::SPEED_COUNTER)) {
+	int statusFlags = g_Config.iShowStatusFlags;
+	if (VCS::PresentAsGame()) {
+		// The menu's own row is the switch here, not PPSSPP's settings screen - which cannot be
+		// reached in the game build anyway. Replaces the flags outright rather than masking them,
+		// which also drops the speed half: "22/30 (71.6%)" is an emulator readout, and no game has
+		// a notion of running at a percentage of itself.
+		statusFlags = VCS::GameSettings().showFps ? (int)ShowStatusFlags::FPS_COUNTER : 0;
+	}
+
+	if ((statusFlags & ((int)ShowStatusFlags::FPS_COUNTER | (int)ShowStatusFlags::SPEED_COUNTER)) == ((int)ShowStatusFlags::FPS_COUNTER | (int)ShowStatusFlags::SPEED_COUNTER)) {
 		// Both at the same time gets a shorter formulation.
 		w.F("%0.0f/%0.0f (%0.1f%%)", actual_fps, fps, vps / ((g_Config.iDisplayRefreshRate / 60.0f * 59.94f) / 100.0f));
 	} else {
-		if (g_Config.iShowStatusFlags & (int)ShowStatusFlags::FPS_COUNTER) {
+		if (statusFlags & (int)ShowStatusFlags::FPS_COUNTER) {
 			w.F("FPS: %0.1f", actual_fps);
-		} else if (g_Config.iShowStatusFlags & (int)ShowStatusFlags::SPEED_COUNTER) {
+		} else if (statusFlags & (int)ShowStatusFlags::SPEED_COUNTER) {
 			w.F("Speed: %0.1f%%", vps / (59.94f / 100.0f));
 		}
 	}
 	if (System_GetPropertyBool(SYSPROP_CAN_READ_BATTERY_PERCENTAGE)) {
-		if (g_Config.iShowStatusFlags & (int)ShowStatusFlags::BATTERY_PERCENT) {
+		if (statusFlags & (int)ShowStatusFlags::BATTERY_PERCENT) {
 			const int percentage = System_GetPropertyInt(SYSPROP_BATTERY_PERCENTAGE);
 			// Just plain append battery. Add linebreak?
 			w.F(" Battery: %d%%", percentage);

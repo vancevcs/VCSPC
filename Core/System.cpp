@@ -58,6 +58,7 @@
 #include "Core/HLE/sceUtility.h"
 #include "Core/HW/Display.h"
 #include "Core/Config.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/Core.h"
 #include "Core/Util/PathUtil.h"
 #include "Core/CoreTiming.h"
@@ -414,7 +415,9 @@ static bool CPU_Init(FileLoader *fileLoader, IdentifiedFileType type, std::strin
 	}
 
 	const std::string id = g_paramSFO.GetValueString("DISC_ID");
-	const std::string windowTitle = id.empty() ? gameTitle : id + " : " + gameTitle;
+	// The disc ID is in the title because an emulator wants to know which disc is loaded.
+	// Presenting as the game, the title is just the game's name.
+	const std::string windowTitle = (id.empty() || VCS::PresentAsGame()) ? gameTitle : id + " : " + gameTitle;
 	INFO_LOG(Log::Loader, "%s", windowTitle.c_str());
 	System_SetWindowTitle(windowTitle);
 
@@ -456,7 +459,7 @@ static bool CPU_Init(FileLoader *fileLoader, IdentifiedFileType type, std::strin
 	g_fileLoggingWasEnabled = g_logManager.GetOutputsEnabled() & LogOutput::File;
 	g_logManager.EnableOutput(LogOutput::File, g_Config.bEnableFileLogging || g_fileLoggingWasEnabled);
 
-	if ((g_logManager.GetOutputsEnabled() & LogOutput::File) && !g_logManager.GetLogFilePath().empty()) {
+	if ((g_logManager.GetOutputsEnabled() & LogOutput::File) && !g_logManager.GetLogFilePath().empty() && !VCS::PresentAsGame()) {
 		auto dev = GetI18NCategory(I18NCat::DEVELOPER);
 
 		Path logPath = g_logManager.GetLogFilePath();

@@ -44,6 +44,7 @@
 
 #include "Core/Core.h"
 #include "Core/Config.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/ConfigValues.h"
 #include "Core/Debugger/SymbolMap.h"
 #include "Core/EmuThread.h"
@@ -108,6 +109,13 @@ struct VerySleepy_AddrInfo {
 
 static std::mutex g_windowTitleLock;
 static std::wstring g_windowTitle;
+
+// The menu bar is the most emulator-looking thing on screen, so it goes while presenting as
+// the game. Gated here rather than by forcing g_Config.bShowMenuBar, which IS saved - writing
+// it would take the menu bar away from the Debug build too, since both share the memstick.
+static bool ShowMenuBar() {
+	return g_Config.bShowMenuBar && !VCS::PresentAsGame();
+}
 
 #define TIMER_CURSORUPDATE 1
 #define TIMER_CURSORMOVEUPDATE 2
@@ -198,7 +206,7 @@ namespace MainWindow {
 		wcex.hInstance = hInstance;
 		wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
 		wcex.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);  // or NULL?
-		wcex.lpszMenuName = g_Config.bShowMenuBar ? (LPCWSTR)IDR_MENU1 : NULL;
+		wcex.lpszMenuName = ShowMenuBar() ? (LPCWSTR)IDR_MENU1 : NULL;
 		wcex.lpszClassName = szWindowClass;
 		wcex.hIcon = LoadIcon(hInstance, (LPCTSTR)IDI_PPSSPP);
 		wcex.hIconSm = (HICON)LoadImage(hInstance, (LPCTSTR)IDI_PPSSPP, IMAGE_ICON, 16, 16, LR_SHARED);
@@ -375,7 +383,7 @@ namespace MainWindow {
 
 			// Transitioning to Windowed
 			SetWindowLong(hWnd, GWL_STYLE, (prevStyle & ~WS_POPUP) | WS_OVERLAPPEDWINDOW);
-			if (g_Config.bShowMenuBar) {
+			if (ShowMenuBar()) {
 				SetMenu(hWnd, g_hMenu);
 			}
 
@@ -531,7 +539,7 @@ namespace MainWindow {
 		DwmSetWindowAttribute(hwndMain, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
 		ApplyFullscreenState(hwndMain, g_Config.bFullScreen);
 
-		if (!g_Config.bShowMenuBar) {
+		if (!ShowMenuBar()) {
 			SetMenu(hwndMain, NULL);
 		} else {
 			MainMenuInit(hwndMain, g_hMenu);
@@ -919,7 +927,7 @@ namespace MainWindow {
 						// and recalculate window decorations without actually changing the size of the window).
 						if (pos->cx != monWidth || pos->cy != monHeight) {
 							g_Config.bFullScreen = false;
-							if (GetMenu(hWnd) == NULL && g_Config.bShowMenuBar) {
+							if (GetMenu(hWnd) == NULL && ShowMenuBar()) {
 								SetMenu(hWnd, g_hMenu);
 							}
 							const DWORD style = GetWindowLong(hWnd, GWL_STYLE);

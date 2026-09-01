@@ -268,6 +268,35 @@ bool IsActive() {
 	return g_active;
 }
 
+VCSGameSettings &GameSettings() {
+	static VCSGameSettings settings;
+	return settings;
+}
+
+bool PresentAsGame() {
+#ifdef _DEBUG
+	// The Debug build is the workshop. It keeps the menu bar, the ImGui debugger and the
+	// overlays, because that is what every measurement and every address hunt is done with.
+	return false;
+#else
+	if (IsActive()) {
+		return true;
+	}
+	// The logo-screen decision is made before anything boots, so IsActive() cannot answer it
+	// yet. Fall back to whether a VCS disc is remembered - the same question CreateStartScreen
+	// asks, and it has to read the settings itself for the same reason.
+	//
+	// Memoised because the counters ask this every frame, and LoadSettings() reads a file. A
+	// session that had no disc at startup still becomes a game session once one boots, which
+	// is what the IsActive() check above is for.
+	static const bool discRemembered = []() {
+		LoadSettings();
+		return !GamePath().empty();
+	}();
+	return discRemembered;
+#endif
+}
+
 const std::string &GetDiscID() {
 	return g_discID;
 }

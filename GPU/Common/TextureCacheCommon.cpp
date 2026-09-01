@@ -627,7 +627,7 @@ TextureApplyResult TextureCacheCommon::ApplyTexture(bool doBind) {
 					// Didn't find a replacement, so stop looking.
 					DEBUG_LOG(Log::TexReplacement, "No replacement for texture %dx%d", w0, h0);
 					entry->status &= ~TexStatus::TO_REPLACE;
-					if (g_Config.bSaveNewTextures) {
+					if (replacer_.SaveEnabled()) {
 						// Load it once more to actually save it. Since we don't set STATUS_TO_REPLACE, we won't end up looping.
 						match = false;
 						reason = "replacing";

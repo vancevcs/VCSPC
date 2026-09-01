@@ -507,6 +507,11 @@ enum class CurtainKind {
 };
 CurtainKind AutoCurtain();
 
+// Take the curtain down from outside. Exported for the one caller that has to: a screen that
+// pauses the emulator, because CurtainTick runs on the emu thread and a curtain left up when
+// the world stops can never come down again - not even by its own vblank ceiling.
+void DropCurtain();
+
 // Whether the Back that just asked to close the game's menu wants THIS fork's menu afterwards.
 //
 // Escape does not - it means "put this away and let me play", which is one press and one level.

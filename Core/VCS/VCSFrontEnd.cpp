@@ -334,14 +334,6 @@ bool GameFrameAdvancedForCurtain() {
 	return true;
 }
 
-void DropCurtain() {
-	g_curtainKind.store((int)CurtainKind::None, std::memory_order_relaxed);
-	g_curtainSawSequence = false;
-	g_curtainSettle = 0;
-	g_curtainVblanks = 0;
-	g_haveCurtainFrame = false;
-}
-
 // Up, and with a word on it - or without one, for a menu transition. Raised where a sequence is
 // ASKED for rather than where it starts, so there is no frame of the game showing between this
 // fork's menu closing and the game's opening.
@@ -1138,6 +1130,17 @@ bool TakeNewGameBoot() {
 	const bool want = g_newGameBoot;
 	g_newGameBoot = false;
 	return want;
+}
+
+// Out here rather than in the anonymous namespace above, because the header declares it: the
+// two would be separate functions and every call inside this file becomes ambiguous. Exported
+// for VCSMenuScreen, which pauses the emulator and so has to take the curtain with it.
+void DropCurtain() {
+	g_curtainKind.store((int)CurtainKind::None, std::memory_order_relaxed);
+	g_curtainSawSequence = false;
+	g_curtainSettle = 0;
+	g_curtainVblanks = 0;
+	g_haveCurtainFrame = false;
 }
 
 CurtainKind AutoCurtain() {

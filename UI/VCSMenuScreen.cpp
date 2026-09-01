@@ -629,6 +629,14 @@ VCSMenuScreen::VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode
 	// it can afford to, because an axis carries its whole state in every event. A key does not -
 	// its release is a single event, and a dropped one is gone.
 	VCS::ResetHostKeys();
+
+	// And take any curtain down with it, for the same reason and with a sharper failure. This
+	// screen pauses the emulator, so CurtainTick stops - a curtain still up here stays up
+	// forever, including past its own vblank ceiling, and NativeKey swallows every non-UP key
+	// while it is. That reads as a menu that ignores the keyboard and the pad while still
+	// answering the mouse, which arrives by another path. Nothing is lost by dropping it: this
+	// menu is opaque, so it already hides everything the curtain was hiding.
+	VCS::DropCurtain();
 }
 
 void VCSMenuScreen::deviceLost() {
@@ -1256,7 +1264,16 @@ void VCSMenuScreen::update() {
 	}
 	if (pendingExit_) {
 		pendingExit_ = false;
-		TriggerFinish(DR_OK);  // DR_OK is "back to the game list".
+		if (VCS::PresentAsGame()) {
+			// QUIT GAME means quit. Handing back to the emulator's game browser is the right
+			// answer for PPSSPP and the wrong one for a PC game, and in the game build there is
+			// no browser to hand back TO - the disc boots straight into the world. Same call the
+			// main menu's own QUIT already makes.
+			System_ExitApp();
+		} else {
+			// The Debug build keeps the browser, so a different ISO is still one row away.
+			TriggerFinish(DR_OK);  // DR_OK is "back to the game list".
+		}
 		return;
 	}
 	if (pendingQuitApp_) {

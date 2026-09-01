@@ -49,6 +49,7 @@
 #include "Common/TimeUtil.h"
 
 #include "Core/Config.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/ConfigValues.h"
 #include "Core/CmdLine.h"
 #include "Core/SaveState.h"
@@ -677,14 +678,21 @@ bool System_MakeRequest(SystemRequestType type, int requestId, const std::string
 	}
 	case SystemRequestType::SET_WINDOW_TITLE:
 	{
-		const char *name = System_GetPropertyBool(SYSPROP_APP_GOLD) ? "PPSSPP Gold " : "PPSSPP ";
-		std::wstring winTitle = ConvertUTF8ToWString(std::string(name) + PPSSPP_GIT_VERSION);
-		if (!param1.empty()) {
-			winTitle.append(ConvertUTF8ToWString(" - " + param1));
-		}
+		std::wstring winTitle;
+		if (VCS::PresentAsGame()) {
+			// The window belongs to the game. param1 is the title read off the disc, and is
+			// empty only for the moment before that has happened.
+			winTitle = ConvertUTF8ToWString(param1.empty() ? "Grand Theft Auto: Vice City Stories" : param1);
+		} else {
+			const char *name = System_GetPropertyBool(SYSPROP_APP_GOLD) ? "PPSSPP Gold " : "PPSSPP ";
+			winTitle = ConvertUTF8ToWString(std::string(name) + PPSSPP_GIT_VERSION);
+			if (!param1.empty()) {
+				winTitle.append(ConvertUTF8ToWString(" - " + param1));
+			}
 #ifdef _DEBUG
-		winTitle.append(L" (debug)");
+			winTitle.append(L" (debug)");
 #endif
+		}
 		MainWindow::SetWindowTitle(winTitle.c_str());
 		return true;
 	}

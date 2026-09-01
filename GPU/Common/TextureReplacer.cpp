@@ -38,6 +38,7 @@
 #include "Common/Thread/ThreadManager.h"
 #include "Common/TimeUtil.h"
 #include "Core/Config.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/System.h"
 #include "Core/ELF/ParamSFO.h"
 #include "GPU/Common/TextureReplacer.h"
@@ -93,7 +94,11 @@ void TextureReplacer::NotifyConfigChanged() {
 
 	bool wasReplaceEnabled = replaceEnabled_;
 	replaceEnabled_ = g_Config.bReplaceTextures;
-	saveEnabled_ = g_Config.bSaveNewTextures;
+	// Dumping is a texture-pack authoring tool: it hashes, encodes and writes a PNG for every
+	// new texture the game shows. Never in the game build. Gated here rather than by forcing
+	// the setting, which IS saved - writing it would turn dumping off in the Debug build too,
+	// since both share this memstick.
+	saveEnabled_ = g_Config.bSaveNewTextures && !VCS::PresentAsGame();
 	if (replaceEnabled_ || saveEnabled_) {
 		basePath_ = GetSysDirectory(DIRECTORY_TEXTURES) / gameID_;
 		replaceEnabled_ = replaceEnabled_ && File::IsDirectory(basePath_);
@@ -223,7 +228,7 @@ bool TextureReplacer::LoadIni(std::string *error, bool notify) {
 	}
 
 	auto gr = GetI18NCategory(I18NCat::GRAPHICS);
-	if (replaceEnabled_ && notify) {
+	if (replaceEnabled_ && notify && !VCS::PresentAsGame()) {
 		g_OSD.Show(OSDType::MESSAGE_SUCCESS, gr->T("Texture replacement pack activated"), 3.0f);
 	}
 

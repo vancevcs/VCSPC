@@ -273,8 +273,8 @@ void EmuScreen::ProcessGameBoot(const Path &filename) {
 		break;
 	}
 
-	if (!g_Config.bShaderCache) {
-		// Only developers should ever see this.
+	if (!g_Config.bShaderCache && !VCS::PresentAsGame()) {
+		// Only developers should ever see this - and in the game build, not even them.
 		g_OSD.Show(OSDType::MESSAGE_WARNING, "Shader cache is disabled (developer)");
 	}
 
@@ -831,7 +831,9 @@ void EmuScreen::ProcessVKey(VirtKey virtKey, bool down) {
 		break;
 
 	case VIRTKEY_TEXTURE_DUMP:
-		if (down) {
+		// Refused while presenting as the game - dumping is an authoring tool, and this writes
+		// a saved setting that both builds share.
+		if (down && !VCS::PresentAsGame()) {
 			g_Config.bSaveNewTextures = !g_Config.bSaveNewTextures;
 			if (g_Config.bSaveNewTextures) {
 				g_OSD.Show(OSDType::MESSAGE_SUCCESS, sc->T("saveNewTextures_true", "Textures will now be saved to your storage"), 2.0, "savetexturechanged");
@@ -1481,8 +1483,14 @@ void EmuScreen::update() {
 	// The second half of Back: the game's menu has closed, so this fork's opens. Waits for the
 	// bridge to have finished as well as for the menu to be gone - the close is the last thing it
 	// was doing, and a menu raised while it is still pressing would pause the game underneath it.
+	// The curtain is part of that wait, and not for tidiness. Raising our menu pauses the
+	// emulator, CurtainTick runs on the emu thread, and a curtain still up at that moment is one
+	// that can never come down - its vblank ceiling has stopped counting too. NativeKey swallows
+	// every non-UP key while it is up, so the menu arrives with the keyboard and the pad dead and
+	// only the mouse, which is on another path, still working.
 	if (vcsMenuAfterGameMenu_ && !bootPending_ && !VCS::GameMenuActive() &&
-			!VCS::FrontEndDriving() && screenManager()->topScreen() == this) {
+			!VCS::FrontEndDriving() && VCS::AutoCurtain() == VCS::CurtainKind::None &&
+			screenManager()->topScreen() == this) {
 		vcsMenuAfterGameMenu_ = false;
 		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
 	}
@@ -1874,10 +1882,20 @@ ScreenRenderFlags EmuScreen::RunEmulation(bool skipBufferEffects) {
 }
 
 bool EmuScreen::hasVisibleUI() {
+	// This fork draws its own overlays from renderUI() - the route line and the loading
+	// curtain - and renderUI() only runs when this returns true. Deliberately coarse: asking
+	// each overlay whether it has something to draw would be more precise and would silently
+	// drop the next one somebody adds, which is exactly how the curtain went missing once the
+	// FPS counter stopped defaulting on and the boot messages stopped being shown. Costs a
+	// mostly-empty UI pass on the frames where nothing is up.
+	if (VCS::IsActive())
+		return true;
+
 	// Regular but uncommon UI.
 	if (saveStatePreview_->GetVisibility() != UI::V_GONE || loadingSpinner_->GetVisibility() == UI::V_VISIBLE)
 		return true;
-	if (!g_OSD.IsEmpty() || g_Config.bShowTouchControls || g_Config.iShowStatusFlags != 0)
+	const bool showingFps = VCS::PresentAsGame() ? VCS::GameSettings().showFps : (g_Config.iShowStatusFlags != 0);
+	if (!g_OSD.IsEmpty() || g_Config.bShowTouchControls || showingFps)
 		return true;
 	DisplayLayoutConfig &config = g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
 	if (config.bEnableCardboardVR || g_Config.bEnableNetworkChat)
@@ -2110,7 +2128,7 @@ void EmuScreen::renderUI() {
 		if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::CONTROL) {
 			DrawControlMapperOverlay(ctx, GetLayoutBounds(*ctx), g_controlMapper);
 		}
-		if (g_Config.iShowStatusFlags) {
+		if (VCS::PresentAsGame() ? VCS::GameSettings().showFps : (g_Config.iShowStatusFlags != 0)) {
 			DrawFPS(ctx, GetLayoutBounds(*ctx));
 		}
 		if (VCS::IsActive()) {

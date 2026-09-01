@@ -27,6 +27,7 @@
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSFrontEnd.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSSettings.h"
@@ -321,6 +322,13 @@ const std::vector<Option> &Options() {
 			}, [](const Option &opt) {
 				return std::string(*opt.boolValue ? "HIGH" : "LOW");
 			});
+
+		// Ours rather than g_Config.iShowStatusFlags, which is a bitfield the option table has no
+		// type for - and which the Debug build still uses. See VCSGameSettings for why the two are
+		// not one setting with two homes.
+		addBool(OptionPage::Graphics, "ShowFps", "Show FPS",
+			"Draw the frame rate in the corner of the screen.",
+			&GameSettings().showFps);
 
 		// --- Gameplay ---
 		//

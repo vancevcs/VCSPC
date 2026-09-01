@@ -151,6 +151,7 @@
 #include "UI/Theme.h"
 #include "UI/PauseScreen.h"
 #include "UI/UIAtlas.h"
+#include "UI/VCSMenuScreen.h"
 #if PPSSPP_PLATFORM(UWP)
 #include <dwrite_3.h>
 #include "UWP/UWPHelpers/InputHelpers.h"
@@ -223,7 +224,8 @@ class GlobalListener : public ControlListener {
 	virtual void OnVKey(VirtKey vkey, bool down) {
 		switch (vkey) {
 		case VIRTKEY_TOGGLE_DEBUGGER:
-			if (down) {
+			// Refused while presenting as the game - the Debug build is where the debugger lives.
+			if (down && !VCS::PresentAsGame()) {
 				g_Config.bShowImDebugger = !g_Config.bShowImDebugger;
 			}
 			break;
@@ -826,8 +828,22 @@ void NativeInit(int argc, const char *argv[], const CommandLineOptions &cmdLineO
 	} else if (skipLogo && !boot_filename.empty()) {
 		INFO_LOG(Log::System, "Launching EmuScreen with boot filename '%s'", boot_filename.c_str());
 		g_screenManager->switchScreen(new EmuScreen(boot_filename));
+	} else if (VCS::PresentAsGame()) {
+		// Straight onto the disc, with no PPSSPP logo in front of it. CreateStartScreen returns
+		// the EmuScreen for a remembered VCS disc; the MainScreen it falls back to is a case
+		// PresentAsGame() has already excluded.
+		g_screenManager->switchScreen(CreateStartScreen());
 	} else {
 		g_screenManager->switchScreen(new LogoScreen(AfterLogoScreen::DEFAULT));
+	}
+
+	// After the chain above, never before it: PresentAsGame() memoises on its first call and
+	// reads vcs.ini to do it, so asking any earlier than the memstick check would pin the
+	// answer to 'no' on a first run. Both fields are CfgFlag::DONT_SAVE, so forcing them
+	// cannot leak into ppsspp.ini and leave the Debug build - same memstick - without tools.
+	if (VCS::PresentAsGame()) {
+		g_Config.bShowImDebugger = false;
+		g_Config.iDebugOverlay = (int)DebugOverlay::OFF;
 	}
 
 	g_screenManager->SetBackgroundOverlayScreens(new BackgroundScreen(), new OSDOverlayScreen());

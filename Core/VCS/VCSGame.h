@@ -69,6 +69,29 @@ void Tick();
 // whether to show live data or an explanation of why there isn't any.
 bool IsActive();
 
+// True when this build should present as the GAME rather than as an emulator: no PPSSPP logo,
+// no menu bar, no ImGui debugger, no speed counter. Release builds only, and only for VCS -
+// the Debug build keeps every tool, and no other game is ever affected, per the fork's
+// zero-behaviour-change rule.
+//
+// Safe to call before a game boots, which is what the logo-screen decision needs.
+bool PresentAsGame();
+
+// Presentation settings this module owns, as opposed to the ones that belong to a mechanic.
+//
+// showFps deliberately does NOT edit g_Config.iShowStatusFlags, and that is not a duplicate
+// home for one setting: PPSSPP's own settings screen is unreachable in the game build, so the
+// two govern different builds. This row is the counter in Release; iShowStatusFlags is still
+// the counter in Debug, set from PPSSPP's Graphics page as it always was.
+//
+// Off by default. The point of the game build is that it looks like a game, and a player who
+// wants the number now has a row to turn it on with.
+struct VCSGameSettings {
+	bool showFps = false;
+};
+
+VCSGameSettings &GameSettings();
+
 // The disc ID we booted with, for display. Empty when no game is running.
 const std::string &GetDiscID();
 

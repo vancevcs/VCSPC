@@ -121,15 +121,15 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "Comments", "PPSSPP PSP emulator"
+            VALUE "Comments", "Grand Theft Auto: Vice City Stories for PC. Built on PPSSPP."
             VALUE "CompanyName", "Henrik Rydgård"
-            VALUE "FileDescription", "PPSSPP"
+            VALUE "FileDescription", "GTA Vice City Stories"
             VALUE "FileVersion", PPSSPP_WIN_VERSION_STRING
-            VALUE "InternalName", "PPSSPPEmu"
+            VALUE "InternalName", "GTAVCS"
             VALUE "LegalCopyright", "Copyright © 2006-2021 by Henrik Rydgård"
             VALUE "LegalTrademarks", "All product names are trademarks of their respective owners."
-            VALUE "OriginalFilename", "PPSSPP.exe"
-            VALUE "ProductName", "PPSSPP"
+            VALUE "OriginalFilename", "GTA Vice City Stories.exe"
+            VALUE "ProductName", "GTA Vice City Stories"
             VALUE "ProductVersion", PPSSPP_WIN_VERSION_STRING
         END
     END
@@ -488,7 +488,12 @@ END
 #ifdef GOLD
 IDI_PPSSPP              ICON                    "ppsspp_gold.ico"
 #else
-IDI_PPSSPP              ICON                    "ppsspp.ico"
+// This fork is a dedicated VCS front end, so the app wears the game's icon. ppsspp.ico is
+// left in the tree untouched. Set unconditionally rather than per-configuration because the
+// ResourceCompile block gets neither _DEBUG nor NDEBUG - only ClCompile does - so an #ifdef
+// here would silently always take one branch. The two builds are still told apart by their
+// window title: the Debug build is not PresentAsGame(), so it still says "PPSSPP <version>".
+IDI_PPSSPP              ICON                    "vcs.ico"
 #endif
 IDI_STOP                ICON                    "icon1.ico"
 IDI_STOPDISABLE         ICON                    "stop1.ico"

@@ -158,13 +158,13 @@
     <OutDir>..\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <TargetName>PPSSPPWindows64</TargetName>
+    <TargetName>GTA Vice City Stories</TargetName>
     <EmbedManifest>false</EmbedManifest>
     <IncludePath>$(VC_IncludePath);$(WindowsSdk_IncludePath);</IncludePath>
     <LibraryPath>$(VC_LibraryPath_x64);$(WindowsSdk_LibraryPath_x64);</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
-    <TargetName>PPSSPPWindowsARM64</TargetName>
+    <TargetName>GTA Vice City Stories</TargetName>
     <EmbedManifest>false</EmbedManifest>
     <IncludePath>$(VC_IncludePath);$(WindowsSdk_IncludePath);</IncludePath>
     <LibraryPath>$(VC_LibraryPath_ARM64);$(WindowsSdk_LibraryPath_ARM64);</LibraryPath>
