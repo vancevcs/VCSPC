@@ -1493,9 +1493,9 @@ void DrawVCSBootCurtain(UIContext &dc, float alpha, const char *word) {
 		DrawCover(dc, backdrop, bounds, alpha);
 	}
 
-	// The word, bottom right, where this game and every game like it puts it. The dots are not
-	// decoration: a still screen with a word on it and a ten-second wait behind it is a screen
-	// that looks like a hang.
+	// The word, bottom left, under the same inset every other left-aligned thing in this menu
+	// uses. The dots are not decoration: a still screen with a word on it and a ten-second wait
+	// behind it is a screen that looks like a hang.
 	// No word at all for a menu transition, which is what a null one means. There is nothing to
 	// tell the player there: the menu they were looking at is still on screen, and the page they
 	// asked for is a moment away. "LOADING" over that would be describing machinery.
@@ -1504,8 +1504,8 @@ void DrawVCSBootCurtain(UIContext &dc, float alpha, const char *word) {
 		char text[24];
 		snprintf(text, sizeof(text), "%s%.*s", word, dots, "...");
 		dc.SetFontStyle(kCurtainFont);
-		dc.DrawTextShadow(text, bounds.x2() - kTitleLeft, bounds.y2() - kTitleTop,
-			colorAlpha(kItemColor, alpha), ALIGN_RIGHT | ALIGN_BOTTOM);
+		dc.DrawTextShadow(text, bounds.x + kTitleLeft, bounds.y2() - kTitleTop,
+			colorAlpha(kItemColor, alpha), ALIGN_LEFT | ALIGN_BOTTOM);
 	}
 	dc.Flush();
 }
