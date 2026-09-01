@@ -102,6 +102,11 @@ enum class FrontEndTarget {
 	Load,
 	Save,
 
+	// NEW GAME, which is the same walk as Load with a different row picked - and then the one
+	// press in this file that destroys the thing it was pressed on. See the note on the tail of
+	// LoadPrompt for what that costs and what has to be let go of first.
+	NewGame,
+
 	// Shut the game's menu, so that leaving this fork's menu always means going back to the world.
 	// Without it the two read as two menus stacked on each other: RESUME dropped you back onto
 	// whichever game tab you had been looking at, rather than into the game.
@@ -464,15 +469,13 @@ bool RequestAutoLoad();
 // Safe from the UI thread, which is where the save list calls it from.
 void RequestLoadSlot(int slot);
 
-// Start the story again - by BOOTING THE DISC AGAIN, not by walking to the game's own NEW GAME.
+// Start the story again, through the game's own NEW GAME.
 //
-// VCS has no new-game screen: it boots logos, credits, then walks itself into the story, so
-// restarting the disc is starting a new game, on the path this port takes every launch. The one
-// thing it has to arrange is that the boot auto-load stands down for that one boot.
-//
-// The walk was written first and is not what shipped: confirming the game's own NEW GAME tears
-// the world down, which stops the logic clock the bridge's presses are paced on, and the game
-// comes back with its front end open on a black screen. See the note on the definition.
+// Its own entry rather than a reboot of the disc, and the difference is what the player sees: the
+// game's own path drops straight into the opening cutscene, while a reboot replays the logos and
+// the credit roll first. A reboot is still what happens if the walk cannot get there - see
+// RebootForNewGame - because a fallback that takes ten seconds longer beats a row that does
+// nothing.
 void RequestNewGame();
 
 // Whether a sequence the player did not ask for is running, and should be hidden while it does.

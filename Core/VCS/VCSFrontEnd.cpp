@@ -257,6 +257,15 @@ int g_dialogWaited = 0;
 bool g_sawDialog = false;
 constexpr int kMaxSeqPresses = 12;
 
+// While this is set, nothing in this file writes to the front end - no chrome, no page
+// visibility, no restore of either.
+//
+// Set the instant NEW GAME is confirmed, because that press DESTROYS the front end. Everything
+// the chrome pass holds is a pointer into those objects - widgets it hid, backdrops it stretched
+// - and restoring them afterwards writes into memory the game has since freed and reused. It is
+// cleared when the world comes back.
+bool g_frontEndVolatile = false;
+
 // Skip the boot's auto-load exactly once, because this boot IS the new game.
 //
 // **Deliberately not cleared by FrontEndReset**, which is the one piece of state here that is
@@ -626,7 +635,24 @@ void GoIdle(const char *why) {
 	g_status = why;
 }
 
+// The way that always works and always costs the intro: boot the disc again, and tell that boot's
+// silent autoload to find nothing. Kept as the fallback for a walk that could not get there.
+void RebootForNewGame() {
+	g_skipAutoLoadOnce = true;
+	g_newGameBoot = true;
+	System_PostUIMessage(UIMessage::REQUEST_GAME_RESET);
+}
+
 void AbandonSequence(const char *why, const char *message) {
+	// A NEW GAME that could not be walked to is still a new game the player asked for, so it goes
+	// the other way rather than reporting failure: reboot the disc, and let the boot's own
+	// autoload find nothing. It costs the intro, which is exactly what walking to the entry was
+	// worth avoiding - and a row that takes ten seconds longer beats a row that does nothing.
+	if (g_target == FrontEndTarget::NewGame) {
+		GoIdle(why);
+		RebootForNewGame();
+		return;
+	}
 	if (message) {
 		g_OSD.Show(OSDType::MESSAGE_WARNING, message, 4.0f, "vcs_frontend");
 	}
@@ -1097,24 +1123,15 @@ void RequestLoadSlot(int slot) {
 }
 
 void RequestNewGame() {
-	// A reboot of the disc, not a walk to NEW GAME - and the reason is worth keeping, because the
-	// walk was written first and it works right up until the moment it matters.
+	// The game's own entry, walked to, rather than a reboot of the disc - and the difference is
+	// the whole reason this is not the simpler thing: NEW GAME drops straight into the opening
+	// cutscene, while a reboot replays the logos and the credit roll on the way.
 	//
-	// Confirming the game's own NEW GAME tears the world down. The bridge's presses are paced on
-	// the game's logic clock, and that clock STOPS during the teardown, so the sequence cannot
-	// finish and the game comes back with the front end still open on a black screen, its frame
-	// counter racing and nothing on screen. Reproduced every time; a watchdog that releases the
-	// button on the wall clock did not fix it, which is what ruled out the stuck press and left
-	// the teardown itself as the thing not to be standing in the middle of.
-	//
-	// And the reboot is not a workaround, it is the shorter road to the same place. **VCS has no
-	// new-game screen**: it boots logos, credits, then walks itself into the story - measured, in
-	// "The boot sequence" - so starting the disc again IS starting a new game, on the path this
-	// port already takes every single launch. The only thing that has to be said is "do not load
-	// anything this time".
-	g_skipAutoLoadOnce = true;
-	g_newGameBoot = true;
-	System_PostUIMessage(UIMessage::REQUEST_GAME_RESET);
+	// Behind the curtain either way, and the curtain is doing more work here than anywhere else:
+	// what it hides is the game's own menu being walked AND the world being torn down and rebuilt
+	// behind it.
+	RaiseCurtain(CurtainKind::Loading);
+	RequestGameMenu(FrontEndTarget::NewGame);
 }
 
 bool TakeNewGameBoot() {
@@ -1646,6 +1663,11 @@ void ApplyChrome() {
 // every frame, because nothing here is contested: the game writes these fields when it builds a
 // page and not afterwards, which the poke tests confirmed by sticking.
 void ChromeTick() {
+	// Hands off a front end that is being torn down - see g_frontEndVolatile. Not even the
+	// restore: what it would restore into is not there any more.
+	if (g_frontEndVolatile) {
+		return;
+	}
 	const bool want = FrontEndSettings().hideMenuChrome && GameMenuActive();
 	if (want == g_chromeApplied) {
 		return;
@@ -1818,6 +1840,15 @@ void FrontEndTick() {
 		}
 	}
 
+	// A world that has restarted is a front end that has been rebuilt, so the chrome pass may
+	// have it back. The frame counter rewinding is the same edge the mission watch uses.
+	if (g_frontEndVolatile) {
+		const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
+		if (frame && *frame < g_asLastFrame) {
+			g_frontEndVolatile = false;
+		}
+	}
+
 	// What the UI thread is allowed to know, refreshed before anything can return early.
 	g_gameMenuUpCached.store(GameMenuActive(), std::memory_order_relaxed);
 
@@ -1922,9 +1953,10 @@ void FrontEndTick() {
 		case FrontEndTarget::Brief: g_wantPage = s.briefPage; break;
 		case FrontEndTarget::Game:  g_wantPage = s.gamePage; break;
 		case FrontEndTarget::Stats: g_wantPage = s.statsPage; break;
-		// LOAD GAME is an entry ON the Game page, not a page of its own, so the load walks to
-		// exactly where the GAME row walks to and then carries on pressing.
+		// LOAD GAME and NEW GAME are entries ON the Game page, not pages of their own, so both
+		// walk to exactly where the GAME row walks to and then carry on pressing.
 		case FrontEndTarget::Load:
+		case FrontEndTarget::NewGame:
 			g_wantPage = s.gamePage;
 			break;
 		default:                    g_wantPage = -1; break;
@@ -1995,6 +2027,13 @@ void FrontEndTick() {
 			return;
 		}
 	}
+	// Ending a sequence cannot be gated on the game's clock either, and NEW GAME is why: it stops
+	// that clock, so a hand-back waiting for a game frame never happens and this layer keeps the
+	// pad through the whole teardown.
+	if (g_phase == Phase::EndSequence) {
+		GoIdle("done");
+		return;
+	}
 	if (g_pressOnVblank && (g_phase == Phase::PressHold || g_phase == Phase::PressGap)) {
 		if (g_phase == Phase::PressHold) {
 			if (--g_pressHold <= 0) {
@@ -2045,7 +2084,8 @@ void FrontEndTick() {
 		// selected - measured - so LOAD is already there and NEW is one press down. The name is
 		// still checked every time rather than trusted: a press is only made because the
 		// selection is not what was asked for yet.
-		const char *want = "LoadGame_MI";
+		const bool newGame = g_target == FrontEndTarget::NewGame;
+		const char *want = newGame ? "NewGame_MI" : "LoadGame_MI";
 		char name[32];
 		const bool have = SelectedWidgetName(name, sizeof(name));
 		if (have && strcmp(name, want) == 0) {
@@ -2059,8 +2099,8 @@ void FrontEndTick() {
 			break;
 		}
 		// A page that reports no selection at all gets the same press: moving is what makes it
-		// name one.
-		Press(CTRL_UP, Phase::LoadPick, s.holdFrames, s.gapFrames, false);
+		// name one. The page opens on LoadGame_MI, so LOAD is already there and NEW is one down.
+		Press(newGame ? CTRL_DOWN : CTRL_UP, Phase::LoadPick, s.holdFrames, s.gapFrames, false);
 		break;
 	}
 
@@ -2086,6 +2126,37 @@ void FrontEndTick() {
 			g_seqPresses = 0;
 			g_dialogWaited = 0;
 			g_sawDialog = false;
+			if (g_target == FrontEndTarget::NewGame) {
+				// The one press in this file that DESTROYS what it is pressed on, and everything
+				// unusual about this branch follows from that.
+				//
+				// Confirming NEW GAME tears the world down: the front end's objects go, and the
+				// game's logic clock stops while it rebuilds. Driving it the ordinary way hung
+				// the game every time - black screen, its own confirm page still reporting
+				// active, frame counter racing - while the same presses injected from outside
+				// started a new game cleanly. So the difference was never the presses. It was
+				// everything this layer goes on doing around them.
+				//
+				// Three things are let go of here, before the press rather than after it:
+				//
+				//   - the chrome and the hidden pages, which are POINTERS into objects that are
+				//     about to be freed. Restoring them afterwards writes into memory the game
+				//     has already reused. g_frontEndVolatile stops the chrome pass touching any
+				//     of it again until the world is back.
+				//   - the pad, immediately after the press instead of when the sequence ends on
+				//     a clock that has stopped. That is what EndSequence on the vblank path is
+				//     for.
+				//   - any queued request, so a Close left over from this fork's menu closing
+				//     cannot fire Circle into a game that is halfway through starting.
+				ShowPagesAgain();
+				RestoreChrome();
+				g_frontEndVolatile = true;
+				g_request.store(-1, std::memory_order_relaxed);
+				// Paced in VBLANKS, for the reason the savedata dialog is: the game clock is
+				// about to stop, and a press counted on it would never be released.
+				Press(CTRL_CROSS, Phase::EndSequence, s.dialogHoldFrames, s.dialogGapFrames, true);
+				break;
+			}
 			Press(CTRL_CROSS, Phase::Dialog, s.enterFrames, s.gapFrames, false);
 			break;
 		}
@@ -2122,7 +2193,8 @@ void FrontEndTick() {
 			// on something else: the world starts inside the opening scene, where the button
 			// skips rather than opens. So the auto-load gets a few goes before it gives up, and
 			// nothing else does.
-			if (g_target == FrontEndTarget::Load && ++g_startAttempts < kMaxStartAttempts) {
+			if ((g_target == FrontEndTarget::Load || g_target == FrontEndTarget::NewGame) &&
+				++g_startAttempts < kMaxStartAttempts) {
 				g_waited = 0;
 				g_phase = Phase::PressStart;
 				g_remaining = Frames(s.holdFrames);
@@ -2130,9 +2202,12 @@ void FrontEndTick() {
 				g_status = "pressing start again";
 				break;
 			}
-			GoIdle("menu never opened");
-			g_OSD.Show(OSDType::MESSAGE_ERROR, "The game's menu did not open", 3.0f,
-				"vcs_frontend");
+			// The game keeps its menu to itself in places the player can still reach ours from, and
+			// a cutscene is the ordinary one - including the opening scene of a new game, which is
+			// exactly where someone is most likely to ask for another. So this is a give-up, not a
+			// failure to report: AbandonSequence knows a NEW GAME nobody could walk to is still
+			// worth booting the disc for.
+			AbandonSequence("menu never opened", "The game's menu did not open");
 		}
 		break;
 
@@ -2227,11 +2302,12 @@ void FrontEndTick() {
 			//
 			// Which is exactly what the load wants next, so that is where it goes rather than
 			// handing over: same walk, four more presses.
-			if (g_target == FrontEndTarget::Load) {
+			if (g_target == FrontEndTarget::Load || g_target == FrontEndTarget::NewGame) {
 				g_seqPresses = 0;
 				g_waited = 0;
 				g_phase = Phase::LoadPick;
-				g_status = "picking load game";
+				g_status = g_target == FrontEndTarget::NewGame ? "picking new game"
+				                                               : "picking load game";
 				break;
 			}
 			Finish("arrived");
@@ -2240,8 +2316,8 @@ void FrontEndTick() {
 		if (++g_presses > kMaxEnterPresses) {
 			// Focus will not move. Leaving the player on the page at strip level is a working
 			// outcome; pressing a select button repeatedly at a menu that is ignoring it is not.
-			if (g_target == FrontEndTarget::Load) {
-				AbandonSequence("could not enter the game page", "Could not open LOAD GAME");
+			if (g_target == FrontEndTarget::Load || g_target == FrontEndTarget::NewGame) {
+				AbandonSequence("could not enter the game page", "Could not open the game menu");
 				break;
 			}
 			Finish("could not enter page");

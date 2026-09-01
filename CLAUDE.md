@@ -935,23 +935,34 @@ the fork's own auto-load usually looks like it "worked" even in builds where it 
 
 That is what defeated the first two attempts at NEW GAME:
 
-- **Walking the game's own NEW GAME hangs it.** Confirming that entry tears the world down, and
-  the bridge's presses are paced on the game's logic clock - which stops during the teardown. The
-  press never finishes, the game comes back with its own confirm page open on a black screen and
-  its frame counter racing, and nothing recovers it. The same presses injected from outside,
-  released on a wall clock, start a new game every time; that control run is what separated our
-  timing from the game's behaviour. A watchdog that releases the button on the wall clock was
-  added and did NOT fix it, which is what ruled out the stuck press and left the teardown itself
-  as the thing not to be standing in the middle of. The watchdog stayed - a press paced on a clock
-  that can stop is a bug waiting for another caller - but it is not what makes NEW GAME work.
+- **Walking the game's own NEW GAME hung it, until the bridge let go of the world first.**
+  Confirming that entry tears the world down, and the bridge was standing in the middle of the
+  teardown holding pointers into it. The press was paced on the game's logic clock, which stops
+  while the world is being rebuilt, so it never finished: the game came back with its own confirm
+  page open on a black screen, its frame counter racing, and nothing recovered it. The same
+  presses injected from outside, released on a wall clock, started a new game every time - that
+  control run is what separated our timing from the game's behaviour. A wall-clock watchdog on the
+  press was tried and did NOT fix it, which ruled out the stuck press and left the teardown itself
+  as the thing to get out of the way of.
+
+  What works is releasing everything that points into the front end BEFORE the confirming press -
+  `ShowPagesAgain`, `RestoreChrome`, `g_frontEndVolatile`, and clearing any queued request so a
+  stale Close cannot fire into the new world - then pacing that last press in VBLANKS and letting
+  `Phase::EndSequence` dispatch ahead of the game-frame gate, so the pad is handed back even
+  though the game's clock has stopped. Verified from the other end: the mission key empty,
+  `$ONMISSION` 1 with mission 8 running, the player at Fort Baxter, the front end closed and the
+  frame counter climbing - and on screen, Martinez's office, with no logos and no credit roll.
+  That last part is the whole point of walking rather than rebooting.
 - **Rebooting the disc is not enough on its own**, because the boot autoload then quietly
   continues from a save again. Twice this looked like "the reset did not happen".
 
-So NEW GAME is: reboot the disc, and tell that one autoload to find nothing. Both halves are
-one-shot flags, and `TakeNewGameBoot` is consumed by `PSPSaveDialog`'s autoload path - which puts
-the game in exactly the state a first run is in, and the story starts. Verified from the other
-end: the mission key empty, `$ONMISSION` 1 with mission 8 running, the player at Fort Baxter, and
-the front end never opened.
+The reboot survives as the FALLBACK, for the case the walk cannot start at all: the game keeps its
+menu to itself during a cutscene, which is exactly where a player is most likely to ask for
+another new game - the opening scene of the one they just started. Start is declined, the walk
+gives up, and `AbandonSequence` boots the disc and tells that one autoload to find nothing
+(`TakeNewGameBoot`, consumed by `PSPSaveDialog`'s autoload path). It costs the intro, which is
+what walking was worth avoiding, and it beats a row that does nothing. That give-up used to stop
+at an error toast, which is how "NEW GAME during a cutscene" came to do nothing at all.
 
 ### The questions are pages, not popups
 
