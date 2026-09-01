@@ -485,10 +485,10 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Z/Y and the wheel therefore double as block and heavy hit during a fistfight. Harmless, since
 	// nobody scrolls mid-fight, and the alternative - gating these rows on ScopedWeaponActive - is
 	// not something a static table can express.
-	{ VCSInputContext::Aiming,    NKCODE_Z,                 CTRL_SQUARE,    "Scope / binocular zoom in (verified)", "Zoom in (scope, binoculars)", VCSKeyList::OnFoot },
-	{ VCSInputContext::Aiming,    NKCODE_Y,                 CTRL_CROSS,     "Scope / binocular zoom out (verified)", "Zoom out (scope, binoculars)", VCSKeyList::OnFoot },
-	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_UP,   CTRL_SQUARE,  "Scope / binocular zoom in (verified)", "Zoom in (scope, binoculars)", VCSKeyList::OnFoot },
-	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_DOWN, CTRL_CROSS,   "Scope / binocular zoom out (verified)", "Zoom out (scope, binoculars)", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_Z,                 CTRL_SQUARE,    "Scope / binocular / camera zoom in (verified)", "Zoom in (scope, binoculars, camera)", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_Y,                 CTRL_CROSS,     "Scope / binocular / camera zoom out (verified)", "Zoom out (scope, binoculars, camera)", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_UP,   CTRL_SQUARE,  "Scope / binocular / camera zoom in (verified)", "Zoom in (scope, binoculars, camera)", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,    NKCODE_EXT_MOUSEWHEEL_DOWN, CTRL_CROSS,   "Scope / binocular / camera zoom out (verified)", "Zoom out (scope, binoculars, camera)", VCSKeyList::OnFoot },
 
 	// --- Menus / pause screens ---
 	// Keyboard navigation, so the player never has to think in PSP buttons.
@@ -677,11 +677,12 @@ const VCSPadMapping kVCSPadMappings[] = {
 	// Square and Cross, which with anything but a scope in hand are Block and Heavy Hit, so
 	// ungated they would have a bumper throwing punches every time it was pressed in a fight.
 	//
-	// The gate covers the BINOCULARS too, and the game asked for that in as many words: `H_BINO1`
-	// tells the player to zoom them with ~SNZI~ and ~SNZO~, the same two controls named here. See
+	// The gate covers the BINOCULARS and the PHOTO CAMERA too. The game asked for the first in as
+	// many words - `H_BINO1` tells the player to zoom them with ~SNZI~ and ~SNZO~, the same two
+	// controls named here - and the second was measured raised, zooming on the same pair. See
 	// ScopedWeaponActive.
-	{ VCSInputContext::Aiming,     NKCODE_BUTTON_R1,     CTRL_SQUARE,    true,  "Scope / binocular zoom in (verified)", "Zoom in (scope, binoculars)", VCSKeyList::OnFoot },
-	{ VCSInputContext::Aiming,     NKCODE_BUTTON_L1,     CTRL_CROSS,     true,  "Scope / binocular zoom out (verified)", "Zoom out (scope, binoculars)", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_R1,     CTRL_SQUARE,    true,  "Scope / binocular / camera zoom in (verified)", "Zoom in (scope, binoculars, camera)", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_L1,     CTRL_CROSS,     true,  "Scope / binocular / camera zoom out (verified)", "Zoom out (scope, binoculars, camera)", VCSKeyList::OnFoot },
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)" },
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)" },
 	// Both clicks stay dead while aiming: changing the camera mid-shot is the last thing anyone
@@ -1664,16 +1665,17 @@ static bool MeleeEquipped() {
 	return weaponSlot && WeaponSlotIsMelee(*weaponSlot);
 }
 
-// The binoculars, as an equipped ITEM rather than as a raised camera - so it is already true on
-// the frame the aim key goes down, which is the frame the entry sequence is armed on. Keying that
-// gate on the camera instead would arm the sequence first and only learn better afterwards.
+// The binoculars or the camera, as an equipped ITEM rather than as a raised one - so it is
+// already true on the frame the aim key goes down, which is the frame the entry sequence is armed
+// on. Keying that gate on the camera mode instead would arm the sequence first and only learn
+// better afterwards: WeaponCamMode reads 0 for both items until they are actually up, measured.
 //
 // Same unset rule as MeleeEquipped: a read that failed leaves the previous behaviour standing
 // rather than guessing, because claiming "binoculars" wrongly would cost every gun its entry into
 // free aim.
-static bool BinocularsEquipped() {
+static bool OpticalItemEquipped() {
 	const std::optional<u32> weapon = GetState().weaponType;
-	return weapon && WeaponTypeIsBinoculars(*weapon);
+	return weapon && WeaponTypeIsOpticalItem(*weapon);
 }
 
 // The tab lock, asked as one question because two devices have to obey it. Everything in the
@@ -1756,14 +1758,15 @@ u32 ApplyMapping(VCSInputContext context) {
 		// game's lock-on rather than for a crosshair. Recruiting needs a target and free aim is
 		// the state with none, so a pulse fired here would cancel the very thing the key is for.
 		//
-		// THE BINOCULARS STAND DOWN FOR THE REASON MELEE DOES, and the failure is the same shape
-		// one item over. Both buttons this sequence presses mean something else with them raised:
-		// the sprint latch holds CTRL_CROSS for ~8 ticks and Cross while glassing is ZOOM OUT, so
-		// aiming while walking forward zoomed the view back out every time; and the pulse presses
-		// d-pad Down, the game's Free Aim button, which an item with nothing to fire has no use
-		// for. Neither could be noticed before, because neither meant anything with a gun up.
+		// THE BINOCULARS AND THE CAMERA STAND DOWN FOR THE REASON MELEE DOES, and the failure is
+		// the same shape one item over. Both buttons this sequence presses mean something else
+		// with them raised: the sprint latch holds CTRL_CROSS for ~8 ticks and Cross while
+		// glassing is ZOOM OUT, so aiming while walking forward zoomed the view back out every
+		// time; and the pulse presses d-pad Down, the game's Free Aim button, which an item that
+		// aims by turning the view has no use for. Neither could be noticed before, because
+		// neither meant anything with a gun up.
 		if (CameraSettings().autoFreeAim && !LockOnModeActive() && !MeleeEquipped()
-			&& !BinocularsEquipped() && !RecruitHeld()) {
+			&& !OpticalItemEquipped() && !RecruitHeld()) {
 			// If the player is already asking to move, spend a few ticks establishing a running
 			// state before pressing Free Aim, so the game has something worth latching. The pulse
 			// is armed when that finishes rather than now.
@@ -2132,13 +2135,18 @@ void ApplyAnalog(VCSInputContext context) {
 
 // Sniper and RPG - the manually-aimed, scoped weapons. Weapon camera modes 7 and 8, measured.
 //
-// AND THE BINOCULARS, which are a scope with no trigger behind it. Hold aim and the game raises
-// them into their own first-person camera (mode 47), aimed by turning the view and zoomed with the
-// same two buttons the sniper uses - and that last part is the game saying so rather than this
-// fork inferring it. The mission's own help line is `H_BINO1`, "Use ~SNZI~ and ~SNZO~ to zoom in
-// and out with the binoculars", and SNZI/SNZO are the keys the GXT resolves to Square and Cross,
-// which is exactly what the sniper zoom rows already send. See "Ask the GXT what a control is
-// called" in CLAUDE.md.
+// AND THE ITEMS YOU LOOK THROUGH: the binoculars, which are a scope with no trigger behind it,
+// and the photo camera, which is one with a shutter. Hold aim and the game raises either into its
+// own first-person camera - mode 47 for the binoculars, 46 for the photo camera - aimed by turning
+// the view and zoomed with the same two buttons the sniper uses.
+//
+// For the binoculars that last part is the game saying so rather than this fork inferring it: the
+// mission's own help line is `H_BINO1`, "Use ~SNZI~ and ~SNZO~ to zoom in and out with the
+// binoculars", and SNZI/SNZO are the keys the GXT resolves to Square and Cross, which is exactly
+// what the sniper zoom rows already send. See "Ask the GXT what a control is called" in CLAUDE.md.
+// The photo camera has no help line of its own, so it was measured instead, raised and live:
+// Square took the FOV from 70.00 to 59.25 and the zoom level from 1.000 to 1.181, Cross put both
+// back.
 //
 // Every caller wants them treated alike, which is what makes this the right place rather than a
 // second predicate beside it: the zoom bumpers must reach the game (that gate is this function),
@@ -2149,23 +2157,25 @@ void ApplyAnalog(VCSInputContext context) {
 // records for the sniper and the RPG.
 //
 // Keyed on the WEAPON ID here and on the weapon camera mode above, and the split is deliberate.
-// The binoculars do have a weapon camera mode - it reads 47, measured live over the WebSocket
-// debugger, the same 47 the active camera takes - but it is only set once they are RAISED, and
-// reads 0 for the whole time they are merely selected. The id is true from the moment one is
-// picked, which is this function's own stated preference and what the entry-sequence gate in
-// ApplyMapping needs: that fires on the frame the aim key goes down, before any camera has
-// changed, so a mode test would arm the sequence first and only learn better afterwards.
+// Both items do have a weapon camera mode - 47 and 46, measured live over the WebSocket debugger,
+// the same numbers the active camera takes - but it is only set once the item is RAISED, and reads
+// 0 for the whole time it is merely selected. The id is true from the moment one is picked, which
+// is this function's own stated preference and what the entry-sequence gate in ApplyMapping needs:
+// that fires on the frame the aim key goes down, before any camera has changed, so a mode test
+// would arm the sequence first and only learn better afterwards.
 //
-// That the camera has no integrator is measured too, and it is the argument for every lead this
-// predicate stands down: across a whole binocular session CCam+0x130 and +0x124 - the game's own
-// smoothed aim increments - stayed at exactly 0.00000. The game is not accumulating a look axis
-// in mode 47, so there is nothing in front of our write to break loose.
+// That these cameras have no integrator is measured too, and it is the argument for every lead
+// this predicate stands down: across a whole binocular session CCam+0x130 and +0x124 - the game's
+// own smoothed aim increments - stayed at exactly 0.00000, and the photo camera reads the same
+// 0.000000 the moment it is raised, against 0.0995 on the follow camera seconds earlier. The game
+// is not accumulating a look axis in mode 46 or 47, so there is nothing in front of our write to
+// break loose.
 bool ScopedWeaponActive() {
 	const std::optional<u32> mode = ReadAddrU32(VCSAddr::WeaponCamMode);
 	if (mode && (*mode == 7 || *mode == 8)) {
 		return true;
 	}
-	return BinocularsEquipped();
+	return OpticalItemEquipped();
 }
 
 bool DriveByAimActive(VCSInputContext context) {

@@ -61,9 +61,10 @@ bool VehicleClassIsAircraft(VehicleClass klass);
 // so there is no free aim to hand the mouse. Takes the SLOT, not the weapon id.
 bool WeaponSlotIsMelee(u32 slot);
 
-// Whether this is the binoculars. Takes the weapon ID, not the slot - the two are different
-// numbers and only the id says WHICH weapon. See the definition for where 39 comes from.
-bool WeaponTypeIsBinoculars(u32 type);
+// Whether this is one of the items you raise and look THROUGH rather than fire along - the
+// binoculars or the camera. Takes the weapon ID, not the slot - the two are different numbers and
+// only the id says WHICH weapon. See the definition for where 38 and 39 come from.
+bool WeaponTypeIsOpticalItem(u32 type);
 
 struct VCSState {
 	// Mutually exclusive in practice, but kept separate because early on we may be able to

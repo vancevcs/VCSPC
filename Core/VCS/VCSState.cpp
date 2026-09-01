@@ -115,18 +115,30 @@ bool WeaponSlotIsMelee(u32 slot) {
 	return slot <= 1;
 }
 
-bool WeaponTypeIsBinoculars(u32 type) {
-	// 39, and read out of the game's own script rather than guessed. The mission that hands the
-	// binoculars over checks `has_char_got_weapon $PLAYER_CHAR weapon 39` and then immediately
-	// does `set_current_char_weapon $PLAYER_CHAR to 39` (scm/MAIN.txt, BRY_B3_18510), which pins
-	// the id to the item by the game's own account of what it just gave you.
+bool WeaponTypeIsOpticalItem(u32 type) {
+	// The binoculars, 39, and the camera, 38 - read out of the game's own script rather than
+	// guessed. The mission that hands the binoculars over checks `has_char_got_weapon
+	// $PLAYER_CHAR weapon 39` and then immediately does `set_current_char_weapon $PLAYER_CHAR to
+	// 39` (scm/MAIN.txt, BRY_B3_18510); the one that hands over the camera calls `request_model
+	// #CAMERA` on the line before `give_weapon_to_char $PLAYER_CHAR weapon 38` (METALDE_1936).
+	// Each pins the id to the item by the game's own account of what it just gave you.
 	//
-	// Confirmed live: with the binoculars in hand the overlay reads weaponType 39 in slot 9.
+	// Confirmed live for both: the overlay reads weaponType 39 in slot 9 with the binoculars in
+	// hand, and 38 in slot 9 with the camera.
+	//
+	// ONE predicate rather than two, because everything that asks wants the same answer, and the
+	// camera measures the same as the binoculars on every count that made them special. Raised,
+	// CamMode and WeaponCamMode both read 46 - 47 for the binoculars - and the game's own smoothed
+	// aim increments at CCam+0x130 and +0x124 sit at exactly 0.000000, against 0.0995 on the
+	// follow camera a moment earlier: no integrator in front of our write, so the aim leads have
+	// nothing to break loose and must stand down. The zoom is the sniper's two buttons here too -
+	// Square took the FOV from 70.00 to 59.25 with the zoom level stepping 1.000 to 1.181, and
+	// Cross put both back.
 	//
 	// The ID and not the slot, unlike the melee test above. Slot 9 is the last slot rather than
-	// the binocular slot - whatever else lands there would answer yes - and this question is
-	// asked about a specific ITEM with specific handling, not about a category.
-	return type == 39;
+	// an optical one - whatever else lands there would answer yes - and this question is asked
+	// about specific ITEMS with specific handling, not about a category.
+	return type == 38 || type == 39;
 }
 
 void UpdateState(VCSState *state) {

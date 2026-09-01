@@ -2672,6 +2672,42 @@ from the camera, so `HandleHostAxis` negates nothing. That is specific to XInput
 non-XInput pad is the case to suspect. The look stick is negated exactly once, in `ApplyPadLook`,
 because a mouse's positive dy is down the screen and everything downstream expects a mouse.
 
+### The items you look THROUGH: binoculars and the photo camera
+
+Two weapons in VCS are not weapons at all in the way the aim model cares about. Hold aim and the
+game raises them into their own first-person camera, aimed by turning the view and zoomed with the
+sniper's two buttons. They are one predicate, `WeaponTypeIsOpticalItem`, and `ScopedWeaponActive`
+puts them beside the sniper and the RPG.
+
+| | binoculars | photo camera |
+|---|---|---|
+| weapon id (slot 9 for both) | 39 | **38** |
+| `CamMode` / `WeaponCamMode` when RAISED | 47 | **46** |
+| `WeaponCamMode` when merely selected | 0 | **0** |
+| zoom | Square in, Cross out | same |
+| `CCam+0x130` / `+0x124` while raised | 0.00000 | **0.000000** |
+
+Every row of that table is why the code looks the way it does:
+
+- **Keyed on the weapon ID, never the camera mode.** `WeaponCamMode` reads 0 until the item is
+  actually up, and the free-aim entry gate fires on the frame the aim key goes down - before any
+  camera has changed. A mode test would arm the sequence first and learn better afterwards.
+- **The aim leads stand down.** Those two `CCam` fields are the game's own smoothed aim
+  increments, and they sit at exactly zero while either item is raised - against ~0.0995 on the
+  follow camera moments earlier. The yaw kick and the pitch deadband exist to break stiction in
+  front of that smoother; fed to a camera that follows the instant it is written, they are a
+  twitch. This is the same failure the sniper and RPG already had recorded.
+- **The free-aim entry sequence stands down too**, for the reason melee does. Its sprint latch
+  holds Cross for ~8 ticks and Cross while glassing is ZOOM OUT, so aiming while walking forward
+  zoomed the view back out every time.
+
+The camera was found by being told "it's the same kind of glitchiness as the binoculars" and then
+measuring the same three things: id, the two modes, and the increments. The id came from the
+script - `request_model #CAMERA` on the line before `give_weapon_to_char $PLAYER_CHAR weapon 38`
+(`METALDE_1936`), the same class of evidence as `H_BINO1` for the binoculars - and the zoom pair
+was measured live, Square taking the FOV from 70.00 to 59.25 and Cross putting it back. **If a
+third item ever turns up that "aims wrong", measure those three before touching the aim model.**
+
 ### Recruiting is a binding with a precondition, and the precondition is the work
 
 `Recruit gang member` is `G` on the keyboard and d-pad up on the pad, in the **Aiming** context on

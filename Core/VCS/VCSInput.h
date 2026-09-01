@@ -226,7 +226,8 @@ struct VCSPadMapping {
 
 	u32 psp;
 
-	// Only sent while a scoped weapon or the binoculars are up. This exists for the zoom bumpers:
+	// Only sent while a scoped weapon, the binoculars or the camera are up. This is for the zoom
+	// bumpers:
 	// zoom is the game's Square and Cross, which with anything else in hand are Block and Heavy
 	// Hit, so an ungated row would have a bumper throwing punches every time it was pressed
 	// unscoped.
@@ -527,10 +528,11 @@ bool CameraDrivenAimHeld();
 // latched run is left to carry the player, and releasing them all is what applies the brake.
 bool MovementKeysHeld();
 
-// Whether a scoped weapon (sniper, RPG - weapon camera modes 7 and 8) or the binoculars are
-// equipped. Those aim by moving the camera, because down a scope the camera direction is the
-// firing direction - and the binoculars are the same camera with nothing to fire. See the
-// definition for why the binoculars are matched on the weapon id instead.
+// Whether a scoped weapon (sniper, RPG - weapon camera modes 7 and 8) or one of the items you
+// look through (the binoculars, the photo camera) is equipped. Those aim by moving the camera,
+// because down a scope the camera direction is the firing direction - and the two items are the
+// same camera with nothing to fire, or nothing but a shutter. See the definition for why the
+// items are matched on the weapon id instead.
 bool ScopedWeaponActive();
 
 }  // namespace VCS
