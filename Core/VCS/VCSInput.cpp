@@ -688,6 +688,43 @@ const VCSPadMapping kVCSPadMappings[] = {
 	// wants, and the claim is still what keeps PPSSPP's speed toggle off R3.
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (camera changes belong outside a shot)" },
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_THUMBL, 0,              false, "Suppressed (weapon swaps belong outside a shot)" },
+
+	// --- The game's own menus: the map, the briefs, the stats, its Game page ---
+	//
+	// The context that had NO rows at all, which is not the same as a context that needs none.
+	// An unclaimed pad control does not sit still here any more than anywhere else: it falls
+	// through to PPSSPP's mapper, and what is waiting in the defaults is Pause on the left
+	// trigger, fast-forward on the right and the speed toggle on R3. A finger resting on a
+	// trigger while reading the map opened the emulator's own menu on top of the game's.
+	//
+	// The buttons are the PSP's own, because this front end IS the PSP's own and already knows
+	// what to do with them: Cross confirms, the d-pad moves, L and R zoom the map, Square drops
+	// the marker - the same two masks the mouse and Space reach it by, see MapWaypointButtonMask
+	// and MapZoomButtonMask. B is the one exception and it is not a PSP button at all: it means
+	// Back, out of the game's page and into this fork's menu, posted from HandlePadKey.
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_A,      CTRL_CROSS,     false, "Confirm" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_B,      0,              false, "Back, to this fork's menu (posted from HandlePadKey, not a PSP button)" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_X,      CTRL_SQUARE,    false, "Place map marker (the game's own Square)" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_Y,      CTRL_TRIANGLE,  false, "The game's own Triangle" },
+	// Claimed rather than left to fall through, and that is what makes the tab lock reach a pad
+	// at all: the lock strips these four from the mask on a page this fork walked to, and a
+	// direction it never sees is a direction it cannot strip. Which is exactly why the keyboard
+	// behaved on those pages and a pad's d-pad wandered off the hidden tab strip.
+	{ VCSInputContext::Menu,       NKCODE_DPAD_UP,       CTRL_UP,        false, "Up" },
+	{ VCSInputContext::Menu,       NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Down" },
+	{ VCSInputContext::Menu,       NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Left" },
+	{ VCSInputContext::Menu,       NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Right" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_L1,     CTRL_LTRIGGER,  false, "Zoom out (map)" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_R1,     CTRL_RTRIGGER,  false, "Zoom in (map)" },
+	// The triggers and the stick clicks: nothing to do in a menu, and everything to suppress.
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_L2,     0,              false, "Suppressed (PPSSPP's default puts Pause here)" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_R2,     0,              false, "Suppressed (PPSSPP's default puts fast-forward here)" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_THUMBL, 0,              false, "Suppressed" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (PPSSPP's default puts the speed toggle here)" },
+	// The same split as everywhere else: Start is this fork's menu and View is the game's - so
+	// in the game's own menu, its button is the one that closes it again.
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)" },
+	{ VCSInputContext::Menu,       NKCODE_BUTTON_SELECT, CTRL_START,     false, "Closes the game's menu (PSP Start)" },
 };
 
 const size_t kVCSPadMappingCount = ARRAY_SIZE(kVCSPadMappings);
@@ -1639,6 +1676,15 @@ static bool BinocularsEquipped() {
 	return weapon && WeaponTypeIsBinoculars(*weapon);
 }
 
+// The tab lock, asked as one question because two devices have to obey it. Everything in the
+// long comment at its call site applies here; what it earns as a function is that the pad's
+// stick can ask it too - a nub that still changes tab while the arrows are being held back
+// would walk the player off the hidden tab strip with the other hand.
+static bool MenuTabsLocked(VCSInputContext context) {
+	return context == VCSInputContext::Menu && FrontEndSettings().lockMenuTabs
+		&& BridgeOwnsMenu() && MenuOnTabStrip();
+}
+
 u32 ApplyMapping(VCSInputContext context) {
 	g_currentContext.store(context, std::memory_order_relaxed);
 
@@ -1771,8 +1817,7 @@ u32 ApplyMapping(VCSInputContext context) {
 	// directly, on every page, without a widget walk. It defaults to `true` when unreadable,
 	// which keeps the lock's failure mode where it was: an unreadable menu tabs rather than
 	// stranding the player with dead arrows.
-	if (context == VCSInputContext::Menu && FrontEndSettings().lockMenuTabs && BridgeOwnsMenu()
-		&& MenuOnTabStrip()) {
+	if (MenuTabsLocked(context)) {
 		setMask &= ~(u32)(CTRL_LEFT | CTRL_RIGHT | CTRL_UP | CTRL_DOWN);
 	}
 
@@ -2015,6 +2060,23 @@ void ApplyAnalog(VCSInputContext context) {
 				// the NOSE DOWN, which is what converts the rotor's lift into forward flight.
 				x = padX;
 				y = padY;
+				break;
+			case VCSInputContext::Menu:
+				// The one context this switch used to fall through, which left the stick claimed
+				// by HandleHostAxis and then spent on nothing: dead in every one of the game's
+				// own pages, on the device most players reach for first.
+				//
+				// Passed straight to the nub rather than synthesised into d-pad presses, because
+				// the front end reads the nub itself and reads it the same way - measured over
+				// the debugger, one page step per deflection, the game doing its own edge
+				// detection exactly as it does for the d-pad. Synthesising steps on top of that
+				// would be a second opinion on a question the game has already answered.
+				//
+				// The tab lock reaches it for the reason the d-pad rows are claimed at all.
+				if (!MenuTabsLocked(context)) {
+					x = padX;
+					y = padY;
+				}
 				break;
 			default:
 				break;

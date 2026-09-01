@@ -2578,6 +2578,24 @@ harmlessly - it opens a menu or triples the game speed in the middle of a firefi
 rows are what prevent that, and they are the same inverse-Escape-trap discipline the keyboard
 table already documents.
 
+**The `Menu` context was the exception, and "every context" is not a slogan - it is that bug.**
+The pad table had rows for on-foot, vehicle, aircraft and aiming, and none at all for the game's
+own pages. So in the map, the briefs and the stats every pad control fell through: a finger
+resting on the left trigger opened PPSSPP's own pause screen over the game's menu, the right one
+fast-forwarded. The tab lock could not reach a pad either, because it works by stripping
+directions out of the mask and a direction that was never claimed is not in the mask - which is
+why the keyboard's arrows behaved on those pages and a pad's d-pad wandered off the hidden tab
+strip. Both fixed by giving `Menu` a full row set like every other context.
+
+**And the nub navigates this front end, which is worth knowing before synthesising anything.**
+`ApplyAnalog`'s switch had a case per gameplay context and fell through for `Menu`, so the stick
+was claimed by `HandleHostAxis` and then spent on nothing: dead in every one of the game's pages,
+on the device most players reach for first. Measured over the debugger before choosing a fix -
+`input.analog.send` with the pause menu up steps the page exactly as a d-pad press does, ONE step
+per deflection, the game doing its own edge detection (page 0 → 5 on a 1.2s hold, same as one
+press of down). So the stick is passed straight to the nub rather than synthesised into d-pad
+steps, and it asks the tab lock the same question the buttons do.
+
 **The pad needs a held-set of its own.** An arrow key and a d-pad direction are the *same*
 `InputKeyCode`, so a single set would have the debug spawner's arrow-key rows firing whenever
 somebody pressed a direction on a pad. The two devices genuinely cannot share that state.
