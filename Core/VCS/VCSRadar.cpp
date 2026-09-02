@@ -16,6 +16,7 @@
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSRoute.h"
+#include "Core/VCS/VCSState.h"
 
 namespace VCS {
 
@@ -208,6 +209,40 @@ void RadarTick() {
 		g_segments.clear();
 		g_status = "hud hidden";
 		return;
+	}
+
+	// And only while actually driving something that uses the streets.
+	//
+	// The route is a path through the ROAD GRAPH, so it describes a journey nobody on foot, in a
+	// boat or in the air is going to make: it runs to the nearest road rather than to where the
+	// player is, and it stays on roads that a boat cannot enter and an aircraft has no reason to
+	// follow. Drawn there it is not merely useless, it is wrong about the way to go.
+	//
+	// Bikes count as driving, and so does Unknown - the input layer already treats an unrecognised
+	// model as a car, and a line drawn for one vehicle too many is a smaller failure than a line
+	// withheld from a car whose model nobody has listed yet.
+	//
+	// An unreadable state draws, which is the rule the whole address table follows and the same
+	// call RadarOnScreen makes above: an overlay that vanishes because an address went stale is a
+	// worse failure than one that stays up when it need not.
+	{
+		const VCSState &state = GetState();
+		if (state.inVehicle.has_value()) {
+			const char *why = nullptr;
+			if (!*state.inVehicle) {
+				why = "on foot";
+			} else if (state.vehicleClass == VehicleClass::Boat ||
+			           state.vehicleClass == VehicleClass::Heli ||
+			           state.vehicleClass == VehicleClass::Plane) {
+				why = "not a road vehicle";
+			}
+			if (why) {
+				std::lock_guard<std::mutex> guard(g_lock);
+				g_segments.clear();
+				g_status = why;
+				return;
+			}
+		}
 	}
 
 	if (--g_recompute <= 0) {

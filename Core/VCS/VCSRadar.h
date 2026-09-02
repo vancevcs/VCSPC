@@ -133,6 +133,11 @@ bool RouteIsMission();
 // is the one state where everything else this reads stays valid while the radar is gone.
 bool RadarOnScreen();
 
+// The line is drawn while DRIVING a road vehicle and at no other time - not on foot, not in a
+// boat, not in the air. See the gate in RadarTick: the route is a path through the road graph, so
+// anywhere those roads are not the way to travel it is not merely useless but wrong about the
+// route. Cars, bikes and unrecognised models count as driving.
+
 // For the debugger: what the transform last read, and why nothing is drawing if nothing is.
 const char *RadarStatus();
 bool ReadRadarFrame(float *originX, float *originY, float *fwdX, float *fwdY, float *range);
