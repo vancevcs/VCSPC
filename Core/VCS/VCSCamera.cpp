@@ -68,6 +68,13 @@ static float g_desiredPitch = 0.0f;
 // to entry +/- kPitchRange forever, which is what the clamp was always meant to do.
 static float g_anchorPitch = 0.0f;
 static bool g_haveAnchorPitch = false;
+
+// Whether the player is strapped to a vehicle with a weapon - a mission's mounted gun.
+// See the block over PedAttachedTo in VCSAddresses.h: it is the one state where CameraYaw
+// is measured from the VEHICLE rather than from the world, so it is a different camera in
+// every way that matters here, and the context cannot say so - the game reports no vehicle
+// at all and the fork sees an ordinary on-foot player.
+static bool g_wasAttachedGun = false;
 // Last context we ran in, so a change (e.g. getting into a car) forces a fresh anchor.
 static VCSInputContext g_lastContext = VCSInputContext::Unknown;
 static int g_holdFrames = 0;
@@ -1445,6 +1452,32 @@ void CameraTick(VCSInputContext context) {
 		g_kickRestTicks = 0;
 	}
 
+	// Being strapped to a vehicle is a camera change that no context change announces, so it gets
+	// the same treatment as one. Without this the desired yaw carries across the boundary, and it
+	// carries across as the WRONG KIND OF NUMBER: a world heading on the way in, a small signed
+	// offset from the vehicle's nose on the way out. Either way the first write asserts a value
+	// the receiving camera cannot use, which is how a mounted gun came to sit pinned at its limit
+	// however far the mouse moved.
+	//
+	// It matters more than the context version because there is no expiry to rescue it: with
+	// returnLook off the hold parks open, so the anchor taken on the last stroke before boarding
+	// is asserted for as long as the ride lasts.
+	const bool attachedGun = ReadAddrU32(VCSAddr::PedAttachedTo).value_or(0) != 0;
+	if (attachedGun != g_wasAttachedGun) {
+		g_wasAttachedGun = attachedGun;
+		g_holdFrames = 0;
+		g_releaseFrames = 0;
+		g_haveAnchorPitch = false;
+		g_haveIntentPitch = false;
+		g_haveIntentYaw = false;
+		g_haveLastFront = false;
+		g_yawKickSign = 0.0f;
+		g_yawKickAgainst = 0.0f;
+		g_yawKickLead = 0.0f;
+		g_haveKickFront = false;
+		g_kickRestTicks = 0;
+	}
+
 	// Learn from the game while it still has the camera. This has to run BEFORE anything below
 	// claims a stroke, because the one thing that makes a sample worth having is that the value
 	// being read is the game's own and not ours.
@@ -1679,7 +1712,17 @@ void CameraTick(VCSInputContext context) {
 			// thing that keeps it quiet. Measured means per frame: 0.4069 rad of correction above the
 			// entry angle versus 0.0244 in the first 0.15 below it. See pitchVehicleDown.
 			float lo, hi;
-			if (inVehicleOfAnyKind) {
+			if (attachedGun) {
+				// The mounted gun's own arc, read from the ped rather than derived from an anchor:
+				// mode 45 clamps pitch to [-PedAimPitchDown, +PedAimPitchUp] whatever we write, so
+				// matching it is what stops the intent running away past a stop it cannot pass.
+				// Asymmetric on purpose - a door gunner looks DOWN. GON_C4 asks for 10 up and 55
+				// down, and the script sets both in degrees (04CF, 04D0).
+				const float up = ReadAddrFloat(VCSAddr::PedAimPitchUp).value_or(0.0f);
+				const float down = ReadAddrFloat(VCSAddr::PedAimPitchDown).value_or(0.0f);
+				hi = (up > 0.001f && up < 3.2f) ? up : kPitchRange;
+				lo = (down > 0.001f && down < 3.2f) ? -down : -kPitchRange;
+			} else if (inVehicleOfAnyKind) {
 				hi = g_anchorPitch;
 				lo = g_anchorPitch - g_settings.pitchVehicleDown;
 			} else {
@@ -1939,7 +1982,26 @@ void CameraTick(VCSInputContext context) {
 
 	// The game stores yaw in [0, 2PI). Feeding it a value outside that range makes the camera
 	// snap, so wrap rather than clamp - this is a heading, it genuinely is circular.
-	g_desiredYaw = WrapYaw(g_desiredYaw);
+	//
+	// Except on a mounted gun, where it is not a heading at all but a signed offset from the
+	// vehicle's nose, and the game clamps it to an arc instead of normalising it (mode 45 skips
+	// its own wrap at 0x089a3980 on that branch). Wrapping there is actively destructive: half of
+	// a +/-70 degree window is NEGATIVE, and -0.4 wrapped to 5.88 is not a small left offset, it
+	// is two and a half turns past the stop. Clamp to the game's own limit instead, so the aim
+	// stops where the gun stops and comes straight back the moment the mouse comes back - rather
+	// than winding up an angle the player has to unwind before anything moves.
+	if (attachedGun) {
+		// Its own field, because the limit is the mission's: attach_ped_to_car carries it and
+		// GON_C4 asks for 70 degrees. Refused rather than guessed if it reads implausibly - a
+		// zero would pin the gun dead ahead, which is worse than the wrap this replaces.
+		const float limit = ReadAddrFloat(VCSAddr::PedAimYawLimit).value_or(0.0f);
+		if (limit > 0.01f && limit < 3.2f) {
+			if (g_desiredYaw > limit) g_desiredYaw = limit;
+			if (g_desiredYaw < -limit) g_desiredYaw = -limit;
+		}
+	} else {
+		g_desiredYaw = WrapYaw(g_desiredYaw);
+	}
 
 	// Hold at full authority, then WALK the camera back to the game rather than dropping it.
 	//

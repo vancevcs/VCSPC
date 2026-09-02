@@ -646,6 +646,10 @@ enum class VCSAddr {
 	// follow the crosshair instead of the crosshair sliding off the gun.
 	PedHeading,
 	PedHeadingTarget,
+	PedAttachedTo,
+	PedAimYawLimit,
+	PedAimPitchUp,
+	PedAimPitchDown,
 
 	// The entity the ped is pointing its gun at - re3's m_pPointGunAt. Its world position is what
 	// the arm IK aims along, which is why the gun reads as world-locked once nothing moves it.
@@ -863,6 +867,35 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// lag the whole aim-model effort exists to remove.
 	{ VCSAddr::PedHeading,       "PedHeading",       VCSAddrType::Float, 0x8d0, VCSAddr::PlayerBase, "m_fRotationCur, radians. Forward = (-sin, cos). Free aim freezes without this being driven" },
 	{ VCSAddr::PedHeadingTarget, "PedHeadingTarget", VCSAddrType::Float, 0x8d4, VCSAddr::PlayerBase, "m_fRotationDest. The game eases PedHeading toward it" },
+
+	// --- The attached gunner, and the one state where CameraYaw is NOT a world angle ---
+	//
+	// A mission can strap the player to a vehicle with a weapon instead of seating him in it:
+	// `02B6 attach_ped_to_car $PLAYER_CHAR car $5666 offset 1.6 1.0 0 position 3 angle_limit 70.0
+	// weapon 34`, which is GON_C4's helicopter ride. PlayerVehicle reads 0 throughout - the game
+	// does not consider him to be IN anything - so the fork sees an on-foot player holding a gun,
+	// and every on-foot assumption about the camera is wrong at once.
+	//
+	// What actually changes is the meaning of `CameraYaw`. CCam::Process mode 45 branches on this
+	// pointer at 0x089a3548, and on the attached branch it starts Beta at ZERO (0x089a3578) rather
+	// than at `PedHeading + PI/2` (0x089a3584), skips the [0,2PI) normalise after integrating
+	// (0x089a3980), and clamps instead. So while attached the field is a SIGNED angle measured
+	// from the vehicle's own heading.
+	//
+	// Measured, by asserting the field every frame on a savestate of that ride and reading where
+	// the camera's Front then pointed relative to the helicopter:
+	//
+	//     assert 0.00 -> 0.0 deg      assert  0.40 ->  22.9 deg
+	//     assert 1.00 -> 56.3 deg     assert -0.40 -> -23.8 deg
+	//
+	// One to one, from the nose. Before that first write it sat at exactly 70.0 deg - pinned
+	// against the clamp, because this fork had been asserting an absolute world yaw of 3.82 rad
+	// (219 deg) into it. That is the whole bug: the aim appears to snap back to a fixed place and
+	// stay there, because a value that far outside the window has nowhere else to land.
+	{ VCSAddr::PedAttachedTo,    "PedAttachedTo",    VCSAddrType::U32,   0x848, VCSAddr::PlayerBase,  "The vehicle this ped is strapped to, 0 when not. CCam mode 45 reads it at 0x089a3548" },
+	{ VCSAddr::PedAimYawLimit,   "PedAimYawLimit",   VCSAddrType::Float, 0x760, VCSAddr::PlayerBase,  "Yaw arc each side, radians - attach_ped_to_car's angle_limit. 1.22173 = 70 deg on GON_C4" },
+	{ VCSAddr::PedAimPitchUp,    "PedAimPitchUp",    VCSAddrType::Float, 0xca0, VCSAddr::PlayerBase,  "Pitch limit UP, radians. Script 04CF writes it as degrees*PI/180; 10 deg on GON_C4" },
+	{ VCSAddr::PedAimPitchDown,  "PedAimPitchDown",  VCSAddrType::Float, 0xca4, VCSAddr::PlayerBase,  "Pitch limit DOWN, radians. Script 04D0, same conversion; 55 deg on GON_C4" },
 	// re3's CPed::m_pPointGunAt, read straight out of FireInstantHit (0x08a48950: `lw a0, 0x81c(s2)`
 	// then branch on whether it is null). Set through one setter at 0x08907b98 and cleared at
 	// 0x08913a70 - a pointer with exactly one writer, which is what a member like this should look
