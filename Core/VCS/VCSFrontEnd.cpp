@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -797,28 +798,37 @@ bool PrepareScriptForSave() {
 		return false;
 	}
 
-	// The restart position, copied exactly as `$284 = $783` does. `$783..785` is where the last
-	// save pickup was collected, and the load path copies it straight back out again.
+	// The restart position: where the player IS, and NOT `$283 = $783` the way the script's own
+	// routine copies it. The full argument is over kVCSGlobalRestartX in VCSAddresses.h; the
+	// short version is that INITSAV reads this position next to `$_282`, the safe house whose
+	// interior is swapped in, and the pickup's coordinates only make sense while that names the
+	// house they are inside. An auto-save fires outdoors with `$_282` at -1, which pairs a
+	// position inside the house with a world where the house is solid - loading one of those put
+	// the player inside the walls with no way out but dying.
+	//
+	// Read on this frame, like `$_282` is saved on this frame, so the two cannot disagree: an
+	// auto-save outdoors restarts outdoors, and one taken standing in a safe house restarts in
+	// the safe house the game is about to swap back in.
 	float x = 0.0f, y = 0.0f, z = 0.0f;
-	const std::optional<float> sx = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX));
-	const std::optional<float> sy = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX + 1));
-	const std::optional<float> sz = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX + 2));
-	if (sx && sy && sz) {
-		x = *sx; y = *sy; z = *sz;
+	bool havePosition = false;
+	if (const std::optional<u32> player = ReadAddrU32(VCSAddr::PlayerBase)) {
+		const std::optional<float> px = ReadFloat(*player + kVCSEntityPositionOffset);
+		const std::optional<float> py = ReadFloat(*player + kVCSEntityPositionOffset + 4);
+		const std::optional<float> pz = ReadFloat(*player + kVCSEntityPositionOffset + 8);
+		if (px && py && pz) {
+			x = *px; y = *py; z = *pz;
+			havePosition = true;
+		}
 	}
-	// Zero means the player has never used a safe house in this game, which for an auto-save
-	// fired by a mission is entirely possible - the first one passes long before anyone walks
-	// into a save icon. Restarting at the map's origin is not a place; where they are standing
-	// is. The game's own routine cannot meet this case, because collecting the pickup is what
-	// sets those globals in the first place.
-	if (x == 0.0f && y == 0.0f && z == 0.0f) {
-		if (const std::optional<u32> player = ReadAddrU32(VCSAddr::PlayerBase)) {
-			const std::optional<float> px = ReadFloat(*player + kVCSEntityPositionOffset);
-			const std::optional<float> py = ReadFloat(*player + kVCSEntityPositionOffset + 4);
-			const std::optional<float> pz = ReadFloat(*player + kVCSEntityPositionOffset + 8);
-			if (px && py && pz) {
-				x = *px; y = *py; z = *pz;
-			}
+	if (!havePosition) {
+		// The player is the whole point and is normally readable; if they are not, the script's
+		// own answer is the only other one there is. A stale restart position beats the map's
+		// origin, which is not a place.
+		const std::optional<float> sx = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX));
+		const std::optional<float> sy = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX + 1));
+		const std::optional<float> sz = ReadFloat(GlobalAddr(g, kVCSGlobalSavePointX + 2));
+		if (sx && sy && sz) {
+			x = *sx; y = *sy; z = *sz;
 		}
 	}
 
@@ -832,6 +842,20 @@ bool PrepareScriptForSave() {
 	WriteFloat(GlobalAddr(g, kVCSGlobalRestartX), x);
 	WriteFloat(GlobalAddr(g, kVCSGlobalRestartX + 1), y);
 	WriteFloat(GlobalAddr(g, kVCSGlobalRestartX + 2), z);
+
+	// Which way they were facing, on the same argument - `$_287` was set from the pickup and is
+	// describing somewhere else entirely by now. Degrees for the script, radians in the ped, and
+	// simply left alone when it cannot be read: a wrong facing is a shrug, a wrong position was
+	// the bug.
+	if (havePosition) {
+		if (const std::optional<float> yaw = ReadAddrFloat(VCSAddr::PedHeading)) {
+			float degrees = std::fmod(*yaw * 57.2957795f, 360.0f);
+			if (degrees < 0.0f) {
+				degrees += 360.0f;
+			}
+			WriteFloat(GlobalAddr(g, kVCSGlobalRestartHeading), degrees);
+		}
+	}
 	return true;
 }
 

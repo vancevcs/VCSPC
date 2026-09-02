@@ -506,9 +506,31 @@ inline constexpr u32 kVCSMapPanY = 0xc4;
 // `$274`/`$275` again on the wasted-and-busted path, which the script refreshes for itself at
 // every mission start. Position is different - the load path copies `$284..286` straight back
 // into `$783..785` - so it is written.
+//
+// **And the position written is the PLAYER's, not `$783..785`.** That is a deliberate departure
+// from the routine above, and the reason is INITSAV, the script's own spawn code, which pairs the
+// restart position with `$_282` - the safe house whose interior is currently swapped in:
+//
+//     $_282 > -1  ->  swap that interior back in, place the player from its own table
+//     otherwise   ->  load_scene $783 $784 $785
+//     either way  ->  get_ground_z_for_3d_coord $783 $784 $785 ; set_char_coordinates there
+//
+// The safe house routine can copy the pickup because it only ever runs while the player is
+// standing ON that pickup, inside the house, with `$_282` naming it: both halves of the pair
+// describe the same moment. An auto-save fires wherever the mission ended, with `$_282` at -1 -
+// so copying the pickup pairs an INTERIOR position with an EXTERIOR world, and the load drops the
+// player inside the safe house's solid shell with no way out but dying. Reported from play, and
+// it stayed hidden for as long as one particular safe house was in use, whose pickup happens to
+// sit somewhere escapable. The player's own position cannot disagree with `$_282`, because the
+// two are read on the same frame.
+//
+// `$_287` is the heading INITSAV faces the player in on that same branch, and goes with the
+// position for the same reason. DEGREES there - the script's own literals run to -177.68 - and
+// radians in `PedHeading`, which is where ours comes from.
 inline constexpr u32 kVCSGlobalLoadedGame = 4;     // $_4
 inline constexpr u32 kVCSGlobalOnMission = 789;    // $ONMISSION
 inline constexpr u32 kVCSGlobalRestartX = 284;     // $_284, $_285, $_286
+inline constexpr u32 kVCSGlobalRestartHeading = 287;  // $_287, degrees
 inline constexpr u32 kVCSGlobalSavePointX = 783;   // $783, $784, $785 - the last save pickup
 
 inline constexpr u32 kVCSEntityPositionOffset = 0x30;
