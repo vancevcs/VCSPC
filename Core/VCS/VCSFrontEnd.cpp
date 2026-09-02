@@ -78,6 +78,9 @@ static bool FindBlipOfType(u32 wantType, float *x, float *y, bool requireNoIcon 
 	for (int i = 0; i < kVCSBlipMaxEntries; i++) {
 		const u32 entry = *store + kVCSBlipArray + (u32)i * kVCSBlipStride;
 		const std::optional<u32> type = ReadU32(entry + kVCSBlipType);
+		// +0x04 doubles as the "is this slot live" test: a free slot reads 0 there, which is why
+		// this was called Active before its values were decoded. It is the same word the entity
+		// check below reads.
 		const std::optional<u32> active = ReadU32(entry + kVCSBlipActive);
 		if (!type || !active || *type != wantType || *active == 0) {
 			continue;
@@ -87,6 +90,24 @@ static bool FindBlipOfType(u32 wantType, float *x, float *y, bool requireNoIcon 
 			if (!icon || *icon != 0) {
 				continue;
 			}
+		}
+		// A blip fastened to a car, a ped or an object is not a destination, whatever its stored
+		// position says. The game resolves the handle at +0x08 every time it draws one; the x/y in
+		// the record is where that entity stood when the blip was created and is never written
+		// again. See kVCSBlipEntityKind for the measurement - a mission's target car 25 units from
+		// the player, its blip still naming a spot 2081 units away, which is the "the GPS sends me
+		// back to somewhere I have already been" report.
+		//
+		// Refused rather than followed to the entity, because following it needs the vehicle, ped
+		// and object pools and there is no static pointer to them yet - the one that looked like
+		// it indexed the vehicle pool agreed for entries 0 and 1 and disagreed for 17 and 23. So a
+		// mission that marks a CAR gets no line rather than a line to the wrong place, which is
+		// the trade this file makes everywhere else: a quiet failure over a confident wrong one.
+		//
+		// Unreadable means keep it, like every other read here.
+		const std::optional<u32> fastenedTo = ReadU32(entry + kVCSBlipEntityKind);
+		if (fastenedTo && *fastenedTo >= 1 && *fastenedTo <= kVCSBlipKindMaxEntity) {
+			continue;
 		}
 		const std::optional<float> bx = ReadFloat(entry + kVCSBlipX);
 		const std::optional<float> by = ReadFloat(entry + kVCSBlipY);

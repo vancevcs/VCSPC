@@ -348,6 +348,23 @@ inline constexpr u32 kVCSPathPedNodeCount = 0x14;   // ThePaths+0x14, read 5293:
 inline constexpr u32 kVCSBlipArray = 0x270;
 inline constexpr u32 kVCSBlipStride = 0x30;
 inline constexpr u32 kVCSBlipActive = 0x04;
+
+// What the blip is FASTENED TO, which decides whether its stored position means anything.
+//
+//   1  a vehicle      2  a ped      3  an object      4  a plain coordinate
+//
+// The first three carry an entity handle at +0x08 and the game resolves it every frame when it
+// draws them; the x/y in the record is only where the entity WAS when the blip was made, and the
+// game never writes it again. Measured on a live mission blip: type 1, handle 0x1746, its stored
+// position 2081 units from the player and frozen for as long as it was watched - while the car
+// that handle names sat 25 units away, beside the player, having driven the whole way there.
+//
+// So a route built on the stored coordinate of an entity blip goes to a place the mission stopped
+// caring about, which is exactly what "the GPS keeps sending me back to where I have already been"
+// turned out to be.
+inline constexpr u32 kVCSBlipEntityKind = 0x04;
+inline constexpr u32 kVCSBlipEntityHandle = 0x08;
+inline constexpr u32 kVCSBlipKindMaxEntity = 3;   // 1..3 are fastened to something; 4+ are places
 inline constexpr u32 kVCSBlipX = 0x10;
 inline constexpr u32 kVCSBlipY = 0x14;
 inline constexpr u32 kVCSBlipType = 0x20;
