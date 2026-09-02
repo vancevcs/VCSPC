@@ -74,6 +74,8 @@ MODEL_CLASS = {
     198: "boat",     # hovercr - hovercraft, unconfirmed which class
     205: "bike",     # sanchez
     212: "bike",     # pcj600
+    188: "heli",     # huey
+    189: "heli",     # hueyhosp - the Air Ambulance
     213: "heli",     # maverick
     214: "boat",     # reefer
     215: "boat",     # speeder

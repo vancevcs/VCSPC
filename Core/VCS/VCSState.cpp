@@ -47,6 +47,18 @@ VehicleClass VehicleClassForModel(u32 model) {
 	// Helicopters. The Sparrow and Sea Sparrow belong here despite the "sparrow" name - both are
 	// light helicopters, not fixed-wing, and "coastg" is the Coastguard Maverick rather than a
 	// coastguard boat.
+	// The two Hueys. hueyhosp is the Air Ambulance and it was MEASURED: read live out of
+	// PlayerVehicle+0x56 while sitting in one, after it turned up flying like a car - which is
+	// what an unlisted model gets, since Unknown is treated as a car by design. Its sibling 188 is
+	// the same airframe one id below it, named in the game's own model-name table, and is listed
+	// on that basis rather than on a reading of its own.
+	//
+	// It announced itself twice over, and the second way is worth remembering: the GPS line drew
+	// while the player was sitting in it. That line is gated on driving a road vehicle, so a
+	// helicopter that draws one is a helicopter the classifier does not know about - a free check
+	// on this list that costs nothing to look at.
+	case 188:  // huey
+	case 189:  // hueyhosp   - the Air Ambulance
 	case 213:  // maverick
 	case 260:  // vcnmav      - VCN Maverick
 	case 261:  // polmav      - VCPD Maverick
