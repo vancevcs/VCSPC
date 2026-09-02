@@ -300,7 +300,15 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// --- In a vehicle ---
 	{ VCSInputContext::InVehicle, NKCODE_W,                  CTRL_CROSS,     "Accelerate", "Accelerate", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_S,                  CTRL_SQUARE,    "Brake / reverse", "Brake / reverse", VCSKeyList::InVehicle },
-	{ VCSInputContext::InVehicle, NKCODE_SPACE,              CTRL_RTRIGGER,  "Handbrake", "Handbrake", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle, NKCODE_SPACE,              CTRL_RTRIGGER,  "Handbrake / switch robot arm (verified)", "Handbrake", VCSKeyList::InVehicle },
+	// The L trigger, plainly, which this context otherwise only reaches through a glance. Inert in
+	// an ordinary vehicle - L alone is the glance MODIFIER and does nothing without a direction,
+	// which is what made it look like a dead button for so long - and it is half of what the
+	// Domestobot's own help line asks for. The game says it outright - "Control the domestobot like
+	// a car. Use L button and R button to switch the robot arms" - so the car set is not an
+	// approximation here, it is the scheme the mission was written against; only the L half was
+	// missing. Space, the handbrake, is the R half and already reached it.
+	{ VCSInputContext::InVehicle, NKCODE_TAB,                CTRL_LTRIGGER,  "Switch robot arm / glance modifier (verified)", "Left button", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_F,                  CTRL_TRIANGLE,  "Exit vehicle", "Exit vehicle", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_EXT_MOUSEBUTTON_1,  CTRL_CIRCLE,    "Drive-by fire", "Drive-by fire", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_CTRL_LEFT,          CTRL_CIRCLE,    "Drive-by fire", "Drive-by fire", VCSKeyList::InVehicle },
@@ -1003,6 +1011,24 @@ VCSInputContext ResolveContext(const VCSState &state) {
 	// menu is up and at no other time.
 	if (GameMenuActive()) {
 		return VCSInputContext::Menu;
+	}
+
+	// Driving something by remote is DRIVING, and the game does not record it in PlayerVehicle -
+	// the ped is standing somewhere else while the machine moves. Checked before the on-foot arm
+	// below, because on foot is exactly what that ped looks like, and walking bindings for a
+	// machine that drives is the whole complaint: Shift accelerated the Domestobot, Space reversed
+	// it, and the two buttons its own help line names were not reachable at all.
+	//
+	// Its class comes from its own model, so a mission that ever hands over a remote helicopter
+	// gets the aircraft set without this needing to hear about it.
+	if (const std::optional<u32> remote = ReadAddrU32(VCSAddr::PlayerRemoteVehicle)) {
+		if (*remote != 0) {
+			const std::optional<u16> model = ReadU16(*remote + kVCSVehicleModelOffset);
+			if (model && VehicleClassIsAircraft(VehicleClassForModel(*model))) {
+				return VCSInputContext::InAircraft;
+			}
+			return VCSInputContext::InVehicle;
+		}
 	}
 
 	if (state.inVehicle.value_or(false)) {

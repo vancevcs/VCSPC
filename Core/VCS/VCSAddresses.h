@@ -551,6 +551,7 @@ inline constexpr u32 kVCSGlobalRestartHeading = 287;  // $_287, degrees
 inline constexpr u32 kVCSGlobalSavePointX = 783;   // $783, $784, $785 - the last save pickup
 
 inline constexpr u32 kVCSEntityPositionOffset = 0x30;
+inline constexpr u32 kVCSVehicleModelOffset = 0x56;   // same field VCSAddr::VehicleModel reads
 inline constexpr u32 kVCSEntityFlagsOffset = 0x48;
 inline constexpr u32 kVCSEntityTypeMask = 0x0e;
 inline constexpr u32 kVCSEntityTypeShift = 1;
@@ -664,6 +665,7 @@ enum class VCSAddr {
 	PedHeading,
 	PedHeadingTarget,
 	PedAttachedTo,
+	PlayerRemoteVehicle,
 	PedAimYawLimit,
 	PedAimPitchUp,
 	PedAimPitchDown,
@@ -910,6 +912,20 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	// (219 deg) into it. That is the whole bug: the aim appears to snap back to a fixed place and
 	// stay there, because a value that far outside the window has nowhere else to land.
 	{ VCSAddr::PedAttachedTo,    "PedAttachedTo",    VCSAddrType::U32,   0x848, VCSAddr::PlayerBase,  "The vehicle this ped is strapped to, 0 when not. CCam mode 45 reads it at 0x089a3548" },
+
+	// The vehicle the player is driving BY REMOTE, which PlayerVehicle knows nothing about.
+	//
+	// "Domo Arigato Domestoboto" hands the player a robot - model 208, `bobo` in the game's own
+	// name table - and drives it from a ped standing somewhere else entirely: measured with the ped
+	// at (5.0, 1175.7, -195.2) in an interior and the robot 13 units away at (17.5, 1172.1, -188.8),
+	// PlayerVehicle reading 0 the whole time. So the fork saw a man on foot and gave him walking
+	// bindings for a machine that drives, which is why Shift accelerated it and Space reversed it.
+	//
+	// Found by taking the six static globals that pointed at the robot and reading the same six out
+	// of three savestates of ordinary play. Five of them hold an entity in all of those - they are
+	// camera and world bookkeeping. This one is 0 in every one of them and holds the robot here,
+	// which is the whole of the evidence for what it means.
+	{ VCSAddr::PlayerRemoteVehicle, "PlayerRemoteVehicle", VCSAddrType::U32, 0x08bde4b4, kNoBase, "The vehicle being driven by remote (the Domestobot), 0 when none. Near CPad, so likely CPlayerInfo's" },
 	{ VCSAddr::PedAimYawLimit,   "PedAimYawLimit",   VCSAddrType::Float, 0x760, VCSAddr::PlayerBase,  "Yaw arc each side, radians - attach_ped_to_car's angle_limit. 1.22173 = 70 deg on GON_C4" },
 	{ VCSAddr::PedAimPitchUp,    "PedAimPitchUp",    VCSAddrType::Float, 0xca0, VCSAddr::PlayerBase,  "Pitch limit UP, radians. Script 04CF writes it as degrees*PI/180; 10 deg on GON_C4" },
 	{ VCSAddr::PedAimPitchDown,  "PedAimPitchDown",  VCSAddrType::Float, 0xca4, VCSAddr::PlayerBase,  "Pitch limit DOWN, radians. Script 04D0, same conversion; 55 deg on GON_C4" },
