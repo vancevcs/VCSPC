@@ -25,8 +25,6 @@ VCSRadarSettings g_settings;
 
 std::mutex g_lock;
 std::vector<RadarSegment> g_segments;   // guarded by g_lock
-float g_facing = 0.0f;                  // guarded by g_lock
-bool g_haveFacing = false;              // guarded by g_lock
 bool g_isMission = false;               // guarded by g_lock
 
 // The route, in world units. Held between recomputes because A* over three thousand nodes is not
@@ -76,6 +74,54 @@ bool ClipToDisc(float x0, float y0, float x1, float y1,
 	*ox1 = x0 + hi * dx;
 	*oy1 = y0 + hi * dy;
 	return true;
+}
+
+
+// Cut the player's blip back out of an already-clipped segment, in the same unit-disc space.
+//
+// The game draws the player's marker at the radar's centre, underneath everything of ours, and the
+// route always runs through the centre - that being where the player is. Leaving a hole there is
+// what puts the marker back on top of the line; see playerHoleRadius for why it is a hole rather
+// than a redraw.
+//
+// Returns the parts that survive, as up to two t ranges into the segment: none when it lies wholly
+// inside the hole, two when it goes in one side and out the other.
+int ClipOutHole(float x0, float y0, float x1, float y1, float r, float t[4]) {
+	t[0] = 0.0f;
+	t[1] = 1.0f;
+	if (r <= 0.0f) {
+		return 1;
+	}
+	const float dx = x1 - x0;
+	const float dy = y1 - y0;
+	const float a = dx * dx + dy * dy;
+	if (a < 1e-9f) {
+		return 1;
+	}
+	const float b = 2.0f * (x0 * dx + y0 * dy);
+	const float c = x0 * x0 + y0 * y0 - r * r;
+	const float disc = b * b - 4.0f * a * c;
+	if (disc <= 0.0f) {
+		return 1;   // the line misses the blip entirely
+	}
+	const float sq = std::sqrt(disc);
+	const float tA = (-b - sq) / (2.0f * a);
+	const float tB = (-b + sq) / (2.0f * a);
+	if (tB <= 0.0f || tA >= 1.0f) {
+		return 1;   // the blip is off one end of this segment
+	}
+	int n = 0;
+	if (tA > 0.0f) {
+		t[n * 2 + 0] = 0.0f;
+		t[n * 2 + 1] = tA;
+		n++;
+	}
+	if (tB < 1.0f) {
+		t[n * 2 + 0] = tB;
+		t[n * 2 + 1] = 1.0f;
+		n++;
+	}
+	return n;
 }
 
 }  // namespace
@@ -177,42 +223,13 @@ void RadarTick() {
 		return;
 	}
 
-	// Where the player's arrow should point, in the radar's own frame.
-	//
-	// The vehicle's heading when there is one, the ped's when on foot - what the arrow means is
-	// "the way you are travelling", and in a car that is the car's business, not the driver's.
-	float facing = 0.0f;
-	bool haveFacing = false;
-	{
-		std::optional<u32> entity = ReadAddrU32(VCSAddr::PlayerVehicle);
-		if (!entity || *entity == 0) {
-			entity = ReadAddrU32(VCSAddr::PlayerBase);
-		}
-		if (entity && *entity != 0) {
-			if (const std::optional<float> yaw = ReadEntityHeading(*entity)) {
-				// Negated, and that is measured rather than reasoned: with the plain cos/sin the
-				// arrow came out pointing left when the car went right AND backwards when it went
-				// forwards. Both axes flipped at once is a half turn, not a mirror and not a sign
-				// error in the rotation below - so ReadEntityHeading's yaw names the direction
-				// opposite to travel. It is only ever used for a difference of angles elsewhere,
-				// where a consistent half turn cancels and nobody would have noticed.
-				const float dirX = -std::cos(*yaw);
-				const float dirY = -std::sin(*yaw);
-				// Through the same rotation the line goes through, so the arrow and the road it is
-				// on can never disagree.
-				const float rx = fy * dirX + fx * dirY;
-				const float ry = fy * dirY - fx * dirX;
-				// Clockwise from straight up, which is the angle the draw wants: rotating "up" by
-				// this lands on (sin, -cos), and the screen's y runs the other way to the radar's.
-				facing = std::atan2(rx, ry);
-				haveFacing = true;
-			}
-		}
-	}
-
 	std::vector<RadarSegment> built;
 	built.reserve(g_route.size());
 	const float inv = 1.0f / range;
+
+	// The player's blip, as a fraction of the radar rather than in pixels, so it can be subtracted
+	// in the same space the clip works in.
+	const float hole = g_settings.radius > 0.0f ? g_settings.playerHoleRadius / g_settings.radius : 0.0f;
 
 	float px = 0.0f, py = 0.0f;
 	bool havePrev = false;
@@ -225,14 +242,22 @@ void RadarTick() {
 		if (havePrev) {
 			float a0, b0, a1, b1;
 			if (ClipToDisc(px, py, rx, ry, &a0, &b0, &a1, &b1)) {
-				RadarSegment seg;
-				// Radar space is +x right and +y forward; the screen's y grows downward, which is
-				// the one sign that has to be flipped on the way out.
-				seg.x1 = g_settings.centreX + a0 * g_settings.radius;
-				seg.y1 = g_settings.centreY - b0 * g_settings.radius;
-				seg.x2 = g_settings.centreX + a1 * g_settings.radius;
-				seg.y2 = g_settings.centreY - b1 * g_settings.radius;
-				built.push_back(seg);
+				float t[4];
+				const int pieces = ClipOutHole(a0, b0, a1, b1, hole, t);
+				const float segDX = a1 - a0;
+				const float segDY = b1 - b0;
+				for (int i = 0; i < pieces; i++) {
+					const float lo = t[i * 2 + 0];
+					const float hi = t[i * 2 + 1];
+					RadarSegment seg;
+					// Radar space is +x right and +y forward; the screen's y grows downward, which
+					// is the one sign that has to be flipped on the way out.
+					seg.x1 = g_settings.centreX + (a0 + lo * segDX) * g_settings.radius;
+					seg.y1 = g_settings.centreY - (b0 + lo * segDY) * g_settings.radius;
+					seg.x2 = g_settings.centreX + (a0 + hi * segDX) * g_settings.radius;
+					seg.y2 = g_settings.centreY - (b0 + hi * segDY) * g_settings.radius;
+					built.push_back(seg);
+				}
 			}
 		}
 		px = rx; py = ry;
@@ -242,8 +267,6 @@ void RadarTick() {
 	{
 		std::lock_guard<std::mutex> guard(g_lock);
 		g_segments.swap(built);
-		g_facing = facing;
-		g_haveFacing = haveFacing;
 		g_isMission = g_routeIsMission;
 		g_status = g_segments.empty() ? "route off radar" : "drawing";
 	}
@@ -259,15 +282,6 @@ bool RouteIsMission() {
 	return g_isMission;
 }
 
-bool GetPlayerFacing(float *angle) {
-	std::lock_guard<std::mutex> guard(g_lock);
-	if (!g_haveFacing) {
-		return false;
-	}
-	*angle = g_facing;
-	return true;
-}
-
 const char *RadarStatus() {
 	return g_status;
 }
@@ -276,8 +290,6 @@ void RadarReset() {
 	std::lock_guard<std::mutex> guard(g_lock);
 	g_segments.clear();
 	g_route.clear();
-	g_haveFacing = false;
-	g_facing = 0.0f;
 	g_isMission = false;
 	g_routeIsMission = false;
 	g_recompute = 0;

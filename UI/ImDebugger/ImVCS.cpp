@@ -1485,6 +1485,10 @@ void ImVCSWindow::DrawRoute() {
 	ImGui::SliderFloat("Radar centre Y", &rs.centreY, 0.0f, 272.0f, "%.1f");
 	ImGui::SliderFloat("Radar radius", &rs.radius, 4.0f, 120.0f, "%.1f");
 	ImGui::SliderFloat("Line thickness", &rs.thickness, 0.5f, 8.0f, "%.2f");
+	ImGui::SliderFloat("Player blip hole", &rs.playerHoleRadius, 0.0f, 16.0f, "%.1f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("How much of the line to leave out at the radar's centre, so the game's own player marker is not painted over. About half the marker; zero draws the line straight through it.");
+	}
 
 	const std::vector<VCS::RoutePoint> route = VCS::RouteToWaypoint();
 	VCS::RoutePoint player{}, marker{};

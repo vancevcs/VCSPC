@@ -1914,25 +1914,7 @@ bool EmuScreen::hasVisibleUI() {
 	return false;
 }
 
-// The GPS line over the game's radar.
-//
-// VCS::RadarTick has already done everything that needs PSP memory: this gets screen-space
-// segments in the PSP's own 480x272 coordinates and only has to place them on whatever rectangle
-// the display is actually being drawn into. That mapping is the same one the display layout screen
-// uses - output rect in pixels, scaled to dp - so the line stays put through window resizes,
-// stretched aspect ratios and integer scaling alike.
-// The game's own player marker, out of the texture pack, so that the pack's replacement is what
-// gets drawn rather than a stand-in of ours. Loaded once and kept; a miss is remembered too, so a
-// missing file costs one failed open per session instead of one per frame.
-static Draw::Texture *g_vcsPlayerIcon = nullptr;
-static bool g_vcsPlayerIconTried = false;
-
 static void VCSReleaseOverlayTextures() {
-	if (g_vcsPlayerIcon) {
-		g_vcsPlayerIcon->Release();
-		g_vcsPlayerIcon = nullptr;
-	}
-	g_vcsPlayerIconTried = false;
 	ReleaseVCSBootCurtainArt();
 }
 
@@ -1976,22 +1958,13 @@ static void DrawVCSCurtain(UIContext *ctx) {
 	DrawVCSBootCurtain(*ctx, 1.0f - t, g_vcsCurtainWord);
 }
 
-static Draw::Texture *VCSPlayerIcon(UIContext *ctx) {
-	if (g_vcsPlayerIconTried) {
-		return g_vcsPlayerIcon;
-	}
-	g_vcsPlayerIconTried = true;
-	const std::string discID = VCS::GetDiscID();
-	if (discID.empty()) {
-		return nullptr;
-	}
-	// Same place the texture replacement system reads from, so a pack that replaces the radar
-	// arrow replaces this too.
-	const Path path = GetSysDirectory(DIRECTORY_TEXTURES) / discID / "HUD" / "Radar" / "Player.png";
-	g_vcsPlayerIcon = CreateTextureFromFile(ctx->GetDrawContext(), path.c_str(), ImageFileType::DETECT, false);
-	return g_vcsPlayerIcon;
-}
-
+// The GPS line over the game's radar.
+//
+// VCS::RadarTick has already done everything that needs PSP memory: this gets screen-space
+// segments in the PSP's own 480x272 coordinates and only has to place them on whatever rectangle
+// the display is actually being drawn into. That mapping is the same one the display layout screen
+// uses - output rect in pixels, scaled to dp - so the line stays put through window resizes,
+// stretched aspect ratios and integer scaling alike.
 static void DrawVCSRouteOverlay(UIContext *ctx) {
 	const VCS::VCSRadarSettings &s = VCS::RadarSettings();
 	std::vector<VCS::RadarSegment> segments;
@@ -2064,48 +2037,6 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 			const float py = oy + cy * sy;
 			ctx->Draw()->Line(white, px - arm * sx, py, px + arm * sx, py, th, col);
 			ctx->Draw()->Line(white, px, py - arm * sy, px, py + arm * sy, th, col);
-		}
-	}
-
-	// And the player's arrow back on top of it. The radar turns with the player, so the arrow
-	// always points up and needs no rotation of its own - the map is what rotates underneath it.
-	if (s.drawPlayerIcon && !segments.empty()) {
-		if (Draw::Texture *icon = VCSPlayerIcon(ctx)) {
-			const float half = s.iconSize * 0.5f;
-			Bounds b;
-			b.x = ox + (s.centreX - half) * sx;
-			b.y = oy + (s.centreY - half) * sy;
-			b.w = s.iconSize * sx;
-			b.h = s.iconSize * sy;
-			// A rotated quad by hand, because DrawTexRect is axis-aligned and DrawImageRotated
-			// only takes atlas images - and this texture comes off disk, out of the pack.
-			float angle = 0.0f;
-			VCS::GetPlayerFacing(&angle);
-			const float ca = cosf(angle);
-			const float sa = sinf(angle);
-			const float cx = b.x + b.w * 0.5f;
-			const float cy = b.y + b.h * 0.5f;
-			const float hw = b.w * 0.5f;
-			const float hh = b.h * 0.5f;
-			const float lx[4] = { -hw,  hw,  hw, -hw };
-			const float ly[4] = { -hh, -hh,  hh,  hh };
-			const float uu[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
-			const float vv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-			float qx[4], qy[4];
-			for (int i = 0; i < 4; i++) {
-				qx[i] = cx + lx[i] * ca - ly[i] * sa;
-				qy[i] = cy + lx[i] * sa + ly[i] * ca;
-			}
-			ctx->Flush();
-			ctx->Begin();
-			ctx->GetDrawContext()->BindTexture(0, icon);
-			const int order[6] = { 0, 1, 2, 0, 2, 3 };
-			for (int i = 0; i < 6; i++) {
-				const int k = order[i];
-				ctx->Draw()->V(qx[k], qy[k], 0xFFFFFFFF, uu[k], vv[k]);
-			}
-			ctx->Flush();
-			ctx->RebindTexture();
 		}
 	}
 }

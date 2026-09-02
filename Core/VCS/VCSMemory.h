@@ -79,6 +79,11 @@ std::optional<bool> ReadAddrBool(VCSAddr id);
 // way this entity faces. Verified against a vehicle: `atan2(m01, m00) - PI/2` matches the live
 // camera yaw to 0.0003 rad while driving normally.
 //
+// Taken as a DIRECTION it names the way opposite to travel: `(cos, sin)` of it came out pointing
+// left when the car went right and backwards when it went forwards - both axes at once, which is a
+// half turn rather than a mirror or a sign error downstream. Every other caller uses it for a
+// difference of angles, where a consistent half turn cancels and nobody would notice.
+//
 // nullopt if the pointer isn't a plausible entity. Used for car-relative camera glances, which
 // must key off the vehicle rather than the current camera or repeated glances compound.
 std::optional<float> ReadEntityHeading(u32 entityPtr);

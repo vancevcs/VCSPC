@@ -85,14 +85,24 @@ struct VCSRadarSettings {
 	u32 missionLineColor = 0xC7719A;
 	float thickness = 1.0f;
 
-	// Redraw the game's own player marker over the top of the line.
+	// Leave the player's blip a hole in the line rather than painting across it.
 	//
-	// Everything we draw lands on the finished frame, so the line covers the arrow at the radar's
-	// centre - which is exactly where the route always passes. Drawing the same texture the game
-	// uses, in the same place, puts it back on top. It is the game's own art, out of the texture
-	// pack, so it matches whatever the pack replaced it with.
-	bool drawPlayerIcon = true;
-	float iconSize = 11.0f;
+	// Everything we draw lands on the finished frame, so the line covers the marker the game draws
+	// at the radar's centre - which is exactly where the route always begins, that being where the
+	// player is. The first fix for that redrew the marker on top out of the texture pack, and it
+	// worked for as long as the pack was PNGs: the pack is BC7 DDS now and the UI's loader reads
+	// PNG, JPEG and ZIM, so the load quietly failed and the line went straight back over the arrow.
+	// Cutting the centre out of the line instead needs no art at all, and what shows through is the
+	// game's own marker - right size, right rotation, and already replaced by whatever the pack
+	// replaced it with.
+	//
+	// In the same 480x272 screen units as the radius above, and a radius. Measured off the marker
+	// on screen rather than guessed: it draws about 6 by 7 of those units, so 3.5 is its own half
+	// extent and the line ends exactly where the marker starts covering it. The first value here
+	// was 5.5 - half the icon size the old redraw used - and that left two units of daylight
+	// between the line and the arrow, which reads as the line stopping short rather than as the
+	// line going under. Zero draws it straight through.
+	float playerHoleRadius = 3.5f;
 
 	// Draw the assumed radar circle and its centre, for lining the four numbers above up with the
 	// radar the game draws. Off in normal play.
@@ -114,14 +124,6 @@ void RadarTick();
 
 // Render thread. Copies out this frame's segments; empty when there is nothing to draw.
 void GetRouteSegments(std::vector<RadarSegment> *out);
-
-// Render thread. Which way to point the player's arrow, in radians clockwise from straight up.
-//
-// It is NOT always zero, which was the first guess and was wrong. The radar turns with the CAMERA,
-// so on a mouse-look build the map swings when the mouse moves while the car keeps going the way
-// it was going. The arrow has to show the car's heading relative to the camera's, or it ends up
-// tracking the mouse instead of the driving. Returns false when the facing could not be read.
-bool GetPlayerFacing(float *angle);
 
 // Render thread. Whether this frame's line is going to the objective marker rather than to a
 // dropped waypoint - which colour to draw it in.
