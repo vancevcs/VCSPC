@@ -873,9 +873,30 @@ Three things worth keeping from working it out:
   mission start. The position is different - the load path copies `$284..286` straight back into
   `$783..785` - so that one is written.
 
-`$783..785` is where the last save pickup was collected, and it is zero in a game where nobody has
-walked into a save icon yet - which an auto-save fired by the first mission passed will meet. The
-player's own position is used there instead, because restarting at the map's origin is not a place.
+**The restart position written is the PLAYER's, and NOT `$783..785` the way the script copies it.**
+That is a deliberate departure, and the reason is that the position is only meaningful next to
+`$_282`, the safe house whose interior is swapped in. `INITSAV`, the script's own spawn code, reads
+the pair together:
+
+```
+$_282 > -1  ->  swap that interior back in, place the player from its own table
+otherwise   ->  load_scene $783 $784 $785
+either way  ->  get_ground_z_for_3d_coord ; set_char_coordinates there
+```
+
+The safe house routine can copy the pickup because it only ever runs while the player stands ON
+that pickup, inside the house, with `$_282` naming it - both halves describe one moment. An
+auto-save fires wherever the mission ended, with `$_282` at -1, so copying the pickup pairs an
+INTERIOR position with a world where that building is solid. Reported from play: loading such a
+save materialised the player inside the safe house's shell with no way out but dying, and it had
+looked harmless for as long as one particular safe house was in use whose pickup happens to sit
+somewhere escapable. Measured on the one that produced the report - restart `-800.73 -1183.65
+10.90` against a pickup at `-817.56 -1181.43 13.76`, with nothing to swap that building in for the
+second row.
+
+Reading the player on the same frame `$_282` is saved cannot disagree with it. `$783..785` survives
+only as the fallback for an unreadable player, and `$_287` - the heading `INITSAV` faces the player
+in, degrees there and radians in `PedHeading` - goes with the position for the same reason.
 
 ### A loading screen over both of them, because the machinery is not the game
 
@@ -3335,6 +3356,78 @@ failed and when the identical replacement was already installed. Treating the re
 answer made a working, running hook report "far clip replacement refused" on every frame after the
 first — which, combined with the trap above, produced a remove/reinstall loop that left the feature
 permanently half-installed. Ask what is actually at the address instead of what the writer returned.
+
+### The mounted gun: one state where CameraYaw is not a world angle
+
+A mission can strap the player to a vehicle with a weapon instead of seating him in it - `02B6
+attach_ped_to_car $PLAYER_CHAR car $5666 offset 1.6 1.0 0 position 3 angle_limit 70.0 weapon 34`,
+which is `GON_C4`'s helicopter ride. **`PlayerVehicle` reads 0 throughout**, so the fork sees an
+ordinary on-foot player holding a gun and every on-foot assumption about the camera is wrong at
+once.
+
+The one that matters is what `CameraYaw` MEANS. `CCam::Process` mode 45 branches on the attachment
+at `0x089a3548`: on that branch it starts `Beta` at ZERO (`0x089a3578`) rather than at `PedHeading
++ PI/2` (`0x089a3584`), skips its own `[0,2PI)` normalise after integrating (`0x089a3980`), and
+clamps instead. So while attached the field is a **signed offset from the vehicle's nose**.
+Measured by asserting it every frame against a savestate of that ride:
+
+| assert | look, relative to the helicopter |
+|---|---|
+| 0.00 | 0.0 deg |
+| 0.40 | 22.9 deg |
+| 1.00 | 56.3 deg |
+| -0.40 | -23.8 deg |
+
+Before that first write it sat at exactly 70.0 deg - pinned against the clamp, because this fork
+was asserting an absolute world yaw of 3.82 rad into it. Reported in play as an aim that snapped
+back to one fixed direction however far the mouse moved.
+
+Two faults, and fixing either alone leaves the other. The anchor was never retaken, because
+entering the attachment is a camera change that no CONTEXT change announces - and with `returnLook`
+off the hold parks open, so the yaw anchored before boarding is asserted for the whole ride. And
+`WrapYaw` forced the value into `[0,2PI)`, which destroys half of an arc: `-0.4` is a small offset
+left, `5.88` is two and a half turns past the stop. It re-anchors on both edges now, and clamps to
+the game's own limits instead of wrapping.
+
+The limits are the mission's and are read rather than assumed: `PedAimYawLimit` (`ped+0x760`) is
+`attach_ped_to_car`'s `angle_limit`, and pitch gets `ped+0xCA0` / `+0xCA4` - 10 deg up, 55 deg
+down, written by script opcodes `04CF` / `04D0` as `degrees*PI/180`. Asymmetric because a door
+gunner looks down.
+
+**The section is short and cannot be held open on request, which is the other lesson here.** Three
+mission runs went into chasing it live, one of them failed by a probe of ours that held the aim
+trigger and swept the stick for four seconds. What ended it was a savestate taken the instant
+`ped+0x848` went non-zero - a script polling that field over the WebSocket debugger and driving
+PPSSPP's own quicksave through `WM_COMMAND`. After that the same moment could be reloaded, written
+to and read back as often as needed with nothing at stake. Reach for that on the FIRST attempt at
+anything that only exists for a few seconds of a mission.
+
+### The right number in the wrong space
+
+Two separate bugs in one day had the same shape, and neither looked like it at first: both read as
+"the game is fighting us", and both were **a correct value written into a space where it means
+something else**.
+
+- The auto-save wrote a restart position that was correct for the safe house's interior, into a
+  save whose interior state said "outdoors". The pair disagreed, and the player materialised inside
+  a building.
+- The mounted gun got a correct WORLD yaw written into a field the game reads as an offset from a
+  helicopter's nose. It pinned at the clamp.
+
+Neither is a wrong number, and neither is a race. Both are a value whose meaning depends on some
+other piece of state - an interior index, an attachment pointer - that was not consulted, and in
+both cases the game itself pairs the two consistently by construction: its own save routine only
+runs where the pickup is, and its own camera sets `Beta` to zero when the attachment begins.
+
+So when a write "does not take", or takes and then springs back, ask what ELSE has to be true for
+that field to mean what you think it means, before reaching for a rate, a spring or a fight over
+who writes last. The three questions that separated these two from an ordinary tug of war:
+
+- **Does the game write this field itself, and from what?** Read the writer, not the field.
+- **Is there a nearby field that changes what this one means?** `$_282` and `ped+0x848` were both
+  one `lw` away in the very code being read.
+- **Does the value's RANGE make sense in the space I think it is in?** 3.82 rad in a `+/-1.22`
+  window says the space is wrong long before any behaviour has to be explained.
 
 ## Working on this
 
