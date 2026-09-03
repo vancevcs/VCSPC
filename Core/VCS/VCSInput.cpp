@@ -121,6 +121,38 @@ const InputKeyCode kVCSLockOnKey = NKCODE_L;
 // the press, so the game never sees a jump on the tick a climb starts.
 const InputKeyCode kVCSJumpKey = NKCODE_SPACE;
 
+// WALK. Held with WASD, and the one control here that exists only because a key is not a stick.
+//
+// VCS reads walk out of how far the nub is pushed, so a pad has had this all along and a keyboard
+// never could: a key is fully down or not at all, which is always a run. The modifier hands the
+// middle of the range back.
+//
+// Both Alts, and the right one is not politeness - PPSSPP's default keyboard map puts CTRL_CIRCLE
+// on it, so a player who reached for the Alt nearer their right hand would have jumped instead of
+// walking. Claiming both is what makes the binding mean one thing.
+const InputKeyCode kVCSWalkKeyLeft = NKCODE_ALT_LEFT;
+const InputKeyCode kVCSWalkKeyRight = NKCODE_ALT_RIGHT;
+
+static bool IsWalkKey(InputKeyCode key) {
+	return key == kVCSWalkKeyLeft || key == kVCSWalkKeyRight;
+}
+
+// How far the stick is pushed while it is held. MEASURED, not chosen: the deflection was driven
+// from the debugger in steps and the player's velocity read back at each one, which came out in
+// three flat bands rather than a curve -
+//
+//     0.15 - 0.25   nothing at all; inside the game's own dead zone
+//     0.30 - 0.60   0.026 per frame, and identical across the whole band. This is the walk.
+//     0.70          0.037, the transition
+//     0.85 - 1.00   0.070 - 0.093. The run, which is what every key press produces today.
+//
+// 0.45 is the middle of the walking band, which is the point: it is a long way from the dead zone
+// below and from the jog above, so nothing here depends on the measurement being exact.
+//
+// Applied AFTER the diagonal normalisation rather than to the raw keys, or W+D would scale to
+// 0.64 - out of the band and into the jog, so walking diagonally would quietly not be walking.
+const float kVCSWalkDeflection = 0.45f;
+
 // The pad's two. X is jump because it sits where the PSP's Square does and Square is jump; LT is
 // aim because that is where a modern pad puts it. Both are named so the table rows below and the
 // code that asks about them cannot drift apart - see JumpHeld and CameraDrivenAimHeld.
@@ -295,7 +327,6 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LTRIGGER,  "Spawner: previous model (with the row below)" },
 	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LEFT,      "Spawner: previous model" },
 	{ VCSInputContext::OnFoot,    NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)", "Change camera", VCSKeyList::OnFoot },
-	{ VCSInputContext::OnFoot,    NKCODE_P,                  CTRL_START,     "Pause (Start)", "Pause", VCSKeyList::OnFoot },
 
 	// --- In a vehicle ---
 	{ VCSInputContext::InVehicle, NKCODE_W,                  CTRL_CROSS,     "Accelerate", "Accelerate", VCSKeyList::InVehicle },
@@ -321,7 +352,6 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InVehicle, NKCODE_T,                  CTRL_RIGHT,     "Next radio station / raise forks (verified)", "Next radio station", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_R,                  CTRL_LEFT,      "Previous radio station / lower forks (verified)", "Previous radio station", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)", "Change camera", VCSKeyList::InVehicle },
-	{ VCSInputContext::InVehicle, NKCODE_P,                  CTRL_START,     "Pause (Start)", "Pause", VCSKeyList::InVehicle },
 	// Claimed but deliberately mapped to nothing. Sprint is meaningless in a car, and leaving
 	// Shift unclaimed let it fall through to PPSSPP, whose default binding is VIRTKEY_RAPID_FIRE
 	// - that alternates held buttons, so it machine-gunned the accelerator and made throttle
@@ -355,7 +385,6 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InAircraft, NKCODE_T,                  CTRL_RIGHT,     "Next radio station", "Next radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_R,                  CTRL_LEFT,      "Previous radio station", "Previous radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_V,                  CTRL_SELECT,    "Change camera", "Change camera", VCSKeyList::Aircraft },
-	{ VCSInputContext::InAircraft, NKCODE_P,                  CTRL_START,     "Pause (Start)", "Pause", VCSKeyList::Aircraft },
 	// Claimed and inert, all for the inverse-Escape-trap reason rather than for anything they do
 	// here. Shift would otherwise reach PPSSPP's rapid-fire and stutter the climb button exactly
 	// as it stuttered the throttle in a car. Space is handbrake in a car, which in an aircraft
@@ -391,7 +420,6 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	// Same as on foot. Bound here mainly so Tab can't fall through to PPSSPP's fast-forward
 	// mid-fight, which would suddenly run the game at several times speed while aiming.
 	{ VCSInputContext::Aiming,    NKCODE_TAB,                CTRL_LTRIGGER,  "Switch to nearby weapon drop (verified)" },
-	{ VCSInputContext::Aiming,    NKCODE_P,                  CTRL_START,     "Pause (Start)" },
 	// --- Hand-to-hand combat, i.e. the four face buttons while targeting ---
 	//
 	// These need no melee-specific detection, and that is the whole reason they fit here as three
@@ -446,6 +474,12 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::Aiming,    NKCODE_W,                 0,              "Strafe (quiet in free aim)" },
 	{ VCSInputContext::Aiming,    NKCODE_A,                 0,              "Strafe (quiet in free aim)" },
 	{ VCSInputContext::Aiming,    NKCODE_D,                 0,              "Strafe (quiet in free aim)" },
+	// Walk, and claimed for the same reason and on the same terms - it steers the stick rather
+	// than pressing anything, and unclaimed it would reach PPSSPP's defaults, where left Alt is
+	// the PSP's screen button and RIGHT Alt is Circle. A modifier that jumps is worse than no
+	// modifier. See kVCSWalkDeflection.
+	{ VCSInputContext::Aiming,    NKCODE_ALT_LEFT,          0,              "Walk (with the strafe keys)" },
+	{ VCSInputContext::Aiming,    NKCODE_ALT_RIGHT,         0,              "Walk (with the strafe keys)" },
 	// FREE AIM. This is d-pad DOWN, and it is not a guess - the game's own Controls screen
 	// labels it, and it was verified in play: with aim held, d-pad up does nothing, left/right
 	// cycle targets, and DOWN drops you into free aim, after which the mouse moves the crosshair.
@@ -582,11 +616,19 @@ const VCSPadMapping kVCSPadMappings[] = {
 	{ VCSInputContext::OnFoot,     NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next weapon", "Next weapon", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,     NKCODE_DPAD_UP,       CTRL_UP,        false, "Recruit gang member (target one first) / menu up", "Recruit gang member", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,     NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Menu down (the game's own d-pad, unchanged)", "Menu down", VCSKeyList::OnFoot },
-	// Start is the FORK's menu and View is the GAME's. That is the modern split - the system
-	// button opens the system menu - and it is why Start carries no PSP button: it is handled on
-	// the press edge in HandlePadKey, because a UI message is not something a button mask can say.
+	// Start is the FORK's menu, and it carries no PSP button: it is handled on the press edge in
+	// HandlePadKey, because a UI message is not something a button mask can say.
+	//
+	// View used to be the GAME's menu beside it - the modern split, where the system button opens
+	// the system menu - and that binding is gone, along with P on the keyboard. The game's own
+	// pause screen is not a second menu to be opened from the world any more; every page of it
+	// worth reaching is a row on this fork's menu, and the two stacked read as two menus. What
+	// stays is the CLAIM: PPSSPP's own defaults put CTRL_SELECT on this button, so leaving it
+	// unclaimed would not free it, it would hand it to the PSP's Select - which in VCS is the
+	// camera change. Deleting the row is how the removal becomes a different binding instead of
+	// no binding. P needs no such row: PPSSPP's keyboard defaults leave it alone.
 	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey, not a PSP button)", "Menu", VCSKeyList::OnFoot },
-	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)", "Pause", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_BUTTON_SELECT, 0,              false, "Suppressed (the game's own menu is reached from this fork's)" },
 	// Claimed and inert. The bumpers are zoom, which only means anything down a scope, so they
 	// live in the Aiming rows below; leaving them unclaimed here would let PPSSPP's defaults send
 	// them to the PSP's L and R, i.e. a second weapon-drop swap and a stray aim.
@@ -625,7 +667,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_L1,     0,              false, "Look left (L trigger + stick, see GlanceDirection)" },
 	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_R1,     0,              false, "Look right (L trigger + stick, see GlanceDirection)" },
 	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)", "Menu", VCSKeyList::InVehicle },
-	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)", "Pause", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_SELECT, 0,              false, "Suppressed (the game's own menu is reached from this fork's)" },
 	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_THUMBR, CTRL_SELECT,    false, "Change camera (verified)", "Change camera", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle,  NKCODE_BUTTON_THUMBL, 0,              false, "Unbound (the weapon drop it carries on foot means nothing in a car)" },
 
@@ -653,7 +695,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	// aircraft row where the modern layout and the handheld's happen to agree.
 	{ VCSInputContext::InAircraft, NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Centre view", "Centre view", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)", "Menu", VCSKeyList::Aircraft },
-	{ VCSInputContext::InAircraft, NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)", "Pause", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_BUTTON_SELECT, 0,              false, "Suppressed (the game's own menu is reached from this fork's)" },
 	{ VCSInputContext::InAircraft, NKCODE_BUTTON_THUMBR, CTRL_SELECT,    false, "Change camera", "Change camera", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_BUTTON_THUMBL, 0,              false, "Unbound (nothing on foot's L3 applies in the air)" },
 
@@ -692,7 +734,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_R1,     CTRL_SQUARE,    true,  "Scope / binocular / camera zoom in (verified)", "Zoom in (scope, binoculars, camera)", VCSKeyList::OnFoot },
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_L1,     CTRL_CROSS,     true,  "Scope / binocular / camera zoom out (verified)", "Zoom out (scope, binoculars, camera)", VCSKeyList::OnFoot },
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)" },
-	{ VCSInputContext::Aiming,     NKCODE_BUTTON_SELECT, CTRL_START,     false, "Pause (the game's own, PSP Start)" },
+	{ VCSInputContext::Aiming,     NKCODE_BUTTON_SELECT, 0,              false, "Suppressed (the game's own menu is reached from this fork's)" },
 	// Both clicks stay dead while aiming: changing the camera mid-shot is the last thing anyone
 	// wants, and the claim is still what keeps PPSSPP's speed toggle off R3.
 	{ VCSInputContext::Aiming,     NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (camera changes belong outside a shot)" },
@@ -730,8 +772,10 @@ const VCSPadMapping kVCSPadMappings[] = {
 	{ VCSInputContext::Menu,       NKCODE_BUTTON_R2,     0,              false, "Suppressed (PPSSPP's default puts fast-forward here)" },
 	{ VCSInputContext::Menu,       NKCODE_BUTTON_THUMBL, 0,              false, "Suppressed" },
 	{ VCSInputContext::Menu,       NKCODE_BUTTON_THUMBR, 0,              false, "Suppressed (PPSSPP's default puts the speed toggle here)" },
-	// The same split as everywhere else: Start is this fork's menu and View is the game's - so
-	// in the game's own menu, its button is the one that closes it again.
+	// View no longer OPENS the game's menu - see the note in the on-foot rows - but it still
+	// closes one, and that is deliberately not the same binding: this is the way out of a page
+	// this fork walked to, beside B. Nothing reaches this context except through our own menu, so
+	// there is no longer a way to open the game's front end and then be stuck in it.
 	{ VCSInputContext::Menu,       NKCODE_BUTTON_START,  0,              false, "Opens this menu (posted from HandlePadKey)" },
 	{ VCSInputContext::Menu,       NKCODE_BUTTON_SELECT, CTRL_START,     false, "Closes the game's menu (PSP Start)" },
 };
@@ -772,6 +816,11 @@ static const VCSListingExtra kVCSListingExtras[] = {
 	// them out gave five lines to say "you walk with these", and four of the five had an empty
 	// cell under both pads that read as a missing binding rather than as a stick.
 	{ VCSKeyList::OnFoot,    "Move",           { "W / A / S / D", "LEFT STICK", "LEFT STICK" } },
+	// A pad has never needed a binding for this - the stick carries how far it is pushed, and the
+	// game reads walk out of that. A keyboard key is all the way down or not at all, so the
+	// modifier is what gives it the middle of the range back. The pad cells say what to do rather
+	// than naming a control, because there is nothing extra to press.
+	{ VCSKeyList::OnFoot,    "Walk",           { "ALT + WASD", "LIGHT PUSH", "LIGHT PUSH" } },
 	// Blank on the pad because VCS has no on-foot look, not because one was left out: the PSP
 	// has one stick, the game gives it to movement, and the camera follows by itself. Changing
 	// the camera on Select is the whole of a pad's control over it, and that row comes from the
@@ -1169,7 +1218,8 @@ static bool GlanceDirection(VCSInputContext context, float *x, float *y) {
 static bool ContextUsesKeyForMovement(VCSInputContext context, InputKeyCode key) {
 	switch (context) {
 	case VCSInputContext::OnFoot:
-		return key == NKCODE_W || key == NKCODE_A || key == NKCODE_S || key == NKCODE_D;
+		return key == NKCODE_W || key == NKCODE_A || key == NKCODE_S || key == NKCODE_D
+			|| IsWalkKey(key);
 	// Aiming is deliberately absent even though WASD usually DOES steer there. Whether it steers
 	// flips with free aim, which changes mid-context, and this function is also called from the
 	// input thread - where reading the decoded game state would be a race. The psp = 0 rows in
@@ -1899,6 +1949,11 @@ u32 GlanceButtonMask(VCSInputContext context) {
 void ApplyAnalog(VCSInputContext context) {
 	float x = 0.0f;
 	float y = 0.0f;
+	// The walk modifier, and whether the pad ended up owning the stick. Both are decided deep in
+	// the branches below and spent after the normalisation, which is the only place the scale can
+	// go - see kVCSWalkDeflection.
+	bool walkHeld = false;
+	bool fromPad = false;
 
 	// The stick goes with the buttons during a vault - see ApplyMapping. A held W would otherwise
 	// walk the player forward through the wall he is being lifted over.
@@ -2025,6 +2080,9 @@ void ApplyAnalog(VCSInputContext context) {
 		// which needed the model kept alive here; that channel is gone.
 		AimModelReset();
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+		// Read here rather than at the point of use, because it belongs to the same lock as the
+		// keys it modifies - and asking twice could see the modifier released between the two.
+		walkHeld = IsHostKeyDownLocked(kVCSWalkKeyLeft) || IsHostKeyDownLocked(kVCSWalkKeyRight);
 		switch (context) {
 		case VCSInputContext::OnFoot:
 		// Aiming without free aim is lock-on, where the stick strafes around the target - which
@@ -2068,6 +2126,7 @@ void ApplyAnalog(VCSInputContext context) {
 		// both. Whichever device is actually being moved is the one that answers.
 		float padX = 0.0f, padY = 0.0f;
 		if (PadLeftStick(&padX, &padY)) {
+			fromPad = true;
 			switch (context) {
 			case VCSInputContext::OnFoot:
 			// Aiming without free aim is lock-on, where the stick strafes around the target -
@@ -2150,6 +2209,20 @@ void ApplyAnalog(VCSInputContext context) {
 		if (length > 1.0f) {
 			x /= length;
 			y /= length;
+		}
+
+		// And walk, if the modifier is down. After the normalisation for the reason given over
+		// kVCSWalkDeflection, and only for a keyboard: a stick already says how fast to go, and
+		// scaling one that is already half pushed would take it under the dead zone and stop the
+		// player dead with the stick still deflected.
+		//
+		// The context gate is the two that move a person. Steering a car has no walk, and neither
+		// has an aircraft - there the same scale would be a quieter bank and pitch, which is a
+		// different control that nobody asked for.
+		if (walkHeld && !fromPad &&
+				(context == VCSInputContext::OnFoot || context == VCSInputContext::Aiming)) {
+			x *= kVCSWalkDeflection;
+			y *= kVCSWalkDeflection;
 		}
 	}
 
