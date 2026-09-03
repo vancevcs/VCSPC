@@ -308,6 +308,236 @@ Two more details that will bite if they are "simplified":
   It is safe to call for anything in `struct Config`; only the blocks that override
   `CanResetToDefault()` (display layout, touch controls, gestures) assert.
 
+### The Gameplay page has a second kind of row now: the game's own settings
+
+`SUBTITLES` and `HUD` are not this port's inventions, and that makes them the first rows on that
+page that are not. They are the PSP game's own, off the DISPLAY page of its front end - the page
+this fork's bridge deliberately does not offer, because there are pages of our own for controls,
+audio and display. That left three of the game's four display settings unreachable rather than
+superseded, which is the same loss the map and the save list took when Start was claimed, and the
+same answer applies: give it back.
+
+So the page's rule is now "settings about the GAME, as opposed to about the device you drive it
+with", and both kinds qualify - a switch that hands one of our own additions back, and a switch
+that reaches one of the game's that nothing else can.
+
+**Reaching for the game's existing setting is the whole point, not a shortcut.** Before this there
+were two mechanisms sketched for hiding the HUD, both ours, and both would have been wrong: the
+game has the setting, it persists it, and its own menu goes on agreeing with ours because there is
+only one value. Same doctrine as the vault calling `CPed::CanClimb` and the front-end bridge
+pressing Start.
+
+**They are mirrored, not edited in place.** The menu runs on the UI thread and PSP memory belongs to
+the emu thread, so `VCSGameSettings` holds a bool for each and `ApplyDisplayPrefs` in `VCSGame::Tick`
+pushes them across - **only when the game disagrees**, which makes it self-healing across a load
+without being the re-assert-every-frame mistake that the camera pitch runaway taught.
+
+**HUD MODE is the panel, not the radar**, and the row's help line has to say so. See "The game's own
+SUBTITLES and HUD MODE" in docs/VCS_ADDRESSES.md for how both were found, and for the two candidates
+that tracked the setting perfectly and still decided nothing.
+
+### The Audio page's other two rows, and the value that decides
+
+`SFX VOLUME` and `RADIO VOLUME` are the game's own, reached the same way and for the same reason as
+subtitles and the HUD. What makes them worth their own note is that **each setting is two values**,
+and the obvious one is the wrong one.
+
+`DisplayPrefs + 0x1c` and `+0x20` are the preferences: they are what the game's own AUDIO page shows
+and what a save keeps, they step 16 at a time and top out at 127, and **writing them changes nothing
+you can hear**. The levels the mixer actually reads are two plain bytes at `0x08bb3b74` and
+`0x08bb3b75`, nothing recomputes them from the preferences, and the game's own slider moves both
+together. So the fork's rows write both, and a row that wrote either one alone would be a volume
+that forgets itself across a boot, or a slider that moves and does nothing.
+
+**The lesson generalises past audio, and it cost time twice.** A value that tracks a setting
+perfectly is not necessarily the value that decides anything - HUD MODE has two gp-relative shadows
+that follow it exactly and revert within a frame when written. The test is one line of work: write
+it, and look at whether the thing you wanted actually changed. Three of the five game settings found
+this way failed that check on the first candidate.
+
+**The step is 13, not the game's 16.** The strip draws ten blocks and this menu's rule is that one
+press moves one block, so the step is a tenth of the range rounded up - ten presses reach the top,
+where the write path clamps to 127 exactly as the game's own slider does at its last notch. The
+game's ladder of 16 is eight notches against a ten-block strip, which would move one block on some
+presses and two on others. Both produce values the game accepts; this one matches the control the
+player is looking at.
+
+### The menu's own sounds, taken from the game rather than invented
+
+The front end was silent, and the three sounds it wanted were already on the disc. A
+`SET*/SFX*_PSP.RAW` file is a plain concatenation of Sony VAG streams, each with a 0x30 header
+carrying its rate and - the part that turned this from a hunt into a listing - **its name**:
+
+    SFX_FE_HIGHLIGHT   44 ms   the blip as the selection moves
+    SFX_FE_SELECT      90 ms   a row being chosen
+    SFX_FE_BACK        49 ms   going back a page
+
+`Tools/vcsmenusfx.py` decodes those three to WAV in `assets/vcs/`, beside the page titles and for
+the same reason. The same bank also holds an error blip per direction and three noise bursts, if
+the menu ever wants them.
+
+**Three new `UISound` values, not three swapped samples.** `SoundEffectMixer::UpdateSample` would
+have let the fork replace `SELECT`/`CONFIRM`/`BACK` with no upstream diff at all, and it was the
+wrong trade: those samples are global, so a Debug session that booted another game after VCS would
+have GTA blips in PPSSPP's own menus. Adding to the enum is six lines and is additive - nothing
+outside `VCSMenuScreen.cpp` plays them.
+
+**And they do not go through `UI::PlayUISound`.** That path is gated on `g_Config.bUISound`, which
+ships *off* and lives on PPSSPP's own Audio page - a screen the game build has no way into. A menu
+that stays silent until you find a setting you cannot reach is a silent menu, so this calls the
+mixer directly.
+
+**Which means the volume has to be computed at the call, because nothing downstream does it.** A UI
+sound is mixed on top of everything - `NativeMix` adds the effect mixer after the game's audio - so
+it misses `iGameVolume`, which is applied inside `__sceAudio` to the emulated game only, and it
+misses the SFX level, which is a value *inside* the game applied by the game's own mixer. These
+first shipped answering to neither, on a page that has a row called Master volume and a row called
+SFX volume, and it read as a bug the moment anyone moved one. Both are applied now, and so is
+`bEnableSound` - that gates `__sceAudio` rather than the audio device, so the effect mixer goes on
+running with the emulator "muted" unless it is asked.
+
+Following the SFX row rather than only the master is the honest half: these ARE the game's
+front-end sound effects, and in the retail game they play on the channel that row governs.
+
+**`FocusChanged` is the seam for the highlight**, and it is the only one that catches both halves:
+hover sets the focused view from `Touch`, keyboard and pad navigation go through PPSSPP's own
+`MoveFocus`, and both end up there. The `CAUSE_*` flags then do the discrimination that a timer
+would otherwise have to - `CAUSE_FOCUS_MOVE` and `CAUSE_OTHER` are somebody moving the selection,
+while `CAUSE_SCREEN_CHANGE`, `CAUSE_RESTORE` and `CAUSE_FORCED` are a page building itself or a
+click forcing focus onto the row it is about to activate. Blipping on those would mean a sound for
+merely opening a page, and two sounds for every click.
+
+### The bridge's own button presses are not the player's, so they are silenced
+
+Picking MAP, BRIEF or STATS makes this port press Start and then tab across the game's front end,
+behind a curtain that is there precisely so the walk is not watched. The game blips at every one of
+those presses - button sounds for buttons nobody touched.
+
+`ApplyGamePrefs` writes the live SFX level as 0 whenever `FrontEndDriving()` is true, and this is
+where the two-layer volume finding pays for itself twice over: **the preference is left alone**, so
+nothing about this reaches the game's Audio page or a save, and the level comes back on its own the
+tick after the walk ends, because `ApplyPref` is a disagreement check rather than a one-shot.
+
+Muting the CHANNEL rather than the emulator is the point - the radio plays through the whole thing,
+which is what the player is actually listening to.
+
+### Walking, which a keyboard could not do until it had a modifier
+
+VCS reads walk out of how far the nub is pushed, so a pad has always had it and a keyboard never
+could: a key is fully down or not at all, which is always a run. Alt with WASD is the middle of
+the range handed back.
+
+**The deflection is measured, not chosen.** Driven from the debugger in steps with the player's
+velocity read back at each one, it came out in flat bands rather than as a curve:
+
+| deflection | speed/frame | |
+|---|---|---|
+| 0.15 - 0.25 | 0.000 | inside the game's own dead zone |
+| 0.30 - 0.60 | 0.026 | identical across the whole band - the walk |
+| 0.70 | 0.037 | the transition |
+| 0.85 - 1.00 | 0.070 - 0.093 | the run, which is what every key press produces |
+
+`kVCSWalkDeflection` is 0.45, the middle of the walking band, so nothing depends on the
+measurement being exact. **Applied after the diagonal normalisation**, or W+D would scale to 0.64
+- out of the band and into the jog, so walking diagonally would quietly not be walking. And only
+for a keyboard: a stick already says how fast to go, and scaling one that is already half pushed
+would take it under the dead zone and stop the player dead with the stick still deflected.
+
+**Both Alts are claimed**, and the right one is not politeness: PPSSPP's default keyboard map puts
+`CTRL_CIRCLE` on it, so a player reaching for the Alt nearer their right hand would have jumped
+instead of walking. The inverse Escape trap, one more time.
+
+### Alt + a key used to stick, and it was never Alt's fault
+
+Reported as "Alt with another key makes it act weird and non-functional until I press Alt + that
+key again", which is a precise description of a lost key-up. `Windows/RawInput.cpp` accepted
+`WM_SYSKEYDOWN` as a press and handled only `WM_KEYUP` as a release - but **Windows sends the SYS
+variant of BOTH messages for any key pressed while Alt is held**, so the release fell off the end
+of the `else if` and the key stayed down: in `keyboardKeysDown`, in this fork's `g_heldKeys`, and
+in the game. Pressing the key again without Alt is what cleared it, which is exactly the symptom.
+
+One missing condition, and **it was never specific to this binding** - every Alt combination in
+the emulator has had it, for every game. Worth remembering as a shape: a control that "sticks
+until you repeat it" is a release that was never delivered, not a press that was mishandled.
+
+### The tutorial messages name keyboard keys now, and it took no code at all
+
+The help lines in the corner - "To sprint, hold ~k~ ~PDSPR~ while running" - do not contain a
+button name. They contain a TOKEN, and the game resolves it through a second GXT entry: `~PDSPR~`
+looks up `C0PDSPR`, which reads `~X~`. So the entire control vocabulary of every tutorial message
+in the game is 58 strings in one table, `C0` through `C3` for the four control configurations, and
+pointing them at this fork's bindings is a data change with nothing hooked.
+
+The surface is **51 tokens across 140 occurrences**, and `Tools/vcsgxtkeys.py` rewrites them from a
+hand-written mapping that mirrors `kVCSKeyMappings`. Two things in it are worth keeping:
+
+- **The article has to go, by rule rather than by list.** Every PSP name is a noun phrase that
+  wants one - "the up button", "the analog stick" - so the lines were written as "use the ~TOKEN~",
+  and almost no keyboard name is: the result is "use the the mouse" and "press the LEFT MOUSE".
+  Seven lines needed it, in five tables including two only a debug build shows, which is the whole
+  argument against fixing them by hand.
+- **Two lines needed rewriting outright**, because two PSP controls collapse into one on a mouse
+  and the sentence says "and": "Hold ~PDLO1~ and use ~PDLO2~ to look around" has no second half
+  left once both are the mouse.
+
+**The GXT writer earned its `--verify`.** Rebuilding the file unchanged and comparing byte for byte
+caught two wrong guesses that would otherwise have shipped: strings are NOT pooled by value (2408
+entries, 2408 distinct offsets - pooling produced a file 8272 bytes short), and **TKEY is ordered by
+key while TDAT is not**, so the pool has to be packed in the original offset order and the key table
+written back in its own. Neither would have looked wrong in a hex editor.
+
+### VCS reads its disc by SECTOR, so a filename redirect can never work
+
+This is the finding worth carrying past the GXT, and it cost a full build-and-boot to get.
+
+The delivery route chosen for the patched file was a redirect in the emulator: hook
+`MetaFileSystem::OpenFile`, serve the file from the memory stick, leave the ISO alone. It was
+built, it compiled, and **it never fired once.** Logging every single file open for a whole boot
+showed why - the complete list of what VCS opens is savedata `PARAM.SFO`s, `EBOOT.BIN`, and:
+
+```
+disc0:/sce_lbn0x0_size0x65170000
+```
+
+The whole UMD, as one stream, seeked by the game to its own files by sector. **No filename is ever
+requested for anything on the disc**, so there was never a name for a redirect to match. The
+redirect is reverted; nothing of it remains.
+
+So anything replacing a disc file in this game goes through the bytes - and once that is accepted,
+the emulator can do it at READ TIME, so the disc never has to be touched at all.
+
+`VCS::PatchDiscRead` is that: `ISOFileSystem::ReadFile` hands it the absolute position it has just
+filled, and it overwrites any part of the buffer falling inside a patched range from a file on the
+memory stick. Two call sites in one function, because that function is where both read paths meet -
+the offset one, and the whole-sector one the `sce_lbn` handle uses. First line returns for every
+other game.
+
+**Not a `BlockDevice` wrapper, though that was the first design and reads better on paper.**
+`ConstructBlockDevice` is shared by every game, and `Load_PSP_ISO` does a
+`dynamic_cast<NPDRMDemoBlockDevice *>` on the result - a decorator would have silently broken demo
+ISOs for a feature that has nothing to do with them. The read funnel one layer up costs nothing and
+is already free of any of this.
+
+The offset is a property of this disc image, found by searching it for the file's own bytes, so it
+gets the treatment a measured address gets: **the disc is checked for the header that should be at
+that offset before anything is overwritten**, and a mismatch disables that patch for the boot.
+`ENGLISH.GXT` lives at `0x4330000`, sector 34400.
+
+Verified both ways, which is the part that matters. Booting the **retail, untouched** ISO with the
+replacement present puts `LEFT MOUSE` in RAM and no `the up button`; moving that one file aside and
+booting the same ISO again brings `the up button` back. `Tools/vcsgxtkeys.py --iso` still bakes a
+standalone image for anyone who wants one, and `VCS-keyboard-help.iso` is what it produced.
+
+**This also corrects the answer given for the logo video.** A file redirect was recommended as the
+neat way to swap `LOGO.PMF`; it would have failed the same way, silently. The disc patch is the
+answer there too - one more row in `kVCSDiscPatches` - subject to the same size limit, because the
+game seeks by sector numbers baked into its own code.
+
+**And one trap in the diagnosis itself**: the first probe used `WARN_LOG` and produced nothing,
+which read as proof. `IOLevel = 2` in `ppsspp.ini` is ERROR-only, so warnings never reached the
+file at all. A log line that does not appear is not evidence until the channel is known to carry
+it.
+
 ### The controls card is two tables in four columns
 
 `CONTROLS - BINDINGS` is a read-only reference card: `ACTION`, then what the action is on the

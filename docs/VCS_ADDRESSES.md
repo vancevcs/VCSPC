@@ -1347,3 +1347,93 @@ masking `0x7fff` only rescues 56 of them - so they are a different kind of entry
 indices. And `ThePaths+0x10` and `+0x14` read 3087 and 5293, which sum to exactly 8380: the nodes
 are two groups, almost certainly car and ped. A route wants the car ones, so which group comes
 first has to be settled before this is used.
+
+### The game's own SUBTITLES and HUD MODE - **FOUND: `[0x08bb3454] + 0x08` / `+ 0x18`**
+
+The fork's Gameplay page has a row for each, and neither needed a mechanism inventing: the PSP game
+already has both, on the DISPLAY page of its own front end - `BRIGHTNESS`, `SUBTITLES`,
+`RADAR MODE`, `HUD MODE`. That page is one this fork's menu deliberately offers no way into, which
+is the only reason they had become unreachable.
+
+**Read the GXT first, again.** `FED_SUB` is `"SUBTITLES:"` and `FED_HUD` is `"HUD MODE:"`, both in
+`ENGLISH.GXT`'s `MAIN` table, and they cost forty lines of Python to find with nothing running.
+That settled what the game has before a single address was hunted for.
+
+**Found by snapshot-and-diff, which is the right tool for "where does the game keep Y".** Reading
+code came first and got nowhere, and the reason is worth recording: the front end is *data driven*.
+A menu row carries a `GameHook` - the enum whose names (`HOOK_SHOW_SUBTITLES`, `HOOK_HUD_MODE`,
+`HOOK_BRIGHTNESS`, ...) sit in the string pool at `0x08bb1fec` and `0x08b87478`, and whose parser at
+`0x08af72a0` is a chain of `strcmp`s returning 0..13, so `SHOW_SUBTITLES` is 3 and `HUD_MODE` is 6.
+Every switch on that enum - `0x08838690`, `0x08924f44`, `0x08969c20`, `0x08a5ba44`, `0x08b0ec74` -
+turned out to be widget *behaviour*: highlight, animation, layout. None of them reads or writes the
+value. Hours went into that; the scan took ten minutes.
+
+The scan itself, per setting: three dumps with the row toggled in the game's own menu between them,
+then `u8` over `on:nonzero off:changed:on on2:same:on`. That leaves 5 and 26 candidates. A fourth
+dump taken in **gameplay with the setting off** cuts both to six, because it throws out every menu
+widget's copy of the value - those are only alive while the page is.
+
+Two of the six were fields of one heap object at `0x09a63400`, and the pointer to it is a global -
+`gp+0x16f4`, a load `CHud::Draw` itself makes at `0x089bd36c`. Hence a based entry in the table:
+
+| what | where | value |
+|---|---|---|
+| `DisplayPrefs` | `0x08bb3454` (`gp+0x16f4`) | pointer; read `0x09a63400` |
+| `ShowSubtitles` | `DisplayPrefs + 0x08`, u8 | 1 = on |
+| `HudMode` | `DisplayPrefs + 0x18`, u8 | 1 = on |
+
+**Confirmed by writing, in both directions.** `HudMode = 0` takes the panel off the screen on the
+next frame; `ShowSubtitles = 0` makes the game's own DISPLAY page read `OFF`. That test is not a
+formality here, because **two other candidates tracked the setting perfectly and were both wrong**:
+the gp-relative bytes at `0x08bafaca` and `0x08bafad0` follow HUD MODE exactly, and writing to
+either is undone within the frame, because something recomputes them from elsewhere. `0x08bafad0`
+is worse than useless - it is an index the front end reads back through `gp`, and writing a 1 into
+it left the pause menu unable to open at all. **A value that correlates is not yet a value that
+decides.**
+
+**HUD MODE is not the radar**, and that surprised the implementation. It is the health, armour,
+money, weapon and clock panel only; the radar has its own `RADAR MODE` setting and its own gate at
+`HudObject + 0x2436`. Zeroing that flag - the one this fork already knew - removes the radar and
+leaves the panel, which is the exact complement. The Gameplay row drives HUD MODE alone and says so
+in its help line, because a radar still on screen otherwise reads as a setting that half worked.
+
+### SFX and radio volume - **FOUND, and each is two values**
+
+The Audio page carried one row for a long time, with a note saying SFX and radio "need addresses we
+do not have, and a row wired to a variable nothing reads would move and change nothing". The second
+half of that turned out to be a description of the trap rather than a hypothetical.
+
+The preferences were easy, and did not need a scan at all: `DisplayPrefs` had already been found for
+subtitles and the HUD, so opening the game's own AUDIO page and watching the object while the slider
+moved was enough. `+0x1c` is SFX and `+0x20` is MUSIC, both `u32`, both stepping 16 at a time and
+topping out at 127 - which is what says the scale is 0..127 rather than 0..128. Going *down* from
+127 the game lands on 111, so its own ladder is plain subtraction, not a snapped one.
+
+**And writing them changed nothing you could hear.** The value moved, the game's own page agreed
+with the new number, the mixer carried on regardless. The reason is a second copy: a `u32` search
+for the exact transition that had just happened - `127 -> 111` - matched in one place, the
+preference itself, and the same search at `u8` matched three more. One of those is a plain global,
+and it is the live level:
+
+| what | where | |
+|---|---|---|
+| `SfxVolumePref` | `DisplayPrefs + 0x1c`, u32 | what the AUDIO page shows, and what a save keeps |
+| `RadioVolumePref` | `DisplayPrefs + 0x20`, u32 | the page calls it MUSIC VOLUME |
+| `SfxVolume` | `0x08bb3b74` (`gp+0x1e14`), u8 | what the mixer reads |
+| `RadioVolume` | `0x08bb3b75` (`gp+0x1e15`), u8 | |
+
+`gp+0x1e16` is a third of the same kind, read in exactly one place (`0x0882f5e0`). Not identified,
+not offered.
+
+The live pair is read by the audio code two at a time - `0x089c690c`/`0x089c6914` and
+`0x08aab794`/`0x08aab7d0` - and **nothing recomputes them**: written by hand they hold their new
+value indefinitely, and they hold it while the preference says something else entirely, which is how
+the two layers were told apart. The game's own slider moves both together, so the fork's rows write
+both together. One without the other is either a volume that forgets itself across a boot, or a row
+that moves and changes nothing - the exact failure the old comment predicted.
+
+**The general shape, worth carrying to the next setting.** A value that tracks a setting perfectly
+is not necessarily the value that decides anything, and the cheap test separates them: write it, and
+see whether the thing you wanted actually changed. `HudMode` passed that test on the first try;
+these two failed it, and so did the two gp-relative bytes that shadow HUD MODE. Three of the five
+settings found this way needed the check.
