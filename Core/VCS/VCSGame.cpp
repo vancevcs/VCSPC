@@ -15,11 +15,18 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
+#include "Common/File/FileUtil.h"
+#include "Common/File/Path.h"
 #include "Common/Log.h"
 #include "Core/Config.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/System.h"
+#include "Core/Util/PathUtil.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
@@ -45,6 +52,9 @@ static const char *kVCSDiscIDUSA = "ULUS10160";
 static bool g_active = false;
 static std::string g_discID;
 static u64 g_tickCount = 0;
+
+// Defined with the disc patch itself, further down - Init only has to forget last boot's answer.
+static void ResetDiscPatches();
 
 // --- Boot phase ---
 //
@@ -160,6 +170,10 @@ void Init() {
 	g_tickCount = 0;
 	g_bootPhase = BootPhase::Intro;
 	g_introSkipFrames = 0;
+
+	// Per boot: a different image, or a replacement file that appeared or was deleted between
+	// runs, has to be looked at again rather than remembered.
+	ResetDiscPatches();
 
 	ResetHostKeys();
 	ClearSharedState();
@@ -359,6 +373,109 @@ bool PresentAsGame() {
 	}();
 	return discRemembered;
 #endif
+}
+
+// --- The disc patch ---
+//
+// What may be substituted, and nothing else. A blanket "any disc file the memory stick also has"
+// rule is not available anyway - there are no filenames here, only offsets - but the narrowness is
+// the point regardless: a wrong range writes into the middle of some other file, and the failure
+// would arrive as corruption somewhere unrelated.
+//
+// The offset is a property of THIS disc image, found by searching it for the file's own bytes
+// (Tools/vcsgxtkeys.py does the same to patch an ISO). It is not a memory address, so it does not
+// belong in VCSAddresses.h, but it is measured in the same spirit and gets the same treatment: the
+// disc is checked for the header that should be there before anything is overwritten.
+struct VCSDiscPatch {
+	const char *file;    // under memstick/PSP/VCS
+	u64 offset;          // byte offset on the disc
+	size_t length;       // the original's length; the replacement is padded to exactly this
+	const char *magic;   // what the disc must have at `offset`, or this patch stays off
+	size_t magicLen;
+};
+
+static const VCSDiscPatch kVCSDiscPatches[] = {
+	// The game's text. Tutorial messages name their controls through it - see Tools/vcsgxtkeys.py.
+	{ "ENGLISH.GXT", 0x04330000ull, 572710, "TABL", 4 },
+};
+
+struct VCSDiscPatchState {
+	std::vector<u8> data;  // padded to length; empty means there is no replacement to apply
+	bool tried = false;
+	bool refused = false;  // the disc did not hold what we expected at that offset
+};
+
+static VCSDiscPatchState g_discPatches[ARRAY_SIZE(kVCSDiscPatches)];
+
+static void ResetDiscPatches() {
+	for (VCSDiscPatchState &state : g_discPatches) {
+		state = VCSDiscPatchState();
+	}
+}
+
+static void LoadDiscPatch(const VCSDiscPatch &patch, VCSDiscPatchState &state) {
+	state.tried = true;
+
+	const Path path = GetSysDirectory(DIRECTORY_PSP) / "VCS" / patch.file;
+	std::string contents;
+	if (!File::ReadBinaryFileToString(path, &contents)) {
+		return;  // the normal case: nobody has generated one
+	}
+	if (contents.size() > patch.length) {
+		ERROR_LOG(Log::System, "VCS disc patch %s is %d bytes, larger than the %d it replaces - ignored",
+			patch.file, (int)contents.size(), (int)patch.length);
+		return;
+	}
+
+	// Padded rather than short, so a read landing past the end of the replacement gets zeroes
+	// instead of whatever the disc had there - half of one file and half of another is the one
+	// outcome worth ruling out by construction.
+	state.data.assign(patch.length, 0);
+	memcpy(state.data.data(), contents.data(), contents.size());
+	INFO_LOG(Log::System, "VCS disc patch: %s (%d bytes, padded to %d) will stand in at 0x%llx",
+		patch.file, (int)contents.size(), (int)patch.length, (unsigned long long)patch.offset);
+}
+
+void PatchDiscRead(u64 positionOnIso, u8 *data, size_t bytes) {
+	// The cheap gate first, and it is the one that guarantees no effect on any other game.
+	if (!g_active || bytes == 0) {
+		return;
+	}
+
+	for (size_t i = 0; i < ARRAY_SIZE(kVCSDiscPatches); i++) {
+		const VCSDiscPatch &patch = kVCSDiscPatches[i];
+		const u64 patchEnd = patch.offset + patch.length;
+		if (positionOnIso >= patchEnd || positionOnIso + bytes <= patch.offset) {
+			continue;  // no overlap, which is almost every read
+		}
+
+		VCSDiscPatchState &state = g_discPatches[i];
+		if (state.refused) {
+			continue;
+		}
+		if (!state.tried) {
+			LoadDiscPatch(patch, state);
+		}
+		if (state.data.empty()) {
+			continue;
+		}
+
+		// Check the disc before writing over it, on the first read that shows us the header. The
+		// same discipline the fire hook follows: if what is there is not what the offset was
+		// measured against, this is a different image and the right amount to do is nothing.
+		if (positionOnIso <= patch.offset && positionOnIso + bytes >= patch.offset + patch.magicLen) {
+			if (memcmp(data + (patch.offset - positionOnIso), patch.magic, patch.magicLen) != 0) {
+				state.refused = true;
+				ERROR_LOG(Log::System, "VCS disc patch %s: 0x%llx does not hold '%s' on this disc - not patching",
+					patch.file, (unsigned long long)patch.offset, patch.magic);
+				continue;
+			}
+		}
+
+		const u64 from = std::max(positionOnIso, patch.offset);
+		const u64 to = std::min(positionOnIso + bytes, patchEnd);
+		memcpy(data + (from - positionOnIso), state.data.data() + (from - patch.offset), (size_t)(to - from));
+	}
 }
 
 const std::string &GetDiscID() {

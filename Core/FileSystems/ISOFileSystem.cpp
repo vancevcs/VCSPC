@@ -24,6 +24,7 @@
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/StringUtils.h"
 #include "Core/FileSystems/ISOFileSystem.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/MemMap.h"
 #include "Core/Reporting.h"
@@ -511,6 +512,10 @@ size_t ISOFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size, int &usec) {
 		if (e.isBlockSectorMode) {
 			// Whole sectors! Shortcut to this simple code.
 			blockDevice->ReadBlocks(e.seekPos, (int)size, pointer);
+			// The VCS layer may stand a file on the memory stick in front of one on the disc, by
+			// range - there is no filename to match, because this is the path the game reads its
+			// whole UMD through. No-op for every other game. See VCS::PatchDiscRead.
+			VCS::PatchDiscRead((u64)e.seekPos * 2048ULL, pointer, (size_t)size * 2048u);
 			if (abs((int)lastReadBlock_ - (int)e.seekPos) > 100) {
 				// This is an estimate, sometimes it takes 1+ seconds, but it definitely takes time.
 				usec = 100000;
@@ -583,6 +588,8 @@ size_t ISOFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size, int &usec) {
 		}
 
 		size_t totalBytes = pointer - start;
+		// Same substitution as the block-sector path above, for reads that came in by offset.
+		VCS::PatchDiscRead(positionOnIso, const_cast<u8 *>(start), totalBytes);
 		if (abs((int)lastReadBlock_ - (int)secNum) > 100) {
 			// This is an estimate, sometimes it takes 1+ seconds, but it definitely takes time.
 			usec = 100000;

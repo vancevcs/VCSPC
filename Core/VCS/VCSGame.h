@@ -125,6 +125,23 @@ struct VCSGameSettings {
 
 VCSGameSettings &GameSettings();
 
+// Substitute a file on the UMD as it is read, by BYTE RANGE rather than by name.
+//
+// Called from ISOFileSystem::ReadFile with the absolute position on the disc that was just read
+// into `data`. Overwrites any part of it that falls inside a patched file. Returns immediately
+// for every other game, and for VCS whenever the read is nowhere near one.
+//
+// **By range because there is no name to match.** VCS opens `disc0:/sce_lbn0x0_size0x65170000` -
+// the whole UMD as one stream - and seeks to its own files by sector, so nothing on the disc is
+// ever requested by filename. A redirect keyed on the path was built first and never fired once;
+// this is the same substitution one layer down, where the game's own addressing lives.
+//
+// What it buys over patching the ISO: the retail disc is untouched and stays the boot path, the
+// replacement is a file on the memory stick that can be deleted to undo it, and there is no
+// 1.6 GB copy. What it does NOT change is the size limit - the game seeks by sector numbers baked
+// into its own code, so a replacement has to fit the original's span and is padded to it.
+void PatchDiscRead(u64 positionOnIso, u8 *data, size_t bytes);
+
 // The disc ID we booted with, for display. Empty when no game is running.
 const std::string &GetDiscID();
 
