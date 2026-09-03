@@ -267,7 +267,16 @@ namespace WindowsRawInput {
 				NativeKey(key);
 				keyboardKeysDown.insert(key.keyCode);
 			}
-		} else if (raw->data.keyboard.Message == WM_KEYUP) {
+		// WM_SYSKEYUP as well as WM_KEYUP, and leaving it out was a real bug rather than a
+		// nicety. Windows sends the SYS variant of BOTH messages for any key pressed while Alt is
+		// held - the down was already accepted above, so a release arriving as WM_SYSKEYUP and
+		// being dropped here left the key down forever: held in keyboardKeysDown, held by whoever
+		// NativeKey told, and only cleared by pressing that key again without Alt.
+		//
+		// Reported as "Alt + a key makes the key stick until you press Alt + it again", which is
+		// exactly what this does - and it is not specific to any one binding. Every Alt
+		// combination in the emulator has always had it.
+		} else if (raw->data.keyboard.Message == WM_KEYUP || raw->data.keyboard.Message == WM_SYSKEYUP) {
 			key.flags = KeyInputFlags::UP;
 			key.keyCode = GetTrueVKey(raw->data.keyboard);
 
