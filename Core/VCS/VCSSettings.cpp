@@ -259,10 +259,16 @@ const std::vector<Option> &Options() {
 
 		// --- Audio ---
 		//
-		// One row, because master volume is the only one of the three that has anything behind
-		// it. SFX and radio belong to the game's own mixer and need addresses we do not have,
-		// and a row wired to a variable nothing reads would move and change nothing - worse
-		// than a page that is visibly still short.
+		// Three rows now. The master volume is the emulator's, applied after everything; the two
+		// below it are the GAME's own mixer, off the Audio page of its front end, and they are
+		// here for the same reason subtitles and the HUD are on the Gameplay page - the fork's
+		// menu offers no way into that page, so without a row they were unreachable.
+		//
+		// This page carried a note for a long while saying SFX and radio "need addresses we do
+		// not have, and a row wired to a variable nothing reads would move and change nothing".
+		// That was the right call to make at the time and the second half of it turned out to be
+		// exactly the trap: the first pair of addresses found for these DID move and change
+		// nothing, because they are the preferences and not the levels. See VCSAddresses.h.
 		//
 		// g_Config.iGameVolume runs 0..VOLUMEHI_FULL, and the step is what keeps a row of ten
 		// blocks honest: one press moves one block. It was a Choice into an eleven-label list
@@ -287,6 +293,31 @@ const std::vector<Option> &Options() {
 			"Overall volume, applied by the emulator.",
 			&g_Config.iGameVolume, VOLUME_OFF, VOLUMEHI_FULL, VOLUMEHI_FULL / 10,
 			Config::GetDefaultValueInt(&g_Config.iGameVolume), true);
+		enabledBy(&g_Config.bEnableSound);
+
+		// The game's own two, and the step is what makes them read as sliders rather than as
+		// numbers: the strip draws ten blocks, so one press has to be a tenth of the range.
+		// 13 rather than 12 because 12 leaves the tenth press short of the top - ten steps of 13
+		// overshoot 127 and the write path clamps, which is the same thing the game's own slider
+		// does when you press right at 112.
+		//
+		// Not the game's own ladder of 16, deliberately. That one is eight notches against a
+		// ten-block strip, so a press would sometimes move a block and sometimes two. Both
+		// ladders produce values the game accepts; this one matches the control the player is
+		// actually looking at.
+		//
+		// Greyed under the same master switch as the row above, and for the same reason: with the
+		// emulator muted these move and nothing can be heard to change.
+		static constexpr int kVolumeStep = 13;
+
+		addInt(OptionPage::Audio, "SfxVolume", "SFX volume",
+			"Engines, weapons, footsteps and the people talking. Not the radio.",
+			&GameSettings().sfxVolume, 0, kVCSVolumeMax, kVolumeStep, kVCSVolumeMax);
+		enabledBy(&g_Config.bEnableSound);
+
+		addInt(OptionPage::Audio, "RadioVolume", "Radio volume",
+			"The car radio, and the music the game plays over it. Its own menu calls this MUSIC.",
+			&GameSettings().radioVolume, 0, kVCSVolumeMax, kVolumeStep, kVCSVolumeMax);
 		enabledBy(&g_Config.bEnableSound);
 
 		// --- Graphics ---
@@ -332,11 +363,16 @@ const std::vector<Option> &Options() {
 
 		// --- Gameplay ---
 		//
-		// Three switches, and what they have in common is the page's whole reason for existing:
-		// each one turns off something this port ADDED and hands that behaviour back to the game
-		// as Rockstar shipped it. None of them is a preference about how to drive the port - that
-		// is what the other four pages are - and none of them belongs on a page named after a
-		// device.
+		// What every row here has in common is that it is about the GAME rather than about the
+		// device you drive it with - which is what the other four pages are, each named after one.
+		//
+		// Two kinds sit here, and the order is deliberate. The first three turn off something this
+		// port ADDED and hand that behaviour back to the game as Rockstar shipped it. The last two
+		// are the opposite: they are the game's OWN settings, off the Display page of its front
+		// end, which this fork's menu deliberately offers no way into - so without a row here they
+		// were simply unreachable, the same loss the map and the save list took when Start was
+		// claimed. Reaching for the game's existing setting rather than inventing a mechanism is
+		// the same rule the vault and the cheat menu follow.
 		addBool(OptionPage::Gameplay, "Vaulting", "Vaulting",
 			"Pull up onto ledges and hop over fences with the jump button. The PSP game cannot "
 			"climb at all.",
@@ -348,6 +384,20 @@ const std::vector<Option> &Options() {
 		addBool(OptionPage::Gameplay, "GPS", "GPS route",
 			"Draw a route to your marker on the radar, along the roads the game itself uses.",
 			&RadarSettings().drawRoute);
+
+		// The game's own two, bound to the mirrors VCSGame keeps rather than to PSP memory - the
+		// menu edits these on the UI thread, and PSP memory is the emu thread's alone.
+		//
+		// "HUD" rather than "Remove HUD", so that OFF means the same thing here as it does in
+		// every other row on the page. The help line has to say what it leaves behind, because
+		// the radar staying up looks like the setting half worked; it is what the retail row
+		// does, and the radar has a setting of its own that this fork does not offer.
+		addBool(OptionPage::Gameplay, "Subtitles", "Subtitles",
+			"Dialogue as text on screen, during cutscenes and phone calls.",
+			&GameSettings().subtitles);
+		addBool(OptionPage::Gameplay, "Hud", "HUD",
+			"Health, armour, money, the weapon and the clock. The radar is separate and stays.",
+			&GameSettings().hud);
 
 		return opts;
 	}();

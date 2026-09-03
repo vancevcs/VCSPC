@@ -54,9 +54,11 @@ enum class OptionPage {
 	Aiming,
 	Audio,
 	Graphics,
-	// The things the fork ADDS to the game, as opposed to the ways it lets you drive it. Every
-	// row here turns one of this port's own inventions off and hands that behaviour back to the
-	// PSP game, which is the honest test for what belongs on the page.
+	// Settings about the GAME, as opposed to about the device you drive it with - which is what
+	// the four pages above are, each named after one. Two kinds qualify: a row that turns one of
+	// this port's own inventions off and hands that behaviour back to the PSP game, and a row
+	// that reaches a setting the game already has but keeps somewhere this fork's menu offers no
+	// way into. Nothing else does.
 	Gameplay,
 };
 

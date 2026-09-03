@@ -20,6 +20,8 @@
 #include <string>
 
 #include "Common/CommonTypes.h"
+// For kVCSVolumeMax, which is the range the two volume settings below are expressed in.
+#include "Core/VCS/VCSAddresses.h"
 
 // Lifecycle and per-frame driver for the GTA: Vice City Stories input overhaul.
 //
@@ -86,8 +88,39 @@ bool PresentAsGame();
 //
 // Off by default. The point of the game build is that it looks like a game, and a player who
 // wants the number now has a row to turn it on with.
+//
+// The two below are a different kind of row and worth telling apart from showFps: they do not
+// belong to this fork at all. Subtitles and the HUD are settings the PSP game already has, on the
+// Display page of its own front end - which this fork's menu does not offer a way into, so
+// without these rows they became unreachable, the same loss the map and the save list took.
+//
+// They are mirrored into plain bools here rather than edited in place because the menu runs on
+// the UI thread and PSP memory may only be touched from the emu thread. ApplyDisplayPrefs pushes
+// them across once a tick; see the note there for why that is a write-when-different rather than
+// a write-every-frame.
 struct VCSGameSettings {
 	bool showFps = false;
+
+	// Both default to what the game ships with, so a player who never opens the page gets the
+	// retail behaviour rather than this fork's opinion of it.
+	bool subtitles = true;
+
+	// The health, armour, money, weapon and clock panel. NOT the radar, which the game keeps on a
+	// separate RADAR MODE setting - turning this off leaves the radar drawn, exactly as the
+	// retail row does.
+	bool hud = true;
+
+	// The game's own two volumes, 0..kVCSVolumeMax. `radioVolume` is what its own Audio page
+	// calls MUSIC VOLUME - in this game the music IS the radio, and the row is named after what
+	// a player hears rather than after the mixer channel.
+	//
+	// Full by default, which is this fork's choice rather than the game's: nothing here can ask
+	// the game what it shipped with, and a menu that owns a setting has to have an answer for
+	// "restore defaults". The cost is one-off and worth stating - the first boot after these rows
+	// appeared overrides whatever the player had set in the game's own Audio page, and every boot
+	// after that uses what they set here.
+	int sfxVolume = kVCSVolumeMax;
+	int radioVolume = kVCSVolumeMax;
 };
 
 VCSGameSettings &GameSettings();

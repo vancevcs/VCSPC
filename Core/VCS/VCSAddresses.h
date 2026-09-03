@@ -439,6 +439,11 @@ inline constexpr u32 kVCSBlipInUseBit = 0x04;
 // It is a CORRELATION over a single cutscene, not a gate anyone has read in the code, and it is
 // labelled that way on purpose. If the line ever hides during ordinary play, this is the reason
 // and removing it costs nothing.
+// Full volume, for both of the game's own volume settings. Its own Audio page tops out here -
+// pressing right at 112 lands on 127 rather than 128, which is what says the scale is 0..127 and
+// not 0..128.
+inline constexpr int kVCSVolumeMax = 127;
+
 inline constexpr u32 kVCSHudCutscene = 0x0c;
 
 inline constexpr u32 kVCSHudDrawFlag = 0x2436;
@@ -727,6 +732,22 @@ enum class VCSAddr {
 	// The loaded SCM, which is where the script's global variables live. A POINTER, and a heap
 	// one - it reads 0x09f68400 on one run and will read something else on the next.
 	ScriptSpace,
+
+	// The game's own display preferences, which its Display page edits. The fork's Gameplay page
+	// drives these two rather than inventing a mechanism of its own - see the note over the rows
+	// in the table below.
+	DisplayPrefs,      // Pointer to the preferences object. A heap object, so the ones below are based on it.
+	ShowSubtitles,     // u8. 1 = dialogue subtitles on.
+	HudMode,           // u8. 1 = the health/money/weapon panel is drawn. NOT the radar.
+
+	// The two volumes off the game's own Audio page, and each is TWO values - see the note over
+	// the rows. The *Pref pair is what that page shows and a save keeps; the pair without the
+	// suffix is what the mixer actually reads, and setting only the preference changes nothing
+	// you can hear.
+	SfxVolumePref,
+	RadioVolumePref,
+	SfxVolume,
+	RadioVolume,
 
 	Count,
 };
@@ -1038,6 +1059,59 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	//
 	// This is what makes a save a save. See kVCSGlobalLoadedGame below.
 	{ VCSAddr::ScriptSpace,       "ScriptSpace",       VCSAddrType::U32, 0x08baab84, kNoBase,        "gp-0x71dc. Pointer to the loaded SCM; global N lives at [this] + N*4" },
+
+	// The game's own SUBTITLES and HUD MODE, off its Display page.
+	//
+	// Found by snapshot-and-diff rather than by reading code, which is the right way round for
+	// "where does the game keep Y": three dumps per setting - on, off, on again - with the row
+	// toggled in the game's own menu between them, then u8 `changed` / `same` over the three.
+	// Six candidates each; adding a fourth dump taken in GAMEPLAY with the setting off threw out
+	// everything that was only a menu widget's copy of the value.
+	//
+	// Both survivors turned out to be fields of one heap object, and `lw 0x16f4($gp)` - a load
+	// CHud::Draw itself makes - is the pointer to it. Hence a based entry: the object moves.
+	//
+	// Confirmed by writing, in both directions, which is also the whole reason this is a pref and
+	// not a per-frame flag: `HudMode = 0` takes the panel off the screen on the next frame, and
+	// `ShowSubtitles = 0` makes the game's own Display page read OFF. Two earlier candidates - the
+	// gp-relative bytes at 0x08bafaca and 0x08bafad0 - tracked the setting perfectly and were both
+	// wrong: written to, they were back to their old value within the frame, because something
+	// recomputes them. A value that correlates is not yet a value that decides.
+	//
+	// HUD MODE is the health/armour/money/weapon/clock panel and NOT the radar - the game has a
+	// separate RADAR MODE for that, and `HudObject + kVCSHudDrawFlag` is the radar's own gate.
+	// Turning this off leaves the radar drawn, exactly as the retail setting does.
+	{ VCSAddr::DisplayPrefs,      "DisplayPrefs",      VCSAddrType::U32, 0x08bb3454, kNoBase,        "gp+0x16f4. The display preferences object. Read 0x09a63400" },
+	{ VCSAddr::ShowSubtitles,     "ShowSubtitles",     VCSAddrType::U8,  0x08,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x08. The Display page's SUBTITLES. 1 = on" },
+	{ VCSAddr::HudMode,           "HudMode",           VCSAddrType::U8,  0x18,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x18. The Display page's HUD MODE. 1 = on; the radar is separate" },
+
+	// SFX VOLUME and MUSIC VOLUME, off the game's own Audio page, and the reason there are four
+	// entries for two settings.
+	//
+	// Watching the object while the game's own slider moved found the preferences immediately -
+	// `+0x1c` and `+0x20`, stepping 16 at a time and topping out at 127. Writing them did
+	// nothing: the value moved, the game's own page agreed with it, and the mixer carried on at
+	// the old volume. A `u32` search for the one transition that had just happened - 127 -> 111 -
+	// found exactly one match, and a `u8` search for the same pair found three more, one of them
+	// a plain global. That global is the live level:
+	//
+	//     0x08bb3b74  gp+0x1e14  sfx
+	//     0x08bb3b75  gp+0x1e15  music
+	//     0x08bb3b76  gp+0x1e16  a third, read in one place only. Not offered.
+	//
+	// Read by the audio code in pairs - 0x089c690c/0x089c6914 and 0x08aab794/0x08aab7d0 - and
+	// nothing recomputes them: written by hand they hold their new value indefinitely, and hold
+	// it while the preference says something else entirely, which is how the two layers were told
+	// apart in the first place.
+	//
+	// So a volume is two writes, and BOTH are the game's own behaviour: its menu moves the pair
+	// together. The live one is what you hear; the preference is what the Audio page reads back
+	// and what survives into a save. Writing only one of them produces a setting that either does
+	// nothing or forgets itself.
+	{ VCSAddr::SfxVolumePref,     "SfxVolumePref",     VCSAddrType::U32, 0x1c,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x1c. The Audio page's SFX VOLUME, 0..127" },
+	{ VCSAddr::RadioVolumePref,   "RadioVolumePref",   VCSAddrType::U32, 0x20,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x20. The Audio page's MUSIC VOLUME, 0..127" },
+	{ VCSAddr::SfxVolume,         "SfxVolume",         VCSAddrType::U8,  0x08bb3b74, kNoBase,        "gp+0x1e14. The live SFX level the mixer reads, 0..127" },
+	{ VCSAddr::RadioVolume,       "RadioVolume",       VCSAddrType::U8,  0x08bb3b75, kNoBase,        "gp+0x1e15. The live music/radio level the mixer reads, 0..127" },
 };
 
 static_assert(ARRAY_SIZE(kVCSAddresses) == (size_t)VCSAddr::Count,

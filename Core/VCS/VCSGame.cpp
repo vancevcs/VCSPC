@@ -94,6 +94,66 @@ static void UpdateBootPhase() {
 	}
 }
 
+// Push one of the game's own settings across, if the game does not already agree.
+//
+// Written only on a disagreement, rather than every tick. The game changes these from its own
+// front end and nowhere else, so a matching value means there is genuinely nothing to do - and
+// re-asserting a value the game already holds is the shape of mistake the camera pitch runaway
+// taught. It is still self-healing: a new game, or a load that restores the preferences out of a
+// save, is simply a disagreement on the next tick.
+//
+// Reads first and writes only on a successful read, so before the object exists - during a load,
+// or on a build where the address is wrong - this does nothing at all rather than writing into
+// whatever happens to be there.
+static void ApplyPref(VCSAddr id, int want) {
+	const std::optional<u32> current = ReadAddrAsU32(id);
+	if (!current || (int)*current == want) {
+		return;
+	}
+
+	const std::optional<u32> address = ResolveAddr(id);
+	if (!address) {
+		return;
+	}
+
+	if (LookupAddr(id).type == VCSAddrType::U8) {
+		WriteU8(*address, (u8)want);
+	} else {
+		WriteU32(*address, (u32)want);
+	}
+}
+
+// The game's own settings the menu owns: two switches off its Display page and two volumes off
+// its Audio page.
+static void ApplyGamePrefs() {
+	const VCSGameSettings &settings = GameSettings();
+
+	ApplyPref(VCSAddr::ShowSubtitles, settings.subtitles ? 1 : 0);
+	ApplyPref(VCSAddr::HudMode, settings.hud ? 1 : 0);
+
+	// Two writes each, and both are what the game's own slider does. The live level is what you
+	// hear; the preference is what its Audio page reads back and what goes into a save. Setting
+	// only the first is a volume that forgets itself, and only the second is a row that moves and
+	// changes nothing - see the note over these entries in VCSAddresses.h.
+	//
+	// And the live SFX level is 0 while the bridge is walking the game's own front end, which is
+	// the one place the two layers being separate pays for itself. Picking MAP, BRIEF or STATS
+	// makes this port press Start and then tab across the game's menu, and the game blips at
+	// every one of those presses - button sounds for buttons the player never touched, behind a
+	// curtain that is there precisely so they do not watch it happen. Muting the CHANNEL rather
+	// than the emulator keeps the radio playing through it, which is what the player is actually
+	// listening to.
+	//
+	// The preference is left alone throughout, so nothing about this reaches the game's Audio
+	// page or a save - and the level comes back on its own the tick after the walk ends, because
+	// ApplyPref is a disagreement check rather than a one-shot.
+	const int sfx = FrontEndDriving() ? 0 : settings.sfxVolume;
+	ApplyPref(VCSAddr::SfxVolume, sfx);
+	ApplyPref(VCSAddr::SfxVolumePref, settings.sfxVolume);
+	ApplyPref(VCSAddr::RadioVolume, settings.radioVolume);
+	ApplyPref(VCSAddr::RadioVolumePref, settings.radioVolume);
+}
+
 void Init() {
 	g_active = false;
 	g_discID.clear();
@@ -170,6 +230,10 @@ void Tick() {
 
 	// Cheap, and the front end needs it before anything else this tick.
 	UpdateBootPhase();
+
+	// The game's own settings the menu owns. Nothing else this tick depends on them, so the
+	// position is only about keeping it away from the input ordering below, which does.
+	ApplyGamePrefs();
 
 	// Free aim at the fire site. Installed HERE rather than in Init, because Init runs at
 	// __KernelInit - before the EBOOT is loaded - so anything written there is overwritten by the
