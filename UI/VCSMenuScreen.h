@@ -110,6 +110,8 @@ public:
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 	bool Key(const KeyInput &input) override;
 	bool Touch(const TouchInput &input) override;
+	// Where the selection blip comes from - hover and keyboard navigation both end up here.
+	void FocusChanged(UI::FocusFlags focusFlags) override;
 	std::string DescribeText() const override;
 
 	const VCS::Option *option() const { return option_; }
@@ -173,6 +175,8 @@ public:
 	void Draw(UIContext &dc) override;
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
 	bool Touch(const TouchInput &input) override;
+	// Same selection blip as a menu row - see VCSMenuItem::FocusChanged.
+	void FocusChanged(UI::FocusFlags focusFlags) override;
 	std::string DescribeText() const override;
 
 private:

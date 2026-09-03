@@ -48,6 +48,16 @@ enum class UISound {
 	TOGGLE_OFF,
 	ACHIEVEMENT_UNLOCKED,
 	LEADERBOARD_SUBMITTED,
+
+	// The GTA: Vice City Stories front end's own three, lifted out of the game's sound bank by
+	// Tools/vcsmenusfx.py. Added rather than swapped into SELECT/CONFIRM/BACK so that nothing
+	// outside UI/VCSMenuScreen.cpp - which is the only thing that plays them - can hear them:
+	// overriding the three shared samples would put GTA blips in PPSSPP's own menus for whatever
+	// game got booted next.
+	VCS_HIGHLIGHT,
+	VCS_SELECT,
+	VCS_BACK,
+
 	COUNT,
 };
 

@@ -38,6 +38,7 @@
 #include "Common/UI/ViewGroup.h"
 #include "Core/Config.h"
 #include "Core/System.h"
+#include "UI/BackgroundAudio.h"
 #include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSGame.h"
@@ -379,6 +380,71 @@ void VCSMenuItem::ClaimFocus() {
 	UI::SetFocusedView(this, UI::FocusFlags::CAUSE_FORCED, true);
 }
 
+// The menu's own click, and it deliberately does not go through UI::PlayUISound.
+//
+// That path is gated on g_Config.bUISound, which ships off and lives on PPSSPP's Audio settings -
+// a screen the game build has no way into. A menu that is silent until you find a setting you
+// cannot reach is a menu that is silent. This plays into the same mixer directly, and only from
+// this file.
+//
+// THE VOLUME IS COMPUTED HERE BECAUSE NOTHING DOWNSTREAM WILL DO IT. A UI sound is mixed on top of
+// everything - `NativeMix` adds the effect mixer after the game's own audio - so it misses both of
+// the things that scale the rest of what you hear:
+//
+//   g_Config.iGameVolume  applied inside __sceAudio's mix, to the emulated game only
+//   the SFX level         a value inside the game, applied by the game's mixer
+//
+// Which is why these first shipped ignoring both sliders on this menu's own Audio page, and read
+// as a bug immediately: the page has a row called Master volume and a row called SFX volume, and
+// the sound the page makes as you move them answered to neither.
+//
+// Both are applied, not just the master, and the SFX row is the honest one of the pair: these ARE
+// the game's front-end sound effects, lifted out of its own bank, and in the retail game they play
+// on the channel that row governs. Somebody who turns SFX down to hear the radio has said what
+// they want.
+//
+// `bEnableSound` has to be asked as well, for the same reason: it gates __sceAudio, not the audio
+// device, so the effect mixer goes on running with the emulator "muted". The Audio page calls that
+// row a master switch that silences everything, and this is the part of everything that would
+// otherwise carry on clicking.
+static void PlayMenuSound(UI::UISound sound) {
+	if (!g_Config.bEnableSound) {
+		return;
+	}
+
+	const float master = Volume100ToMultiplier(
+		std::clamp(g_Config.iGameVolume, VOLUME_OFF, VOLUMEHI_FULL));
+	// Through the same curve as the master rather than as a plain fraction, so that a step of one
+	// block moves the two rows by the same amount of loudness.
+	const float sfx = Volume100ToMultiplier(
+		VCS::GameSettings().sfxVolume * 100 / VCS::kVCSVolumeMax);
+
+	g_BackgroundAudio.SFX().Play(sound, master * sfx);
+}
+
+// The blip as the selection moves, and the whole reason it hangs off FocusChanged rather than off
+// the two places that move the selection: hover and keyboard navigation are different code paths
+// in this menu - `Touch` sets the focused view, arrow keys go through PPSSPP's own MoveFocus - and
+// they meet here.
+//
+// The CAUSE flags are what keep it from firing when nobody moved anything. A page being built
+// focuses its first row (CAUSE_SCREEN_CHANGE / CAUSE_RESTORE), and a mouse press forces focus onto
+// the row it is about to click (CAUSE_FORCED) - blipping for either would mean a sound for opening
+// a page, and two sounds for every click.
+static void PlayHighlightIfMoved(UI::FocusFlags focusFlags) {
+	if (!(focusFlags & UI::FocusFlags::GOT_FOCUS)) {
+		return;
+	}
+	if (focusFlags & (UI::FocusFlags::CAUSE_FOCUS_MOVE | UI::FocusFlags::CAUSE_OTHER)) {
+		PlayMenuSound(UI::UISound::VCS_HIGHLIGHT);
+	}
+}
+
+void VCSMenuItem::FocusChanged(UI::FocusFlags focusFlags) {
+	UI::ClickableItem::FocusChanged(focusFlags);
+	PlayHighlightIfMoved(focusFlags);
+}
+
 bool VCSMenuItem::Touch(const TouchInput &input) {
 	const Bounds hit = HitBounds();
 	const bool contains = hit.Contains(input.x, input.y);
@@ -456,6 +522,9 @@ void VCSMenuItem::ClickInternal() {
 	if (option_ && IsEnabled() && option_->type == VCS::OptionType::Bool) {
 		VCS::SetBool(*option_, !*option_->boolValue);
 	}
+	// Every click in this menu funnels through here, mouse and keyboard alike, which is why the
+	// sound is here and not on the handlers the rows attach.
+	PlayMenuSound(UI::UISound::VCS_SELECT);
 	UI::ClickableItem::ClickInternal();
 }
 
@@ -557,6 +626,11 @@ void VCSBindingRow::GetContentDimensions(const UIContext &dc, float &w, float &h
 	h = kListRowHeight;
 }
 
+void VCSBindingRow::FocusChanged(UI::FocusFlags focusFlags) {
+	UI::ClickableItem::FocusChanged(focusFlags);
+	PlayHighlightIfMoved(focusFlags);
+}
+
 bool VCSBindingRow::Touch(const TouchInput &input) {
 	const bool contains = bounds_.Contains(input.x, input.y);
 
@@ -568,7 +642,7 @@ bool VCSBindingRow::Touch(const TouchInput &input) {
 	}
 	// Forced, so the press does not immediately unfocus the row it just selected - see
 	// VCSMenuItem::ClaimFocus for the mechanism. Nothing else happens on a press: there is
-	// nothing to activate.
+	// nothing to activate, and so no select sound either.
 	if ((input.flags & TouchInputFlags::DOWN) && contains) {
 		UI::SetFocusedView(this, UI::FocusFlags::CAUSE_FORCED, true);
 	}
@@ -840,6 +914,10 @@ bool VCSMenuScreen::key(const KeyInput &key) {
 	const bool backspace = key.keyCode == NKCODE_DEL;
 	const bool back = UI::IsEscapeKey(key) || backspace;
 	if ((key.flags & KeyInputFlags::DOWN) && back) {
+		// Before the branches, because all three of them are Back happening - up a page, out to
+		// the world, or the main menu declining to close. The one that declines still makes the
+		// sound: something was pressed, and silence there reads as a dropped input.
+		PlayMenuSound(UI::UISound::VCS_BACK);
 		if (page_ != VCSMenuPage::Root) {
 			GoToPage(ParentPage(page_));
 			return true;

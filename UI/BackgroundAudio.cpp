@@ -594,6 +594,10 @@ void SoundEffectMixer::LoadDefaultSample(UI::UISound sound) {
 	case UI::UISound::TOGGLE_OFF: filename = "sfx_toggle_off.wav"; break;
 	case UI::UISound::ACHIEVEMENT_UNLOCKED: filename = "sfx_achievement_unlocked.wav"; break;
 	case UI::UISound::LEADERBOARD_SUBMITTED: filename = "sfx_leaderbord_submitted.wav"; break;
+	// Extracted from the game's own front-end bank - see Tools/vcsmenusfx.py.
+	case UI::UISound::VCS_HIGHLIGHT: filename = "vcs/sfx_fe_highlight.wav"; break;
+	case UI::UISound::VCS_SELECT: filename = "vcs/sfx_fe_select.wav"; break;
+	case UI::UISound::VCS_BACK: filename = "vcs/sfx_fe_back.wav"; break;
 	default:
 		return;
 	}
@@ -641,6 +645,9 @@ void SoundEffectMixer::LoadSamplesOnThread() {
 	LoadDefaultSample(UI::UISound::CONFIRM);
 	LoadDefaultSample(UI::UISound::TOGGLE_ON);
 	LoadDefaultSample(UI::UISound::TOGGLE_OFF);
+	LoadDefaultSample(UI::UISound::VCS_HIGHLIGHT);
+	LoadDefaultSample(UI::UISound::VCS_SELECT);
+	LoadDefaultSample(UI::UISound::VCS_BACK);
 
 	if (!g_Config.sAchievementsUnlockAudioFile.empty()) {
 		UpdateSample(UI::UISound::ACHIEVEMENT_UNLOCKED, Sample::Load(g_Config.sAchievementsUnlockAudioFile));
