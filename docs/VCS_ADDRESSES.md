@@ -1437,3 +1437,108 @@ is not necessarily the value that decides anything, and the cheap test separates
 see whether the thing you wanted actually changed. `HudMode` passed that test on the first try;
 these two failed it, and so did the two gp-relative bytes that shadow HUD MODE. Three of the five
 settings found this way needed the check.
+
+---
+
+## The silent auto-save, and why a save cannot be asked for from the world
+
+The auto-save after a mission works by opening the game's own front end and walking it to the save
+list, behind a loading screen (see "A loading screen over both of them" in CLAUDE.md). The obvious
+improvement is to skip the menu entirely - call the game's save routine directly, with nothing on
+screen. **It cannot be done**, and the reason is the game's own resource discipline rather than
+anything about the plumbing. This is the record of finding that out, so nobody spends the evening
+on it twice.
+
+**None of the code below is in the tree.** Every address here was measured; what was built on top
+of them was reverted. The working auto-save is untouched.
+
+### The addresses, all of them measured
+
+| what | where | how |
+|---|---|---|
+| the save routine | `0x08AB6E88` | walked outward from the one `sceUtilitySavedataInitStart` call site |
+| its 2nd/3rd opcodes | `0xAFA00010` / `0xAFA00014` | `sw $zero, 0x10($sp)` / `0x14($sp)`, the guard before calling |
+| savedata dispatcher | `0x08ab5b1c` | what refuses to start while the block is held |
+| worker thread id | `0x08bb14a4` (`gp-0x8bc`) | s32, `-1` when idle - the game's own "am I saving" |
+| the volatile-block flag | `0x08bc735d` | state manager `0x08bc7230 + 0x12d`, u8 |
+| `sceKernelVolatileMemTryLock` call | `0x089b9ae0` | the only one in the game |
+| the flag's set / clears | `0x089b9b08` / `0x089b9c28`, `0x089b9c6c` | set on a state push, cleared when the stack empties |
+| the state stack | state manager `+0x130` / `+0x134` | what the dispatcher pops |
+
+`SceUtilitySavedataParam` offsets, for turning the game's request into a silent one: `mode` at
+`+0x30`, `saveName` at `+0x4c` (fixed width, 20 bytes). The game asks for **5, LISTSAVE** - a slot
+list and an overwrite prompt. **1 is AUTOSAVE**, which names its slot and shows no dialog at all.
+
+The save routine takes **no arguments**: it reads the slot and the state out of globals, which is
+why the wrapper two levels down ignores its own.
+
+### Stage 1 works, and is the half worth keeping
+
+Rewriting `mode` to AUTOSAVE from inside `sceUtilitySavedataInitStart` deletes the entire firmware
+dialog sequence - the slot list, the overwrite prompt, the progress bar, and the `VCSSaveDialog`
+layer that exists to drive them. Measured: written to `S92F7` in 5.6 s, `save result 00000000`, no
+dialog at any point. The front end still has to open, so the curtain does not go away, but what it
+covers shrinks to a flash.
+
+That is a real improvement and it is not in the tree either, because it only pays for itself
+alongside stage 2.
+
+### Stage 2 is impossible, and the flag says so in one byte
+
+The PSP lends a game a 4 MB **volatile memory block**, and the savedata utility wants it. VCS's
+state manager is the only thing that borrows it, and `0x08bc735d` is its record of holding it. The
+dispatcher at `0x08ab5b1c` **spins popping the state stack until that byte reads zero** - that is
+how the block gets handed back before a save.
+
+From the front end, that is correct: the pages being torn down are the ones the player was looking
+at. From the world it means asking the game to demolish whatever it was in the middle of, and then
+racing it for the block.
+
+**Measured, and it is not close:**
+
+| | `0x08bc735d` | |
+|---|---|---|
+| ordinary gameplay | **1** | held, continuously |
+| the fork's front end open | **0** | the stack was torn down, block released |
+| back in the world | **1** | |
+
+So there is no window. The byte is 1 for the whole of ordinary play, and the only thing that
+clears it is the very menu a direct save was meant to avoid opening.
+
+### Three freezes, and what each one taught
+
+| host for the call | what happened |
+|---|---|
+| `sceGeListEnQueue` (the world query's own host) | ran the save inside an in-flight disc read; the game put **"Error reading the UMD"** on screen. Twice. |
+| `sceCtrlReadBufferPositive`, non-blocking branch | the call landed cleanly and the save **started** (worker 378) - then `threadmain` went READY-but-never-running at pc **`0x089b9ae8`**, and the frame counter froze |
+
+That pc is the smoking gun: `0x089b9ae0` is the `sceKernelVolatileMemTryLock` call site. The
+dispatch was fine, the host was fine, and the game deadlocked inside the lock exactly where the
+flag said it would.
+
+### The gate works, and proves the point by refusing
+
+The last attempt gated the direct call on the byte being zero, falling back to the walk otherwise.
+It behaves exactly as designed - and it refuses every time, because the byte is never zero in play:
+
+```
+UiStateHeld in ordinary gameplay: 1 -> GATE WOULD REFUSE
+  1s worker=-1   frame=1012  held=1
+  5s worker=377  frame=1135  held=0     <- the fallback's front end is open
+  7s worker=-1   frame=1194  held=1
+ 25s worker=-1   frame=1764  held=1
+```
+
+**No freeze.** The frame counter climbed throughout, and the fallback saved normally. So the gate
+is a working safety mechanism for a call that can never fire - which is why it was reverted rather
+than shipped: dead code that documents itself is worse than a documented finding.
+
+### The general shape
+
+"Can this be called from anywhere?" is a question about the *callee's* preconditions, and this one
+publishes its answer in a byte. Three freezes went into varying the **host** - which thread, which
+syscall, which moment - when the thing being varied was never the problem. The dispatcher's spin
+loop was in the disassembly the whole time.
+
+Before hunting for a safe moment to call something, read what the thing itself waits for. If it
+waits on a resource, find who holds it; if the answer is "the game, always", there is no moment.
