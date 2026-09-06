@@ -17,8 +17,9 @@ is read, and without that file the game names PSP buttons again.
 WHAT IS DELIBERATELY LEFT OUT, because each one is a way to ship something that is not ours or
 not the player's:
 
-  the ISO            copyrighted game data.  Everyone brings their own; the first run puts up
-                     PPSSPP's file browser to pick it, and vcs.ini remembers it after that.
+  the ISO            copyrighted game data.  Everyone brings their own, dropped into this
+                     folder - CreateStartScreen boots a single disc image found beside the exe,
+                     and falls back to PPSSPP's file browser when there is none or several.
   memstick/SAVEDATA  somebody else's saves, and eight slots of them
   memstick/PSP/PLUGINS  the CLEO plugin is a third-party binary of unknown licence
   memstick/PPSSPP_STATE  savestates, which are development scratch
@@ -32,9 +33,10 @@ not the player's:
                      play-time record.  A minimal one is written instead - see below.
 
 Nothing here strips a debugger out of the binary, because there is none to strip: the ImGui
-debugger and the menu bar are Release-gated already (VCS::PresentAsGame), and the WebSocket
-server only listens when --debugger is passed on the command line.  A Release build IS the
-release build.
+debugger is Release-gated (VCS::PresentAsGame), the menu bar that carried Debug is gated on the
+BUILD rather than the session (VCS::IsGameBuild, which is what a first run needs), and the
+WebSocket server only listens when --debugger is passed on the command line.  A Release build IS
+the release build.
 """
 
 import argparse
@@ -75,13 +77,16 @@ keys instead of PSP buttons.
 Running it
 ----------
 
-1. Put your own copy of the game - the USA disc, ULUS10160 - somewhere on
-   this machine.  It is not included and cannot be.
+1. Put your own copy of the game - the USA disc, ULUS10160 - in this folder,
+   next to the exe.  It is not included and cannot be.
 2. Run "GTA Vice City Stories.exe".
-3. The first run opens a file browser.  Point it at your .iso or .cso.
 
-That choice is remembered, so every run after the first goes straight into
-the game.
+That is all.  A single disc image sitting beside the exe is taken as the one
+you meant, and the game starts.
+
+If you would rather keep the disc somewhere else, leave this folder without
+one and the first run opens a file browser instead.  Either way the choice is
+remembered, so every run after the first goes straight in.
 
 Everything it writes - your saves, your settings - stays in the "memstick"
 folder next to the exe.  Move the folder and your saves move with it; delete

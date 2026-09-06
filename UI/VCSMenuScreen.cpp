@@ -25,6 +25,7 @@
 #include "Common/Data/Color/RGBAUtil.h"
 #include "Common/Log.h"
 #include "Common/Data/Text/I18n.h"
+#include "Common/File/DirListing.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/Render/DrawBuffer.h"
 #include "Common/Render/ManagedTexture.h"
@@ -1604,6 +1605,45 @@ UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending) {
 	return new GamePauseScreen(gamePath, bootPending);
 }
 
+// The disc sitting next to the exe, when there is exactly one.
+//
+// A player who unzips this and drops their copy of the game in beside it has said which disc they
+// mean about as plainly as it can be said, and the alternative is the emulator's file browser -
+// the one screen in this port that still looks like an emulator, asked for at the one moment a
+// new player has no idea why they are being asked. Reported from a packaged build, and it is the
+// right report: the fork only ever booted a disc it REMEMBERED, and a fresh install remembers
+// nothing.
+//
+// EXACTLY ONE, and that is the whole of the rule. Two images beside the exe is a person who has a
+// choice to make, and picking for them - by name, by date, by size - would be a guess that boots
+// the wrong game silently. The browser is the right answer there, and it is still the right answer
+// when there are none.
+//
+// It does NOT check that the disc is Vice City Stories, because it cannot do so cheaply and does
+// not need to: booting the wrong disc leaves the VCS layer dormant and this build behaving as the
+// emulator it is built on, which is a visible, recoverable outcome rather than a silent one.
+//
+// Nothing is remembered here either. EmuScreen::bootComplete records whatever actually booted, so
+// the second run goes straight to the disc through GamePath above and never reaches this.
+static Path DiscBesideExe() {
+	std::vector<File::FileInfo> files;
+	if (!File::GetFilesInDir(File::GetExeDirectory(), &files, "iso:cso:chd:pbp:")) {
+		return Path();
+	}
+	Path found;
+	int count = 0;
+	for (const File::FileInfo &f : files) {
+		if (f.isDirectory) {
+			continue;
+		}
+		if (++count > 1) {
+			return Path();  // more than one, so the player picks
+		}
+		found = f.fullName;
+	}
+	return found;
+}
+
 UIScreen *CreateStartScreen() {
 	// Nothing has booted yet, so VCS::Init() has not run and the settings have not been read.
 	// This is the only caller that needs them before a game exists.
@@ -1616,6 +1656,12 @@ UIScreen *CreateStartScreen() {
 		// end of that, which is where EmuScreen raises it. Putting one here as well would mean
 		// asking the player to start the game twice.
 		return new EmuScreen(Path(path));
+	}
+
+	// No disc remembered - a first run. Take the one beside the exe if there is exactly one.
+	const Path beside = DiscBesideExe();
+	if (!beside.empty()) {
+		return new EmuScreen(beside);
 	}
 	return new MainScreen();
 }
