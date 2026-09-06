@@ -20,11 +20,12 @@ not the player's:
   the ISO            copyrighted game data.  Everyone brings their own, dropped into this
                      folder - CreateStartScreen boots a single disc image found beside the exe,
                      and falls back to PPSSPP's file browser when there is none or several.
-  memstick/SAVEDATA  not INSTALLED, deliberately - see SAVES_README. The saves ship in a
-                     Saves folder at the root instead, for the player to copy in if they want
-                     them, because the game boot-loads the newest save it can find: installed,
-                     they would drop a first-time player into somebody else's 29% game instead
-                     of the start of the story.
+  memstick/SAVEDATA  the saves are their OWN download - a second folder and a second zip
+                     beside this one - so the game is the game and somebody else's progress is
+                     an opt-in. They were never installed into the memory stick either, for a
+                     reason the note inside them gives: the game boot-loads the newest save it
+                     can find, so installing them would drop a first-time player into a 29%
+                     game instead of the start of the story.
   memstick/PSP/PLUGINS  the CLEO plugin is a third-party binary of unknown licence
   memstick/PPSSPP_STATE  savestates, which are development scratch
   SYSTEM/*.bak*, CACHE, DUMP, vcs_autosaves.txt  editing backups, caches, and a ledger that
@@ -228,11 +229,6 @@ PSP's own textures, and FULLSCREEN if you would rather play in a window.
 Saves
 -----
 
-There is a "Saves" folder here with eight saves from a play-through, if you
-would rather not start from the beginning.  They are not installed - read
-the note inside that folder for where to put them and why they are not
-already in place.
-
 The game saves after each story mission by itself, and the save list marks
 those "(Autosave)".  A star marks the newest, which is the one the game
 comes back to when you start it.  You can still save by hand at a safe
@@ -356,22 +352,6 @@ def build(out_dir, make_zip, with_textures):
         if not (dst_tex / "textures.ini").is_file():
             fail("textures.ini did not come with the pack - replacement would silently do nothing")
 
-    # The saves, beside the game rather than inside the memory stick - see SAVES_README.
-    saves_src = ROOT / "memstick" / "PSP" / "SAVEDATA"
-    saves_dst = out_dir / "Saves"
-    copied = 0
-    if saves_src.is_dir():
-        for slot in sorted(saves_src.iterdir()):
-            if not slot.is_dir() or not (slot / "PARAM.SFO").is_file():
-                continue  # an empty directory is not a save
-            shutil.copytree(slot, saves_dst / slot.name, dirs_exist_ok=True)
-            copied += 1
-    if copied:
-        (saves_dst / "README.txt").write_text(SAVES_README, encoding="utf-8")
-        print(f"  {copied} save(s) in Saves/")
-    else:
-        print("warning: no saves found to include")
-
     licence = ROOT / "LICENSE.TXT"
     if licence.is_file():
         shutil.copy2(licence, out_dir / "LICENSE.TXT")
@@ -400,6 +380,51 @@ def build(out_dir, make_zip, with_textures):
         print(f"zipped {archive.stat().st_size / (1024 * 1024):.1f} MB -> {archive}")
 
 
+def build_saves(out_dir, make_zip):
+    """The saves as their own folder and zip, next to the game's.
+
+    Separate on purpose. The game is one thing and somebody else's progress is another, and
+    keeping them apart means the download that plays the game does not silently carry a decision
+    about where in the story you start.
+    """
+    src = ROOT / "memstick" / "PSP" / "SAVEDATA"
+    if not src.is_dir():
+        print("warning: no SAVEDATA directory - skipping the saves package")
+        return
+
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    copied = 0
+    for slot in sorted(src.iterdir()):
+        # A save is a directory with a PARAM.SFO in it. An empty slot is a directory too, and
+        # copying one would put a save in the list that has nothing behind it.
+        if not slot.is_dir() or not (slot / "PARAM.SFO").is_file():
+            continue
+        shutil.copytree(slot, out_dir / slot.name, dirs_exist_ok=True)
+        copied += 1
+
+    if not copied:
+        shutil.rmtree(out_dir)
+        print("warning: no saves found")
+        return
+
+    (out_dir / "README.txt").write_text(SAVES_README, encoding="utf-8")
+    total = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
+    print(f"staged {copied} saves, {total / (1024 * 1024):.1f} MB -> {out_dir}")
+
+    if make_zip:
+        archive = out_dir.with_suffix(".zip")
+        if archive.exists():
+            archive.unlink()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for f in sorted(out_dir.rglob("*")):
+                if f.is_file():
+                    z.write(f, Path(out_dir.name) / f.relative_to(out_dir))
+        print(f"zipped {archive.stat().st_size / (1024 * 1024):.1f} MB -> {archive}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -408,8 +433,14 @@ def main():
     ap.add_argument("--zip", action="store_true", help="also write a .zip beside it")
     ap.add_argument("--no-textures", action="store_true",
                     help="leave the HD pack out (much smaller, PSP textures only)")
+    ap.add_argument("--no-saves", action="store_true",
+                    help="skip the separate saves package")
     args = ap.parse_args()
     build(Path(args.out), args.zip, not args.no_textures)
+    if not args.no_saves:
+        # Beside the game's package, not inside it.
+        out = Path(args.out)
+        build_saves(out.with_name(out.name + " - Saves"), args.zip)
 
 
 if __name__ == "__main__":
