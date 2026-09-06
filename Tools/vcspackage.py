@@ -23,9 +23,8 @@ not the player's:
   memstick/SAVEDATA  somebody else's saves, and eight slots of them
   memstick/PSP/PLUGINS  the CLEO plugin is a third-party binary of unknown licence
   memstick/PPSSPP_STATE  savestates, which are development scratch
-  vcs.ini            holds GamePath, so shipping it would point at a disc nobody else has
-  controls.ini       PPSSPP writes its defaults on first run, and the defaults are what this
-                     fork was built against - arrows on the d-pad, Escape on pause
+  SYSTEM/*.bak*, CACHE, DUMP, vcs_autosaves.txt  editing backups, caches, and a ledger that
+                     names this machine's saves
   assets/debugger    the WebSocket debugger's web UI, which is exactly the "debug stuff" a
                      release build should not carry
   memstick/PSP/TEXTURES/*/new  where SaveNewTextures DUMPS to.  The pack itself ships; this
@@ -93,6 +92,28 @@ INI_FORCE = {
 # Dropped outright: a window rectangle from another monitor layout can put the window somewhere
 # with no screen under it.
 INI_DROP_KEYS = {"WindowX", "WindowY"}
+
+# The rest of memstick/PSP/SYSTEM ships as it is, and that is the point rather than an oversight.
+#
+# vcs.ini is the fork's OWN settings - every camera, aim, vault and menu value on the options
+# pages. Leaving it out did not give a player "the defaults"; it gave them the compiled-in values
+# rather than the ones this build has been tuned to over weeks, which is the same mistake the
+# minimal ppsspp.ini made one file over. controls.ini is PPSSPP's own mapping, and the fork's
+# tables are written against it.
+#
+# Only GamePath comes out, because it names a disc on this machine. Everything else is the tuning.
+SYSTEM_SKIP_NAMES = {"vcs_autosaves.txt"}     # a ledger of which of THIS machine's saves are auto
+SYSTEM_SKIP_DIRS = {"CACHE", "DUMP"}
+
+
+def sanitise_vcs_ini(text):
+    out = []
+    for line in text.splitlines():
+        if line.strip().split("=", 1)[0].strip() == "GamePath":
+            out.append("GamePath = ")
+            continue
+        out.append(line)
+    return "\n".join(out).rstrip() + "\n"
 
 
 def sanitise_ini(text):
@@ -238,6 +259,20 @@ def build(out_dir, make_zip, with_textures):
         fail("memstick/PSP/SYSTEM/ppsspp.ini is missing - it is what the package ships")
     (system / "ppsspp.ini").write_text(
         sanitise_ini(dev_ini.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+
+    # Everything else the running build keeps in SYSTEM, so a packaged copy is the same program
+    # in the same state - see SYSTEM_SKIP_NAMES.
+    for entry in sorted(dev_ini.parent.iterdir()):
+        if entry.is_dir() or entry.name == "ppsspp.ini":
+            continue
+        if entry.name in SYSTEM_SKIP_NAMES or ".bak" in entry.name:
+            continue
+        if entry.name == "vcs.ini":
+            (system / "vcs.ini").write_text(
+                sanitise_vcs_ini(entry.read_text(encoding="utf-8", errors="replace")),
+                encoding="utf-8")
+            continue
+        shutil.copy2(entry, system / entry.name)
 
     # The HD pack. Big, and the reason ReplaceTextures is worth having on - see sanitise_ini.
     # `new/` is where SaveNewTextures dumps and is referenced by nothing in textures.ini.

@@ -365,23 +365,23 @@ bool PresentAsGame() {
 	// overlays, because that is what every measurement and every address hunt is done with.
 	return false;
 #else
-	if (IsActive()) {
-		return true;
-	}
-	// The logo-screen decision is made before anything boots, so IsActive() cannot answer it
-	// yet. Fall back to whether a VCS disc is remembered - the same question CreateStartScreen
-	// asks, and it has to read the settings itself for the same reason.
+	// And the Release build is the GAME, unconditionally.
 	//
-	// Memoised because the counters ask this every frame, and LoadSettings() reads a file. A
-	// session that had no disc at startup still becomes a game session once one boots, which
-	// is what the IsActive() check above is for.
-	static const bool discRemembered = []() {
-		LoadSettings();
-		return !GamePath().empty();
-	}();
-	return discRemembered;
+	// This used to fall back to "is a VCS disc remembered", asked before anything booted, and
+	// memoised for the session. On a fresh copy nothing is remembered, so the answer was NO for
+	// the whole of a first run - and a first run is exactly when somebody who has just unzipped
+	// this meets it. They got the PPSSPP logo screen, a title bar reading PPSSPP and its version,
+	// and an emulator's chrome around a game they downloaded to play. Reported, bluntly and
+	// fairly, as "no ppsspp art, signs".
+	//
+	// The fallback was answering a question this build does not have: whether it is being used as
+	// an emulator this time. It is not, ever - the exe is named after one game, the compat flag
+	// and the disc ID still gate every behaviour, and a wrong disc simply leaves the VCS layer
+	// dormant while this presents as the game it says it is on the tin.
+	return true;
 #endif
 }
+
 
 // --- The disc patch ---
 //
