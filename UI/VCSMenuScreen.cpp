@@ -26,6 +26,7 @@
 #include "Common/Log.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/File/DirListing.h"
+#include "Common/StringUtils.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/Render/DrawBuffer.h"
 #include "Common/Render/ManagedTexture.h"
@@ -1644,6 +1645,133 @@ static Path DiscBesideExe() {
 	return found;
 }
 
+// --- No disc -----------------------------------------------------------------------------------
+
+// The names people actually have their copy of the game in when it will not boot. Checked so the
+// screen can say the specific true thing rather than the generic one: "there is no disc here" is
+// unhelpful when the disc IS here, inside an archive, which is exactly what happened - a 581 MB
+// .7z sat beside the exe and the port said nothing about it.
+static const char *kArchiveExtensions[] = { ".7z", ".zip", ".rar", ".gz", ".tar" };
+
+static std::string ArchiveBesideExe() {
+	std::vector<File::FileInfo> files;
+	if (!File::GetFilesInDir(File::GetExeDirectory(), &files)) {
+		return std::string();
+	}
+	for (const File::FileInfo &f : files) {
+		if (f.isDirectory) {
+			continue;
+		}
+		for (const char *ext : kArchiveExtensions) {
+			if (endsWithNoCase(f.name, ext)) {
+				return f.name;
+			}
+		}
+	}
+	return std::string();
+}
+
+void VCSNoDiscScreen::Boot(const Path &path) {
+	// Remembered before the boot rather than after it, so a disc chosen here is the disc every
+	// later run goes straight to - the same thing bootComplete does for one found beside the exe.
+	VCS::SetGamePath(path.ToString());
+	screenManager()->switchScreen(new EmuScreen(path));
+}
+
+void VCSNoDiscScreen::deviceLost() {
+	if (art_) {
+		art_->Release();
+		art_->deviceLost = true;
+	}
+	UIScreen::deviceLost();
+}
+
+void VCSNoDiscScreen::deviceRestored(Draw::DrawContext *draw) {
+	if (art_) {
+		art_->deviceLost = false;
+	}
+	UIScreen::deviceRestored(draw);
+}
+
+void VCSNoDiscScreen::CreateViews() {
+	using namespace UI;
+
+	archiveFound_ = ArchiveBesideExe();
+
+	root_ = new AnchorLayout(new LayoutParams(FILL_PARENT, FILL_PARENT));
+	LinearLayout *list = new LinearLayout(ORIENT_VERTICAL,
+		new AnchorLayoutParams(FILL_PARENT, WRAP_CONTENT, 0.0f, NONE, 0.0f, NONE));
+	list->SetSpacing(0.0f);
+	root_->Add(list);
+
+	VCSMenuItem *choose = list->Add(new VCSMenuItem("CHOOSE DISC",
+		new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+	choose->SetHelp("Find your copy of the game anywhere on this computer.");
+	choose->OnClick.Add([this](UI::EventParams &e) {
+		System_BrowseForFile(GetRequesterToken(), "Choose your Vice City Stories disc",
+			BrowseFileType::BOOTABLE, [this](std::string_view value, int) {
+				if (!value.empty()) {
+					Boot(Path(std::string(value)));
+				}
+			});
+	});
+
+	VCSMenuItem *quit = list->Add(new VCSMenuItem("QUIT",
+		new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+	quit->SetHelp("Close the game.");
+	quit->OnClick.Add([](UI::EventParams &e) {
+		System_ExitApp();
+	});
+
+	UI::SetFocusedView(choose, UI::FocusFlags::CAUSE_SCREEN_CHANGE, true);
+}
+
+void VCSNoDiscScreen::DrawBackground(UIContext &dc) {
+	const Bounds &bounds = dc.GetBounds();
+
+	// The menu's own backdrop, so the first screen anybody sees is already this port rather than
+	// a plain colour. Same two steps and the same order as VCSMenuScreen::DrawBackground: the flat
+	// fill goes down first and stays, because it is the artwork's base colour and it is what shows
+	// if assets/vcs was not deployed. Missing art is never fatal here.
+	if (!art_) {
+		art_.reset(new VCSMenuArt());
+	}
+	dc.FillRect(UI::Drawable(kBackgroundColor), bounds);
+	if (Draw::Texture *backdrop = art_->Background(dc)) {
+		DrawCover(dc, backdrop, bounds);
+	}
+
+	dc.SetFontStyle(kConfirmFont);
+	dc.DrawTextShadowRect("No disc found.",
+		Bounds(kTitleLeft, kTitleTop, bounds.w - kTitleLeft * 2.0f, 60.0f),
+		kHintColor, ALIGN_TOP | ALIGN_LEFT | FLAG_WRAP_TEXT);
+
+	// Two different problems, and telling them apart is the whole point of this screen. An archive
+	// beside the exe means the disc is HERE and simply not readable yet, which is a thirty-second
+	// fix the player can do; no archive means they have not brought one at all.
+	std::string body;
+	if (!archiveFound_.empty()) {
+		body = "There is an archive here - " + archiveFound_ +
+			" - and the game cannot read one. Extract it into this folder first, so the .iso "
+			"inside sits next to the game, then start the game again.";
+	} else {
+		body = "Put your copy of Grand Theft Auto: Vice City Stories - the USA disc, as a .iso "
+			"or .cso - into this folder, next to the game, and start it again.\n\n"
+			"Or choose one from anywhere on this computer below.";
+	}
+	dc.SetFontStyle(kConfirmDetailFont);
+	dc.DrawTextShadowRect(body,
+		Bounds(kTitleLeft, kTitleTop + 60.0f, bounds.w - kTitleLeft * 2.0f, 220.0f),
+		colorAlpha(kHintColor, 0.8f), ALIGN_TOP | ALIGN_LEFT | FLAG_WRAP_TEXT);
+
+	const Bounds bar(bounds.x, bounds.y2() - kBottomBarHeight, bounds.w, kBottomBarHeight);
+	dc.FillRect(UI::Drawable(kBarColor), bar);
+	dc.SetFontStyle(dc.GetTheme().uiFontSmall);
+	dc.DrawText("ENTER / LMB - SELECT", bar.x2() - kTitleLeft, bar.centerY(), kHintColor,
+		ALIGN_VCENTER | ALIGN_RIGHT);
+	dc.Flush();
+}
+
 UIScreen *CreateStartScreen() {
 	// Nothing has booted yet, so VCS::Init() has not run and the settings have not been read.
 	// This is the only caller that needs them before a game exists.
@@ -1663,5 +1791,6 @@ UIScreen *CreateStartScreen() {
 	if (!beside.empty()) {
 		return new EmuScreen(beside);
 	}
-	return new MainScreen();
+	// Ours, not PPSSPP's browser - see the note over VCSNoDiscScreen.
+	return new VCSNoDiscScreen();
 }

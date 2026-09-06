@@ -328,6 +328,36 @@ UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending);
 // before we have been told which disc that is.
 UIScreen *CreateStartScreen();
 
+// What comes up when there is no disc to boot: this port's own screen, in this port's own colours,
+// saying what it looked for and what to do about it.
+//
+// PPSSPP's game browser used to be the fallback, and it was the wrong screen twice over. It is
+// covered in another program's branding, which is the one thing this build is supposed never to
+// show - reported twice, the second time as "no ppsspp art, signs". And it answers a question
+// nobody asked: it offers a file tree of the whole machine to somebody whose actual problem is
+// that they have not put their disc in this folder yet, and it never says so.
+class VCSNoDiscScreen : public UIScreen {
+public:
+	const char *tag() const override { return "VCSNoDisc"; }
+
+	// The backdrop is a GPU object and a screen outlives the graphics device, so it goes back
+	// here rather than in the destructor - the same rule, and the same bug, as VCSMenuScreen's.
+	void deviceLost() override;
+	void deviceRestored(Draw::DrawContext *draw) override;
+
+protected:
+	void CreateViews() override;
+	void DrawBackground(UIContext &dc) override;
+	ViewLayoutMode LayoutMode() const override {
+		return ViewLayoutMode::ApplyInsets;
+	}
+
+private:
+	void Boot(const Path &path);
+	std::string archiveFound_;   // a .7z/.zip/.rar sitting where a disc should be, if there is one
+	std::unique_ptr<struct VCSMenuArt> art_;
+};
+
 // The loading screen over the boot's auto-load, drawn straight onto EmuScreen rather than pushed
 // as a screen of its own: a screen would pause the emulator, and the whole point of this one is
 // that the game carries on working behind it.
