@@ -23,14 +23,16 @@ not the player's:
   memstick/SAVEDATA  somebody else's saves, and eight slots of them
   memstick/PSP/PLUGINS  the CLEO plugin is a third-party binary of unknown licence
   memstick/PPSSPP_STATE  savestates, which are development scratch
-  memstick/PSP/TEXTURES  the HD pack is gigabytes and is its own release
   vcs.ini            holds GamePath, so shipping it would point at a disc nobody else has
   controls.ini       PPSSPP writes its defaults on first run, and the defaults are what this
                      fork was built against - arrows on the d-pad, Escape on pause
   assets/debugger    the WebSocket debugger's web UI, which is exactly the "debug stuff" a
                      release build should not carry
-  the dev ppsspp.ini a machine's graphics tuning, a recent-files list of local paths, and a
-                     play-time record.  A minimal one is written instead - see below.
+  memstick/PSP/TEXTURES/*/new  where SaveNewTextures DUMPS to.  The pack itself ships; this
+                     one folder is output, referenced by nothing in textures.ini.
+  ppsspp.ini's [Recent], [PlayTime], CurrentDirectory, the window position, and the logging
+                     and remote-debugger switches.  Everything ELSE in that file ships - see
+                     the note over sanitise_ini for why a minimal one was wrong.
 
 Nothing here strips a debugger out of the binary, because there is none to strip: the ImGui
 debugger is Release-gated (VCS::PresentAsGame), the menu bar that carried Debug is gated on the
@@ -49,22 +51,68 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 EXE_NAME = "GTA Vice City Stories.exe"
 
-# Only the settings this fork actually needs, so the rest arrive as PPSSPP's own defaults. A
-# distributed build should carry no opinion it cannot justify.
+# The dev ppsspp.ini, with the personal and the machine-specific taken out - NOT a minimal one
+# written from scratch.
 #
-# UseMouse is the one that is NOT optional. PPSSPP gates mouse-delta delivery on it, so with it
-# off there is no mouse look and no mouse aiming at all - and the game build has no way into
-# PPSSPP's own settings screen to turn it on. A player would meet a port whose headline feature
-# is silently absent, with nowhere to look.
+# A minimal ini shipped first, on the reasoning that a distributed build should carry no opinion it
+# cannot justify. That reasoning threw away the settings that make this build good, and the package
+# went out with no fullscreen and no texture replacement, reported as "you already did a release
+# build for me a while ago and it worked so well". Both were one line in this file: FullScreen and
+# ReplaceTextures were True in the config every test had been run against, and neither survived.
 #
-# CheckForNewVersion is off because this is a fork: pointing it at PPSSPP's update feed would
-# offer somebody an "upgrade" that replaces this build with a different program.
-MINIMAL_INI = """[General]
-CheckForNewVersion = False
+# The lesson is about what "default" means. PPSSPP's defaults are right for an emulator that plays
+# anything; this is a build of ONE game that has been tuned against it for weeks, and the tuning IS
+# the product. Shipping upstream defaults is not neutrality, it is shipping a different program.
+#
+# So the rule inverts: keep everything, and name what comes out.
+INI_DROP_SECTIONS = {"Recent", "PlayTime"}
 
-[Control]
-UseMouse = True
-"""
+# Personal, machine-specific, or a development switch. Each is set rather than deleted where a
+# value is wanted, and dropped where absence is the right answer.
+INI_FORCE = {
+    "CurrentDirectory": "",          # this machine's Documents folder
+    "FileLogging": "False",          # writes a log beside the exe all session
+    "RemoteDebuggerOnStartup": "False",
+    "CheckForNewVersion": "False",   # a fork: that feed offers a different program
+    "SaveNewTextures": "False",      # dumps every texture to disk as it is drawn
+    # Left True by any dev session that had the debugger open, and persisted. The build refuses
+    # to draw it now regardless (see ImDebugger::Frame), but shipping a release whose config says
+    # "debugger on" is wrong on its own terms.
+    "ShowImDebugger": "False",
+    # The developer DISPLAY settings, as a class rather than one at a time. Each of these turns on
+    # something drawn over the game, each defaults off upstream, and each ends up True in a dev ini
+    # simply because it was useful once. DebugOverlay is the one that shipped: it is CfgFlag
+    # DONT_SAVE upstream - PPSSPP will not write it - but it is still READ, so a stale value sat in
+    # the file and painted syscall timings over the game in a release package.
+    "DebugOverlay": "0",
+    "iShowStatusFlags": "0",         # the Debug build's speed counter; Release has its own row
+    "ShowDeveloperMenu": "False",
+    "AchievementsUserName": "",
+}
+
+# Dropped outright: a window rectangle from another monitor layout can put the window somewhere
+# with no screen under it.
+INI_DROP_KEYS = {"WindowX", "WindowY"}
+
+
+def sanitise_ini(text):
+    out = []
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+        if section in INI_DROP_SECTIONS:
+            continue
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+        if key in INI_DROP_KEYS:
+            continue
+        if key in INI_FORCE:
+            out.append(f"{key} = {INI_FORCE[key]}")
+            continue
+        out.append(line)
+    return "\n".join(out).rstrip() + "\n"
+
 
 README = """GTA: Vice City Stories - PC version
 ===================================
@@ -87,6 +135,12 @@ you meant, and the game starts.
 If you would rather keep the disc somewhere else, leave this folder without
 one and the first run opens a file browser instead.  Either way the choice is
 remembered, so every run after the first goes straight in.
+
+The HD texture pack is included and on.  If you would rather have the
+PSP's own textures - it is a lot of video memory - the menu has a row for
+it: Escape, SETTINGS, GRAPHICS, TEXTURE QUALITY.
+
+Fullscreen is on, and the same GRAPHICS page turns it off.
 
 Everything it writes - your saves, your settings - stays in the "memstick"
 folder next to the exe.  Move the folder and your saves move with it; delete
@@ -157,7 +211,7 @@ def copy_assets(dst):
             shutil.copy2(entry, dst / entry.name)
 
 
-def build(out_dir, make_zip):
+def build(out_dir, make_zip, with_textures):
     exe = ROOT / EXE_NAME
     if not exe.is_file():
         fail(f"{EXE_NAME} not found - build PPSSPPWindows in Release x64 first")
@@ -179,7 +233,26 @@ def build(out_dir, make_zip):
 
     system = out_dir / "memstick" / "PSP" / "SYSTEM"
     system.mkdir(parents=True)
-    (system / "ppsspp.ini").write_text(MINIMAL_INI, encoding="utf-8")
+    dev_ini = ROOT / "memstick" / "PSP" / "SYSTEM" / "ppsspp.ini"
+    if not dev_ini.is_file():
+        fail("memstick/PSP/SYSTEM/ppsspp.ini is missing - it is what the package ships")
+    (system / "ppsspp.ini").write_text(
+        sanitise_ini(dev_ini.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+
+    # The HD pack. Big, and the reason ReplaceTextures is worth having on - see sanitise_ini.
+    # `new/` is where SaveNewTextures dumps and is referenced by nothing in textures.ini.
+    if with_textures:
+        src_tex = ROOT / "memstick" / "PSP" / "TEXTURES" / "ULUS10160"
+        if not src_tex.is_dir():
+            fail("the texture pack is missing - pass --no-textures to build without it")
+        dst_tex = out_dir / "memstick" / "PSP" / "TEXTURES" / "ULUS10160"
+        # `new` is the dump folder; the *.bak-* are editing backups of textures.ini, and a second
+        # ini in that folder is a second answer to "which pack is this".
+        shutil.copytree(src_tex, dst_tex,
+                        ignore=shutil.ignore_patterns("new", "*.bak", "*.bak-*"),
+                        dirs_exist_ok=True)
+        if not (dst_tex / "textures.ini").is_file():
+            fail("textures.ini did not come with the pack - replacement would silently do nothing")
 
     licence = ROOT / "LICENSE.TXT"
     if licence.is_file():
@@ -215,8 +288,10 @@ def main():
     ap.add_argument("--out", default=str(ROOT / "dist" / "GTA Vice City Stories PC"),
                     help="where the staged folder goes")
     ap.add_argument("--zip", action="store_true", help="also write a .zip beside it")
+    ap.add_argument("--no-textures", action="store_true",
+                    help="leave the HD pack out (much smaller, PSP textures only)")
     args = ap.parse_args()
-    build(Path(args.out), args.zip)
+    build(Path(args.out), args.zip, not args.no_textures)
 
 
 if __name__ == "__main__":

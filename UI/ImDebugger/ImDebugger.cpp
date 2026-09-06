@@ -13,6 +13,7 @@
 #include "Common/Data/Text/I18n.h"
 #include "Core/RetroAchievements.h"
 #include "Core/Config.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/System.h"
 #include "Core/SaveState.h"
 #include "Core/WebServer.h"
@@ -2350,7 +2351,16 @@ void ImDebugger::Frame(MIPSDebugInterface *mipsDebug, GPUCommon *gpuDebug, Draw:
 	// Snapshot the coreState to avoid inconsistency.
 	const CoreState coreState = ::coreState;
 
-	const bool showDebugger = g_Config.bShowImDebugger && PSP_IsInited();  // This will be separated from showing the IM UI in general.
+	// PresentAsGame is the third term, and it is the one that was missing. The toggle KEY already
+	// refused in the game build (NativeApp's OnVKey), and that is not the same as the window being
+	// unable to appear: the flag is persisted in ppsspp.ini, so a config saved with the debugger
+	// open brings it straight back on the next run with no key pressed. A packaged release did
+	// exactly that - full menu bar, disassembly, the lot, over the game.
+	//
+	// Refusing at the DRAW is what makes "no debugger in the game build" true rather than merely
+	// hard to reach. Same shape as the menu bar: a surface has to be shut off where it is drawn,
+	// not only where it is opened.
+	const bool showDebugger = g_Config.bShowImDebugger && PSP_IsInited() && !VCS::PresentAsGame();  // This will be separated from showing the IM UI in general.
 	const bool allowSaveStates = !Achievements::HardcoreModeActive() && PSP_IsInited() && (!IsNetworkConnected() || g_Config.bAllowSavestateWhileConnected);
 
 	if (Achievements::HardcoreModeActive()) {

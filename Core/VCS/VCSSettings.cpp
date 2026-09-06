@@ -354,6 +354,23 @@ const std::vector<Option> &Options() {
 				return std::string(*opt.boolValue ? "HIGH" : "LOW");
 			});
 
+		// FULLSCREEN, and it is here because this build took away every other way to reach it.
+		//
+		// PPSSPP offers it on its View menu, and the game build hides the menu bar - correctly, it
+		// carried a Debug menu - so a packaged copy had NO route to fullscreen at all. Not even a
+		// key: VIRTKEY_TOGGLE_FULLSCREEN has no default binding in Core/KeyMapDefaults.cpp, which
+		// is fine when a menu offers it and a hole when nothing does.
+		//
+		// Reported from a packaged build, and it is the general shape of the mistake worth keeping:
+		// removing a surface removes everything that was only reachable through it. Take an
+		// emulator's chrome away and every setting behind it has to be given a home, or it is gone.
+		addBool(OptionPage::Graphics, nullptr, "Fullscreen",
+			"Fill the screen. The window's size and position come back when this is turned off.",
+			&g_Config.bFullScreen, true, true, []() {
+				// The same call PPSSPP's own checkbox makes, rather than a message of our own.
+				System_ApplyFullscreenState();
+			});
+
 		// Ours rather than g_Config.iShowStatusFlags, which is a bitfield the option table has no
 		// type for - and which the Debug build still uses. See VCSGameSettings for why the two are
 		// not one setting with two homes.
