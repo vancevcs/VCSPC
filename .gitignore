@@ -158,3 +158,4 @@ cmake-build-*/
 Tools/.vcsscan/
 Tools/.vcsvehicle/
 Tools/__pycache__/
+dist/

@@ -79,6 +79,17 @@ bool IsActive();
 // Safe to call before a game boots, which is what the logo-screen decision needs.
 bool PresentAsGame();
 
+// Whether this BINARY is the game's rather than the workshop's: Release in this fork, whatever
+// disc it has or has not been pointed at yet.
+//
+// A different question from PresentAsGame, and the difference only shows on the first run. That
+// one asks "is this session the game", which needs a disc, and is right for the things it gates -
+// the speed counter, the pause key, the logo screen. The MENU BAR is not one of them: it carries
+// Debug, Emulation and Game settings, and a build somebody downloaded to play one game should not
+// put those on the only screen they have to use, purely because it has not been told where their
+// disc is yet. Measured on a packaged build: the first screen offered a Debug menu.
+bool IsGameBuild();
+
 // Presentation settings this module owns, as opposed to the ones that belong to a mechanic.
 //
 // showFps deliberately does NOT edit g_Config.iShowStatusFlags, and that is not a duplicate

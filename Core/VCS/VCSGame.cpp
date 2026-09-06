@@ -351,6 +351,14 @@ VCSGameSettings &GameSettings() {
 	return settings;
 }
 
+bool IsGameBuild() {
+#ifdef _DEBUG
+	return false;
+#else
+	return true;
+#endif
+}
+
 bool PresentAsGame() {
 #ifdef _DEBUG
 	// The Debug build is the workshop. It keeps the menu bar, the ImGui debugger and the

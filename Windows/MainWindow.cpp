@@ -114,7 +114,9 @@ static std::wstring g_windowTitle;
 // the game. Gated here rather than by forcing g_Config.bShowMenuBar, which IS saved - writing
 // it would take the menu bar away from the Debug build too, since both share the memstick.
 static bool ShowMenuBar() {
-	return g_Config.bShowMenuBar && !VCS::PresentAsGame();
+	// IsGameBuild rather than PresentAsGame: the bar has to be gone on the FIRST run too, which
+	// is the one screen a new player cannot avoid and the one time PresentAsGame is still false.
+	return g_Config.bShowMenuBar && !VCS::IsGameBuild();
 }
 
 #define TIMER_CURSORUPDATE 1
