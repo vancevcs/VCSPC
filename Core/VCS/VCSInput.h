@@ -92,11 +92,12 @@ extern const InputKeyCode kVCSJumpKey;
 extern const InputKeyCode kVCSPadAimButton;
 extern const InputKeyCode kVCSPadJumpButton;
 
-// Recruit a gang member, on both devices, and named for exactly the reason the four above are:
-// the mapping rows press it and the auto-free-aim gate has to ask whether it is held, so the two
-// must not be able to drift. See RecruitHeld.
-extern const InputKeyCode kVCSRecruitKey;
-extern const InputKeyCode kVCSPadRecruitButton;
+// The game's ~TGSUB~ - toggle sub-mission - on both devices, and named for exactly the reason the
+// four above are: the mapping rows press it and the auto-free-aim gate has to ask whether it is
+// held, so the two must not be able to drift. See RecruitHeld, which asks about the one meaning
+// that has a precondition; the definition in the .cpp lists the other thirteen.
+extern const InputKeyCode kVCSSubMissionKey;
+extern const InputKeyCode kVCSPadSubMissionButton;
 
 // Which page of the read-only controls listing a row appears on, if any.
 //

@@ -67,7 +67,10 @@ KEYS = {
     "PDBAK": None,
     "FREE1": "S",              # enter free aim
     "FREE2": "the mouse",      # aim within free aim
-    "TGSUB": "G",              # recruit
+    "TGSUB": "G",              # toggle sub-mission: vigilante/taxi/paramedic/fire/air
+                               # rescue, every empire action, Trip Skip, cancel a
+                               # mission, and recruit. 14 lines use it - grep the token
+                               # before assuming one of them is the meaning.
     "CVEIW": "V",              # camera mode
     "SNZI":  "Z",              # scope zoom in
     "SNZO":  "Y",              # scope zoom out
@@ -97,7 +100,12 @@ KEYS = {
     # Driving
     "VEACC": "W",
     "VEBRK": "S",
-    "VEHB":  "S",              # H_IV_13 calls this the brakes, and the value is the brake button
+    # H_IV_13: "Press ~VEHB~ to use the vehicle's brakes, or reverse if the vehicle has stopped."
+    # Retail is "~S~ + ~X~", the same chord as VEWE2 - and here that is the GAME's text being
+    # odd, because braking and reversing are Square alone. Left as the single key the sentence is
+    # about. Checked rather than assumed: the audit that found VEWE2 flagged this one too, and
+    # reading the line it belongs to is what separated them.
+    "VEHB":  "S",              # brake / reverse
     "VEEE":  "F",              # get in / out
     "VEHN":  "H",              # horn
     "VECRS": "R and T",        # radio
@@ -112,11 +120,42 @@ KEYS = {
 
     # Vehicle weapons and the odd vehicles
     "VEWEP": "LEFT MOUSE",     # fire
-    "VEWE2": "SPACE",          # secondary
-    "VEWEL": "the mouse",      # aim the Rhino's cannon
+    # H_IV_H1, the Hunter's cannon, and the one that was reported. Retail is "~S~ + ~X~" -
+    # Square AND Cross, held together, which is a CHORD and not one button. Both contexts that
+    # can carry it agree on the keys: W is Cross and S is Square in a vehicle and in an aircraft
+    # alike, so "W + S" is deliverable as written.
+    #
+    # It said "SPACE", which was wrong twice: it collapsed a two-button chord into one key, and
+    # the key it picked is explicitly suppressed in the InAircraft context ("no handbrake in the
+    # air") - so the line named the one key in that context guaranteed to do nothing.
+    #
+    # The "+" is kept rather than turned into "and". The game uses "+" for hold-both and "and"
+    # for either-one, and the Hunter's cannon is the first.
+    "VEWE2": "W + S",          # secondary
+    # H_IV_06, the Rhino. Retail is "left button and right button" - the D-PAD, not the
+    # triggers, which the game writes as "L button" / "R button". Same pair VECRS above maps,
+    # so the same answer: in a vehicle the d-pad's left and right are R and T.
+    #
+    # It said "the mouse" first, which was a guess about the turret following the camera rather
+    # than a reading of the game's own line. The line names a control; use the control.
+    "VEWEL": "R and T",        # aim the Rhino's cannon
     "VEWEI": "W and S",        # shift weight on a bike
     "VEWEU": "W and S",
-    "FIREH": "the mouse",      # firetruck cannon
+    # H_IV_09, the fire engine. Retail is "analog stick", which VESTR above already maps to
+    # "A and D" - in a vehicle those keys ARE the stick, and the mouse is the camera.
+    #
+    # Worth knowing what this cannot say: a keyboard reaches the vehicle stick's X only, so the
+    # cannon's vertical aim has no key at all. Naming the two that exist beats naming a device
+    # that does not drive it.
+    "FIREH": "A and D",        # firetruck cannon
+    # UNRESOLVED, and left alone deliberately. The GXT says FLUP is "left button" and FLDN is
+    # "right button"; the mapping rows say CTRL_RIGHT (T) raises the forks and CTRL_LEFT (R)
+    # lowers them, marked verified. Those cannot both be true, and the row descriptions were
+    # written before R and T were swapped, so they are the likelier to have gone stale.
+    #
+    # Not guessed either way, because no help line uses these two - only the Controls screen -
+    # and a coin-flip here buys nothing. Sit in a forklift, press R, and whichever way the forks
+    # go settles it in ten seconds.
     "FLUP":  "T",              # forklift up
     "FLDN":  "R",              # forklift down
     "HERO":  "Q and E",        # helicopter yaw
@@ -126,6 +165,10 @@ KEYS = {
     "DOSLR": "A and D",
     "DOSUD": "W and S",
     "DOSIN": "SHIFT",
+    # Retail is "L button and R button" and this names one key, so it is incomplete. Not
+    # corrected, because which pair it should be depends on a context nobody has measured - the
+    # Domestobot's triggers are TAB and SPACE if it drives as a vehicle and TAB and RIGHT MOUSE
+    # if it does not. No help line uses it either. Measure the context before filling it in.
     "DOARM": "TAB",
 }
 

@@ -171,8 +171,21 @@ const InputKeyCode kVCSPadJumpButton = NKCODE_BUTTON_X;
 // G on the keyboard, which was the lock-on toggle until that moved to L and has been free since.
 // Nothing in PPSSPP's own defaults binds it, so claiming it costs nothing - the check every new
 // binding here has to pass.
-const InputKeyCode kVCSRecruitKey = NKCODE_G;
-const InputKeyCode kVCSPadRecruitButton = NKCODE_DPAD_UP;
+//
+// NAMED FOR THE TOKEN, NOT FOR ONE OF ITS MEANINGS, and that correction is why these rows exist in
+// four contexts instead of one. `~TGSUB~` is the game's own name for this button and it stands for
+// TOGGLE SUB-MISSION; recruiting is one of FOURTEEN help lines that use it. The others are the
+// vehicle sub-missions (Vigilante, Taxi, Paramedic, Fire Fighter, Air Rescue), the whole empire
+// system (purchase a site, develop one, run a mission at one, trigger an attack), Trip Skip, the
+// driving range, and cancelling a mission - so it is a button the player needs on foot, in a car
+// and in a helicopter, not only with a henchman targeted.
+//
+// Read as "recruit" first, off `H_GANG1` alone, and bound in the Aiming context only. The keyboard
+// help then named a key that did nothing in thirteen of the fourteen places it appeared. The lesson
+// is the one the GXT section in CLAUDE.md already teaches, one level further in: the table answers
+// what a control is CALLED, and one help line is not the whole of what it does. Grep the token.
+const InputKeyCode kVCSSubMissionKey = NKCODE_G;
+const InputKeyCode kVCSPadSubMissionButton = NKCODE_DPAD_UP;
 
 // Set on the input thread by the key above, read on the emu thread by FreeAimActive.
 static std::atomic<bool> g_lockOnMode{false};
@@ -328,6 +341,14 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::OnFoot,    NKCODE_DPAD_LEFT,          CTRL_LEFT,      "Spawner: previous model" },
 	{ VCSInputContext::OnFoot,    NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)", "Change camera", VCSKeyList::OnFoot },
 
+	// The sub-mission button on foot, which is where the empire system lives: standing on a site,
+	// this purchases it, develops it, starts a mission for it or triggers an attack on it. It is
+	// also Trip Skip and the "cancel this mission" the game offers at any time.
+	//
+	// Arrow-up reached the same PSP button by falling through to PPSSPP's mapper, so this half was
+	// never dead - it was undocumented, while every help line naming it said G.
+	{ VCSInputContext::OnFoot,    kVCSSubMissionKey,         CTRL_UP,        "Sub-mission: empire sites, Trip Skip, cancel a mission", "Sub-mission / recruit", VCSKeyList::OnFoot },
+
 	// --- In a vehicle ---
 	{ VCSInputContext::InVehicle, NKCODE_W,                  CTRL_CROSS,     "Accelerate", "Accelerate", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_S,                  CTRL_SQUARE,    "Brake / reverse", "Brake / reverse", VCSKeyList::InVehicle },
@@ -352,6 +373,9 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InVehicle, NKCODE_T,                  CTRL_RIGHT,     "Next radio station / raise forks (verified)", "Next radio station", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_R,                  CTRL_LEFT,      "Previous radio station / lower forks (verified)", "Previous radio station", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle, NKCODE_V,                  CTRL_SELECT,    "Change camera (verified)", "Change camera", VCSKeyList::InVehicle },
+	// Vigilante, Taxi, Paramedic and Fire Fighter, all toggled with this one button - the game says
+	// so itself in VIGI_TR, TAXI_TR, PARA_TR and FIRE_TR, which name ~TGSUB~ and nothing else.
+	{ VCSInputContext::InVehicle, kVCSSubMissionKey,         CTRL_UP,        "Start / stop Vigilante, Taxi, Paramedic, Fire Fighter", "Sub-mission / recruit", VCSKeyList::InVehicle },
 	// Claimed but deliberately mapped to nothing. Sprint is meaningless in a car, and leaving
 	// Shift unclaimed let it fall through to PPSSPP, whose default binding is VIRTKEY_RAPID_FIRE
 	// - that alternates held buttons, so it machine-gunned the accelerator and made throttle
@@ -385,6 +409,10 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::InAircraft, NKCODE_T,                  CTRL_RIGHT,     "Next radio station", "Next radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_R,                  CTRL_LEFT,      "Previous radio station", "Previous radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_V,                  CTRL_SELECT,    "Change camera", "Change camera", VCSKeyList::Aircraft },
+	// Air Rescue (CHOP_TR), and this context is the one where the button was not merely undocumented
+	// but UNREACHABLE: arrow-up is claimed below as a psp = 0 pitch row, so unlike on foot and in a
+	// car there was nothing left to fall through to PPSSPP's mapper. No key produced CTRL_UP here.
+	{ VCSInputContext::InAircraft, kVCSSubMissionKey,         CTRL_UP,        "Start / stop Air Rescue", "Sub-mission / recruit", VCSKeyList::Aircraft },
 	// Claimed and inert, all for the inverse-Escape-trap reason rather than for anything they do
 	// here. Shift would otherwise reach PPSSPP's rapid-fire and stutter the climb button exactly
 	// as it stuttered the throttle in a car. Space is handbrake in a car, which in an aircraft
@@ -500,15 +528,16 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 	{ VCSInputContext::Aiming,    NKCODE_L,                 0,              "Toggle lock-on mode (manual override; melee is automatic)" },
 	{ VCSInputContext::Aiming,    NKCODE_Q,                  CTRL_LEFT,      "Previous target", "Previous target", VCSKeyList::OnFoot | VCSKeyList::Melee },
 	{ VCSInputContext::Aiming,    NKCODE_E,                  CTRL_RIGHT,     "Next target", "Next target", VCSKeyList::OnFoot | VCSKeyList::Melee },
-	// Recruit, which is d-pad UP with a henchman targeted - the game's own help line, see
-	// kVCSRecruitKey. It fills in one of the two `?` cells the PSP button table carried for
-	// years: up on foot was never nothing, it was only ever meaningful with a target.
+	// Recruit, which is this same button with a henchman targeted - see the note over
+	// kVCSSubMissionKey for why "recruit" is one of its meanings rather than its name. It fills in
+	// one of the two `?` cells the PSP button table carried for years: up on foot was never
+	// nothing, it was only ever meaningful with a target.
 	//
-	// In the Aiming context and nowhere else, because targeting is the whole precondition. The
-	// gesture on a mouse is hold G, then hold aim: RecruitHeld stands the auto-free-aim pulse
-	// down for that entry, so the game keeps the lock-on it just acquired and the held UP lands
-	// on a target rather than into free aim.
-	{ VCSInputContext::Aiming,    kVCSRecruitKey,            CTRL_UP,        "Recruit gang member (hold it before aim, so the lock-on survives)", "Recruit gang member", VCSKeyList::OnFoot },
+	// The row is here as well as in the three contexts above because THIS one has a precondition
+	// none of the others do. The gesture on a mouse is hold G, then hold aim: RecruitHeld stands
+	// the auto-free-aim pulse down for that entry, so the game keeps the lock-on it just acquired
+	// and the held UP lands on a target rather than into free aim.
+	{ VCSInputContext::Aiming,    kVCSSubMissionKey,         CTRL_UP,        "Recruit gang member (hold it before aim, so the lock-on survives)", "Sub-mission / recruit", VCSKeyList::OnFoot },
 	// Sniper zoom.
 	//
 	// Square zooms IN and Cross zooms OUT - measured, not guessed. Each PSP button was injected
@@ -606,7 +635,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	//
 	// Bound explicitly rather than left unclaimed, because falling through means depending on
 	// PPSSPP's mapping for THIS device id - which is exactly what a pad on a slot nobody mapped
-	// does not have. Up is the game's own recruit button on foot (see kVCSPadRecruitButton and
+	// does not have. Up is the game's own sub-mission button on foot (see kVCSPadSubMissionButton and
 	// the GXT note above it), so the row is what the PSP does anyway and the Aiming context
 	// already agreed with it; down reaches the game's Free Aim, which is where the keyboard's
 	// arrow-down has always landed.
@@ -614,7 +643,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	// The two functions that were here move to the stick clicks, which were doing nothing at all.
 	{ VCSInputContext::OnFoot,     NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous weapon", "Previous weapon", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,     NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next weapon", "Next weapon", VCSKeyList::OnFoot },
-	{ VCSInputContext::OnFoot,     NKCODE_DPAD_UP,       CTRL_UP,        false, "Recruit gang member (target one first) / menu up", "Recruit gang member", VCSKeyList::OnFoot },
+	{ VCSInputContext::OnFoot,     NKCODE_DPAD_UP,       CTRL_UP,        false, "Sub-mission: empire sites, Trip Skip, cancel / recruit with a target / menu up", "Sub-mission / recruit", VCSKeyList::OnFoot },
 	{ VCSInputContext::OnFoot,     NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Menu down (the game's own d-pad, unchanged)", "Menu down", VCSKeyList::OnFoot },
 	// Start is the FORK's menu, and it carries no PSP button: it is handled on the press edge in
 	// HandlePadKey, because a UI message is not something a button mask can say.
@@ -659,7 +688,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	// The vertical pair is the PSP's own here too, for the menu reason spelled out in the on-foot
 	// rows. Down being the horn that button A already is stops being a reason to leave it unbound
 	// the moment the alternative is a pause menu the pad cannot move down through.
-	{ VCSInputContext::InVehicle,  NKCODE_DPAD_UP,       CTRL_UP,        false, "Menu up", "Menu up", VCSKeyList::InVehicle },
+	{ VCSInputContext::InVehicle,  NKCODE_DPAD_UP,       CTRL_UP,        false, "Start / stop Vigilante, Taxi, Paramedic, Fire Fighter / menu up", "Sub-mission / recruit", VCSKeyList::InVehicle },
 	{ VCSInputContext::InVehicle,  NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Horn / menu down", "Horn / menu down", VCSKeyList::InVehicle },
 	// The glances. psp = 0 because a glance is L trigger AND a stick direction at once: the
 	// trigger half comes from GlanceButtonMask and the stick half from ApplyAnalog, exactly as
@@ -690,7 +719,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	{ VCSInputContext::InAircraft, NKCODE_BUTTON_X,      0,              false, "Unbound (descend is on the left trigger)" },
 	{ VCSInputContext::InAircraft, NKCODE_DPAD_LEFT,     CTRL_LEFT,      false, "Previous radio station", "Previous radio station", VCSKeyList::Aircraft },
 	{ VCSInputContext::InAircraft, NKCODE_DPAD_RIGHT,    CTRL_RIGHT,     false, "Next radio station", "Next radio station", VCSKeyList::Aircraft },
-	{ VCSInputContext::InAircraft, NKCODE_DPAD_UP,       CTRL_UP,        false, "Menu up", "Menu up", VCSKeyList::Aircraft },
+	{ VCSInputContext::InAircraft, NKCODE_DPAD_UP,       CTRL_UP,        false, "Start / stop Air Rescue / menu up", "Sub-mission / recruit", VCSKeyList::Aircraft },
 	// The PSP's own centre view, kept reachable. It is d-pad down there too, so this is the one
 	// aircraft row where the modern layout and the handheld's happen to agree.
 	{ VCSInputContext::InAircraft, NKCODE_DPAD_DOWN,     CTRL_DOWN,      false, "Centre view", "Centre view", VCSKeyList::Aircraft },
@@ -721,7 +750,7 @@ const VCSPadMapping kVCSPadMappings[] = {
 	// Down stays dead, and for the reason it always had: it is the game's own FREE AIM button and
 	// the auto-free-aim pulse in ApplyMapping owns it, so a player pressing it by hand at the
 	// wrong moment would cancel or double the pulse.
-	{ VCSInputContext::Aiming,     kVCSPadRecruitButton, CTRL_UP,        false, "Recruit gang member (target one first)", "Recruit gang member", VCSKeyList::OnFoot },
+	{ VCSInputContext::Aiming,     kVCSPadSubMissionButton, CTRL_UP,     false, "Recruit gang member (target one first)", "Sub-mission / recruit", VCSKeyList::OnFoot },
 	{ VCSInputContext::Aiming,     NKCODE_DPAD_DOWN,     0,              false, "Suppressed (d-pad down is Free Aim, which the pulse owns)" },
 	// Zoom, and the reason VCSPadMapping has a scopedOnly column at all. These are the game's
 	// Square and Cross, which with anything but a scope in hand are Block and Heavy Hit, so
@@ -2488,7 +2517,7 @@ bool JumpHeld() {
 }
 
 bool RecruitHeld() {
-	return IsHostKeyDown(kVCSRecruitKey) || IsPadButtonDown(kVCSPadRecruitButton);
+	return IsHostKeyDown(kVCSSubMissionKey) || IsPadButtonDown(kVCSPadSubMissionButton);
 }
 
 bool CameraDrivenAimHeld() {
