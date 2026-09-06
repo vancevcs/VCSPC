@@ -136,73 +136,107 @@ def sanitise_ini(text):
 
 
 README = """GTA: Vice City Stories - PC version
-===================================
+==================================================
 
-A build of PPSSPP that plays only one game, as if it had been made for a PC:
-mouse look, mouse aiming, WASD, a menu of its own, and help text that names
-keys instead of PSP buttons.
+Vice City Stories, playing like a PC game: mouse look, mouse aiming, WASD,
+a menu of its own, an HD texture pack, and the game's own tutorial messages
+naming keys instead of PSP buttons.
 
-
-Running it
-----------
-
-1. Put your own copy of the game - the USA disc, ULUS10160 - in this folder,
-   next to the exe.  It is not included and cannot be.
-2. Run "GTA Vice City Stories.exe".
-
-That is all.  A single disc image sitting beside the exe is taken as the one
-you meant, and the game starts.
-
-If you would rather keep the disc somewhere else, leave this folder without
-one and the first run opens a file browser instead.  Either way the choice is
-remembered, so every run after the first goes straight in.
-
-The HD texture pack is included and on.  If you would rather have the
-PSP's own textures - it is a lot of video memory - the menu has a row for
-it: Escape, SETTINGS, GRAPHICS, TEXTURE QUALITY.
-
-Fullscreen is on, and the same GRAPHICS page turns it off.
-
-Everything it writes - your saves, your settings - stays in the "memstick"
-folder next to the exe.  Move the folder and your saves move with it; delete
-it and you are back to a first run.  Nothing is written to Documents.
+It is a build of PPSSPP that only plays this one game.  No emulator to set
+up, nothing to configure - everything is already set the way it was tuned.
 
 
-Controls
---------
+Setting it up
+-------------
 
-Escape opens the menu, and CONTROLS -> BINDINGS lists every control for the
-keyboard, an Xbox pad and a PlayStation pad side by side.  The game's own
-tutorial messages name keys too.
+1. Unzip this folder anywhere you like.  Your Documents, a games drive, a
+   USB stick - it does not matter, and nothing is installed.
+
+2. Put your own copy of the game in this folder, next to
+   "GTA Vice City Stories.exe".  The USA disc, ULUS10160, as .iso or .cso.
+   It is not included and cannot be.
+
+3. Run "GTA Vice City Stories.exe".  It starts fullscreen, straight into
+   the game.
+
+That is the whole setup.  A single disc image sitting beside the exe is
+taken as the one you meant.  If you would rather keep your disc somewhere
+else, leave this folder without one and the first run opens a file browser
+instead; either way the choice is remembered.
+
+
+Making a shortcut
+-----------------
+
+Right-click "GTA Vice City Stories.exe" and choose
+
+    Show more options  ->  Send to  ->  Desktop (create shortcut)
+
+The shortcut works from anywhere - the game always reads its own folder, so
+"Start in" does not matter.  What DOES matter is that the folder stays
+together: the exe, "assets" and "memstick" are one thing.  Move the folder
+and everything moves with it, saves included.
+
+
+Playing
+-------
+
+Escape opens the menu.  CONTROLS -> BINDINGS lists every control for the
+keyboard, an Xbox pad and a PlayStation pad, side by side.
 
 A few that are not obvious:
 
-  Alt + WASD    walk instead of run
-  G             sub-missions: vigilante, taxi, paramedic, empire sites
-  Tab           pick up a weapon you are standing on
-  L             hold the game's lock-on instead of free aiming
+    Alt + WASD    walk instead of run
+    G             sub-missions - vigilante, taxi, paramedic, empire sites
+    Tab           pick up a weapon you are standing on
+    L             hold the game's lock-on instead of free aiming
+    Q / E         glance left and right while driving
+
+Mouse look and mouse aiming are on by default, and so is the HD texture
+pack.  SETTINGS -> GRAPHICS has TEXTURE QUALITY if you would rather have the
+PSP's own textures, and FULLSCREEN if you would rather play in a window.
 
 
 Saves
 -----
 
-The game auto-saves after each story mission, and the save list marks those
-"(Autosave)".  A star marks the newest, which is the one a launch comes back
-to.  You can still save by hand at a safe house, exactly as on the PSP.
+The game saves after each story mission by itself, and the save list marks
+those "(Autosave)".  A star marks the newest, which is the one the game
+comes back to when you start it.  You can still save by hand at a safe
+house, exactly as on the PSP.
+
+Everything it writes lives in the "memstick" folder next to the exe.  Delete
+that folder and you are back to a fresh start; copy it and your saves come
+with you.  Nothing is written anywhere else on your machine.
+
+
+If something is wrong
+---------------------
+
+Nothing happens when you run it, or Windows complains about a missing DLL
+    Install the Microsoft Visual C++ Redistributable (x64) from Microsoft.
+
+It opens a file browser instead of the game
+    There is no disc image in the folder, or there is more than one.  With
+    two it cannot know which you meant, so it asks.
+
+The game runs but the textures look like the PSP's
+    SETTINGS -> GRAPHICS -> TEXTURE QUALITY should read HIGH.
 
 
 Licence
 -------
 
 PPSSPP is free software under the GNU GPL, version 2 or later, and so is
-this fork - see LICENSE.TXT.  That licence entitles you to the complete
-source code for this build.
+this build - see LICENSE.TXT.  That licence entitles you to its complete
+source code.
 
-  Upstream PPSSPP:  https://github.com/hrydgard/ppsspp
+    Upstream PPSSPP:  https://github.com/hrydgard/ppsspp
 
 The Pricedown typeface used by the menu is by Ray Larabie.  No game data of
 any kind is included in this download.
 """
+
 
 # Everything under assets/ is needed except this - fonts, atlases, shaders, the compatibility
 # list that turns this fork's own behaviour on, and the flash0 PSP fonts the game itself uses.
