@@ -42,6 +42,7 @@
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSSaveDialog.h"
+#include "Core/VCS/VCSSaves.h"
 
 namespace VCS {
 
@@ -419,6 +420,13 @@ u32 g_asLastFrame = 0;
 int g_autoSaveDelay = 0;
 bool g_autoSaveArmed = false;
 int g_autoSaveWaited = 0;
+
+// Whether the save now being walked is one nobody asked for, and whether the firmware has said it
+// landed. Both are needed to mark a slot: the first because a save the player requested is not an
+// auto-save however identical the file is, and the second because a sequence that gave up halfway
+// leaves the slot holding whatever was in it before.
+bool g_saveWasAutomatic = false;
+bool g_saveReachedDone = false;
 // Game frames after a world restart during which the mission key is re-baselined and nothing can
 // arm. See MissionWatchTick for the save this prevented.
 int g_missionSettle = 0;
@@ -427,6 +435,57 @@ constexpr int kMissionSettleFrames = 120;
 // in another menu, or a cheat sequence never ends - the auto-save gives up rather than firing at
 // some unrelated moment much later.
 constexpr int kAutoSavePatience = 1800;
+
+// Missions that must NOT be auto-saved after, by the eight-byte GXT key `01EB
+// register_mission_passed` carries.
+//
+// THE FINALE IS NOT A MISSION THAT ENDS IN THE WORLD. `DIA_C05` passes and the game goes straight
+// into its ending: the credits roll, the world is torn down behind them, and there is no moment
+// afterwards that a save could describe. The auto-save fired anyway and produced a file that
+// cannot be loaded - reported from play, and reproduced from the other end by the save itself:
+// booting it put the player on the roof for a few seconds and then rolled the credits again,
+// ending on the same black screen. The walk could not even open the game's menu to write it
+// ("the menu failed to open"), because the front end is not available during an ending.
+//
+// So this is a correctness fix rather than a preference, and it is not a setting: there is no
+// good moment to save here for the option to choose between. The game agrees - it offers no save
+// of its own during an ending either.
+//
+// Keyed on the mission rather than on "is the game in a cutscene", which would be the general
+// version of this and needs a signal this fork has never found. See the GameState note in
+// CLAUDE.md for why that hunt is closed. A measured key is worth more than a guessed state.
+struct NoAutoSaveMission {
+	const char *key;
+	const char *why;
+};
+
+constexpr NoAutoSaveMission kNoAutoSaveMissions[] = {
+	// The first and the last, and they fail the same way at opposite ends of the story: the
+	// mission passes while the game is inside a sequence of its own, so the front end the save
+	// has to be written through is not available to open.
+	{ "JER_A01", "Soldier - the opening, which the game plays out before handing the world over" },
+	{ "DIA_C05", "Last Stand - the finale rolls straight into the credits" },
+};
+
+// The eight bytes as the game holds them, rebuilt from the two words rather than compared as
+// numbers, so the table can be written in the game's own key strings and read by anyone.
+bool MissionKeyMatches(u32 lo, u32 hi, const char *key) {
+	char have[9] = {};
+	for (int i = 0; i < 4; i++) {
+		have[i] = (char)((lo >> (i * 8)) & 0xff);
+		have[4 + i] = (char)((hi >> (i * 8)) & 0xff);
+	}
+	return strncmp(have, key, 8) == 0;
+}
+
+const char *NoAutoSaveReason(u32 lo, u32 hi) {
+	for (const NoAutoSaveMission &m : kNoAutoSaveMissions) {
+		if (MissionKeyMatches(lo, hi, m.key)) {
+			return m.why;
+		}
+	}
+	return nullptr;
+}
 
 bool GameFrameAdvanced() {
 	const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
@@ -635,6 +694,15 @@ void GoIdle(const char *why) {
 	// back here rather than on the one path that succeeds. Leaving `$ONMISSION` at 1 because a
 	// save was abandoned halfway would quietly stop every mission trigger in the city.
 	RestoreScriptAfterSave();
+
+	// And for the same reason, this is where a finished auto-save is written down: one funnel,
+	// reached once, with both halves of the question already answered - it was automatic, and the
+	// firmware said the file was written. A sequence that ended any other way marks nothing.
+	if (g_target == FrontEndTarget::Save && g_saveWasAutomatic && g_saveReachedDone) {
+		NoteAutoSave(FrontEndSettings().autoSaveSlot);
+	}
+	g_saveWasAutomatic = false;
+	g_saveReachedDone = false;
 	g_bridgeOwnsMenu = false;
 	ShowPagesAgain();
 	g_phase = Phase::Idle;
@@ -781,6 +849,12 @@ void DialogTick() {
 		// BACK, not OK. "Save completed" offers one button and it is that one - measured, with
 		// the save already on the memory stick and the sequence pressing OK at a screen that
 		// ignores it until the whole thing timed out.
+		//
+		// It is also the firmware saying the file is written, which is the only trustworthy
+		// moment to record that this slot now holds an auto-save. Recorded here as a flag and
+		// acted on in GoIdle, because the write has to happen once per sequence and this branch
+		// runs on every tick the screen is up.
+		g_saveReachedDone = true;
 		Press(back, Phase::Dialog, hold, gap, true);
 		return;
 	}
@@ -983,6 +1057,14 @@ void MissionWatchTick() {
 		return;
 	}
 	if (!FrontEndSettings().autoSaveOnMissionPassed || g_autoSaveArmed) {
+		return;
+	}
+	// Some missions have no world left to save. Checked here rather than at the moment the save
+	// fires, because arming is what starts the delay - and a save armed during an ending would
+	// spend that delay waiting for a front end that is never going to open.
+	if (const char *why = NoAutoSaveReason(*lo, *hi)) {
+		g_status = "auto-save skipped";
+		INFO_LOG(Log::System, "VCS: no auto-save after this mission (%s)", why);
 		return;
 	}
 	g_autoSaveArmed = true;
@@ -1916,6 +1998,10 @@ void FrontEndTick() {
 			// pad. Anything else and it waits, because a save asked for on top of another
 			// sequence is two things pressing buttons at one game.
 			g_autoSaveArmed = false;
+			// Nobody asked for this one, which is what the save list's "(Autosave)" mark means.
+			// Set here rather than in the walk because this is the only place that knows: by the
+			// time the dialog is on screen the two kinds of save are the same sequence.
+			g_saveWasAutomatic = true;
 			// Behind the curtain, same as the boot load and for the same reason: what is about to
 			// be on screen is the game's save menu opening by itself and a firmware dialog being
 			// walked through. RequestSaveMenu deliberately does not do this - a player who asked
@@ -2467,6 +2553,8 @@ void FrontEndReset() {
 	g_autoSaveArmed = false;
 	g_autoSaveDelay = 0;
 	g_autoSaveWaited = 0;
+	g_saveWasAutomatic = false;
+	g_saveReachedDone = false;
 	g_missionSettle = 0;
 	g_wantSlot = -1;
 	g_request.store(-1, std::memory_order_relaxed);

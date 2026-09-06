@@ -991,15 +991,24 @@ void VCSMenuScreen::AddSaveRows(UI::ViewGroup *parent, bool deleting) {
 	const int newest = VCS::NewestSaveSlot();
 
 	for (const VCS::SaveSlot &slot : slots) {
-		char label[64];
+		// Two marks, and they answer different questions, which is why a save can carry both.
+		// `(Autosave)` is where the save CAME FROM - nobody chose this moment, so its title is
+		// the mission that had just been passed rather than a place the player decided to stop.
+		// `*` is what the game will do NEXT: the newest save is the one a boot comes back to.
+		//
+		// The star stays last so the column of them reads down the list, and the word sits
+		// between the title and the star rather than after it, where it would push the star out
+		// of that column on some rows and not others.
+		char label[128];
+		const char *mark = slot.autoSave ? "  (Autosave)" : "";
 		if (!slot.present) {
 			snprintf(label, sizeof(label), "%d.  EMPTY", slot.index + 1);
 		} else if (slot.index == newest) {
 			// Worth marking, because it is the one the game comes back to on its own: starting
 			// the port loads the most recent save, and this says which that is.
-			snprintf(label, sizeof(label), "%d.  %s  *", slot.index + 1, slot.title.c_str());
+			snprintf(label, sizeof(label), "%d.  %s%s  *", slot.index + 1, slot.title.c_str(), mark);
 		} else {
-			snprintf(label, sizeof(label), "%d.  %s", slot.index + 1, slot.title.c_str());
+			snprintf(label, sizeof(label), "%d.  %s%s", slot.index + 1, slot.title.c_str(), mark);
 		}
 
 		VCSMenuItem *row = parent->Add(new VCSMenuItem(label,

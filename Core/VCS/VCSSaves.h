@@ -70,11 +70,24 @@ struct SaveSlot {
 
 	std::string directory;    // ULUS10160S92F3
 	int64_t modified = 0;     // seconds, for "the most recent save"
+
+	// Written by this port's auto-save rather than by a player walking into a save pickup.
+	//
+	// NOT derivable from anything on the memory stick, which is why it is recorded rather than
+	// read: the auto-save opens the game's own save menu and lets the game write the file, so the
+	// PARAM.SFO it produces is identical in every field to one the player asked for. Nothing
+	// distinguishes them but the knowledge of who started it, and only this process has that.
+	bool autoSave = false;
 };
 
 // All eight, in slot order, whether or not they hold anything. Reads the filesystem, so this is
 // for a menu being built rather than for anything per-frame.
 std::vector<SaveSlot> EnumerateSaves();
+
+// Record that the save now in this slot is one the auto-save wrote. Called once, when the
+// sequence ends having seen the firmware say the file was written - see GoIdle in VCSFrontEnd.cpp
+// for why that is the moment rather than when the request was made.
+void NoteAutoSave(int index);
 
 // Which slot holds the newest save, or -1 when the memory stick is empty. The same answer the
 // firmware's own list arrives on, worked out from the same timestamps.
