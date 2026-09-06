@@ -20,7 +20,11 @@ not the player's:
   the ISO            copyrighted game data.  Everyone brings their own, dropped into this
                      folder - CreateStartScreen boots a single disc image found beside the exe,
                      and falls back to PPSSPP's file browser when there is none or several.
-  memstick/SAVEDATA  somebody else's saves, and eight slots of them
+  memstick/SAVEDATA  not INSTALLED, deliberately - see SAVES_README. The saves ship in a
+                     Saves folder at the root instead, for the player to copy in if they want
+                     them, because the game boot-loads the newest save it can find: installed,
+                     they would drop a first-time player into somebody else's 29% game instead
+                     of the start of the story.
   memstick/PSP/PLUGINS  the CLEO plugin is a third-party binary of unknown licence
   memstick/PPSSPP_STATE  savestates, which are development scratch
   SYSTEM/*.bak*, CACHE, DUMP, vcs_autosaves.txt  editing backups, caches, and a ledger that
@@ -135,6 +139,30 @@ def sanitise_ini(text):
     return "\n".join(out).rstrip() + "\n"
 
 
+# Raw, because the paths in it are Windows paths and a lone backslash before a U or an N is an
+# escape as far as Python is concerned.
+SAVES_README = r"""Save files
+==========
+
+Eight saves from a play-through, between 16% and 30% of the story.
+
+They are NOT installed - copy them in only if you want them.  The game loads
+the newest save it can find when it starts, so with these in place you would
+begin in the middle of somebody else's game rather than at the beginning of
+your own.
+
+To use them, copy the ULUS10160S92F* folders into
+
+    memstick\PSP\SAVEDATA
+
+next to the game, so you end up with
+
+    memstick\PSP\SAVEDATA\ULUS10160S92F0\  (and so on)
+
+They then appear in the game's own LOAD GAME list, named after the last
+mission each one passed.  Delete the folders again to be rid of them.
+"""
+
 README = """GTA: Vice City Stories - PC version
 ==================================================
 
@@ -199,6 +227,11 @@ PSP's own textures, and FULLSCREEN if you would rather play in a window.
 
 Saves
 -----
+
+There is a "Saves" folder here with eight saves from a play-through, if you
+would rather not start from the beginning.  They are not installed - read
+the note inside that folder for where to put them and why they are not
+already in place.
 
 The game saves after each story mission by itself, and the save list marks
 those "(Autosave)".  A star marks the newest, which is the one the game
@@ -322,6 +355,22 @@ def build(out_dir, make_zip, with_textures):
                         dirs_exist_ok=True)
         if not (dst_tex / "textures.ini").is_file():
             fail("textures.ini did not come with the pack - replacement would silently do nothing")
+
+    # The saves, beside the game rather than inside the memory stick - see SAVES_README.
+    saves_src = ROOT / "memstick" / "PSP" / "SAVEDATA"
+    saves_dst = out_dir / "Saves"
+    copied = 0
+    if saves_src.is_dir():
+        for slot in sorted(saves_src.iterdir()):
+            if not slot.is_dir() or not (slot / "PARAM.SFO").is_file():
+                continue  # an empty directory is not a save
+            shutil.copytree(slot, saves_dst / slot.name, dirs_exist_ok=True)
+            copied += 1
+    if copied:
+        (saves_dst / "README.txt").write_text(SAVES_README, encoding="utf-8")
+        print(f"  {copied} save(s) in Saves/")
+    else:
+        print("warning: no saves found to include")
 
     licence = ROOT / "LICENSE.TXT"
     if licence.is_file():
