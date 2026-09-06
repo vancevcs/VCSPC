@@ -1607,6 +1607,23 @@ void VulkanRenderManager::Run(VKRRenderThreadTask &task) {
 				// Can't really do anything about this here, but let's try to continue anyway, maybe the app is in the process of being switched
 				// away from on Android or something.
 				outOfDateFrames_++;
+			} else if (res == VK_ERROR_DEVICE_LOST) {
+				// Same treatment as VK_ERROR_SURFACE_LOST_KHR above, and for the same reason it
+				// gives: by the time present has failed there is nothing to salvage from in here,
+				// and the common way to get here is the window going away while a frame is still
+				// in flight. Windows drivers report that teardown as either of these two codes,
+				// so asserting on one and tolerating the other was a coin toss - and the one that
+				// asserted put a modal "Critical Assert VulkanRenderMan / Try to continue?" over
+				// somebody who had just closed the game. Reported as happening on every exit.
+				//
+				// Logged rather than swallowed, and still a dbg assert, so a REAL device loss
+				// during play - a driver reset, a TDR - is caught in development where it can be
+				// acted on. In a release build it costs a log line instead of a dialog offering to
+				// break into a debugger that is not there.
+				ERROR_LOG(Log::G3D, "vkQueuePresentKHR: device lost. Usually the surface going "
+					"away during shutdown.");
+				_dbg_assert_msg_(false, "vkQueuePresentKHR failed! result=%s", VulkanResultToString(res));
+				outOfDateFrames_++;
 			} else if (res != VK_SUCCESS) {
 				_assert_msg_(false, "vkQueuePresentKHR failed! result=%s", VulkanResultToString(res));
 			} else {
