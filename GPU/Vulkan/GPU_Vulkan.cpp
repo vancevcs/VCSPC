@@ -35,6 +35,7 @@
 #include "GPU/GPUState.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
+#include "GPU/Common/VCSShadow.h"
 #include "GPU/Vulkan/GPU_Vulkan.h"
 #include "GPU/Vulkan/FramebufferManagerVulkan.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
@@ -246,6 +247,11 @@ void GPU_Vulkan::BeginHostFrame(const DisplayLayoutConfig &config) {
 	int curFrame = vulkan->GetCurFrame();
 
 	framebufferManager_->BeginFrame(config);
+
+	// Publish last frame's shadow counts and drop its captured geometry. The passes themselves
+	// do not run from here - they run inside the frame, at the seam between the world and the
+	// HUD, so that the mask is the camera's own view rather than the previous one's.
+	VCSShadow::BeginFrame(draw_);
 
 	gstate_c.Dirty(DIRTY_ALL);
 

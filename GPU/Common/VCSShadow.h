@@ -31,9 +31,18 @@ class Framebuffer;
 // nothing else. With the flag off, IsActive() is false, every entry point returns on its first
 // line, and no other game executes a single instruction of this.
 //
-// This is milestone 1 of the shadow work, and it renders nothing at all. It classifies draws
-// and counts them, so that three things can be checked against the running game before any
-// render target exists:
+// Three passes, all of them inside the frame they belong to:
+//
+//   1. A depth map of the city as seen from the sun, into a cascade anchored ahead of the camera.
+//   2. A screen-space mask - white where the sun reaches - drawn by putting the same captured
+//      geometry through the camera's own transform a second time.
+//   3. One triangle over the game's framebuffer, multiplying what is there by that mask.
+//
+// All three run at the moment the frame turns from 3D to 2D, so the HUD drawn afterwards is not
+// shadowed and nothing is a frame stale. See OnFlush.
+//
+// Three assumptions underneath it, each checked against the running game before anything was
+// rendered, and each still visible as a count in the debugger's Shadows tab:
 //
 //   1. Does the caster filter actually separate world/vehicles/peds from HUD and particles?
 //      The filter is pure render state - there is no "this is a car" bit in a display list -
@@ -53,6 +62,7 @@ namespace VCSShadow {
 enum class Reject : u8 {
 	None = 0,       // it is a caster
 	Through,        // 2D: HUD, radar, menus. No world transform to speak of.
+	OffscreenTarget,// a render-to-texture pass - its own camera, and nobody looks at it directly
 	Primitive,      // lines, points, sprites - nothing that bounds a volume
 	NoDepthWrite,   // particles, coronas, and the vanilla blob shadow
 	Blended,        // blending that genuinely composites: glass, smoke, water
@@ -158,8 +168,7 @@ struct FrameStats {
 	int dirLightDraws;   // ...of those, ones with an enabled directional channel
 };
 
-// Where the shadow projection ends up looking, recomputed once a frame. Milestone 2a fills this
-// in and shows it; nothing renders from it yet.
+// Where the shadow projection ends up looking, recomputed once a frame.
 //
 // Conventions, because getting one of these backwards costs a day: VCS world space is Z-up. That
 // is not inferred from the sun vector - CWorld::ProcessVerticalLine answers "what is the height
@@ -188,8 +197,11 @@ struct ShadowView {
 
 	float lightViewProj[16];
 
-	// World to camera clip, for the mask pass. Built from the same captured view matrix
-	// and the projection matrix beside it, so the mask lines up with what the game drew.
+	// World to the pixel the game drew, for the mask pass. Built from the same captured view
+	// matrix, the projection matrix beside it, AND everything PPSSPP's own vertex shader does
+	// after those two - the PSP viewport transform, the raster offset, the remap into the render
+	// target's NDC. Stopping at view*proj gets a mask that resembles the frame and does not line
+	// up with it, and a shadow mask that is a few pixels out is worse than none.
 	float cameraViewProj[16];
 
 	// The recovered camera position pushed back through the view matrix the way the vertex
@@ -214,10 +226,49 @@ struct Settings {
 	// cascade sits behind the camera and shadows land on nothing. One run settles it.
 	bool forwardIsNegativeZ;
 
-	// The screen-space mask.
-	int maskWidth;
-	int maskHeight;
+	// The screen-space mask is built at the game's own render resolution times this, so it lines
+	// up with the frame it will be multiplied into. Below 1.0 it is cheaper and softer: the
+	// composite samples it bilinearly, so a half-scale mask is a free blur rather than a stairstep.
+	float maskScale;
+
 	float depthBias;
+
+	// Bias proportional to how steeply the light grazes the surface. A constant bias alone has to
+	// be set for the worst case - ground almost edge-on to the sun - and that much of it detaches
+	// every shadow from the thing casting it. This term comes from the depth derivatives in the
+	// mask shader, so it is large exactly where acne appears and near zero everywhere else.
+	float slopeBias;
+
+	// Half-width of the PCF kernel in shadow-map texels. 0 is a single tap and a hard stencil
+	// edge; 1 is the 3x3 that makes a 2048 map read as a shadow rather than as a cutout.
+	int pcfRadius;
+
+	// How much of the cascade's outer edge fades back to unshadowed, as a fraction of its half
+	// width. Without this the cascade ends in a straight line ruled across the road.
+	float edgeFade;
+
+	// How dark a shadowed pixel goes, and what colour it goes towards. Scaled by the sun's own
+	// brightness, so shadows thin out towards dusk without anything having to know the time.
+	float strength;
+	float tint[3];
+
+	// A draw whose whole footprint sits within this distance of the camera is thrown away, caster
+	// and receiver both. It is the game's full-screen overlays - the colour filter, the fades -
+	// which VCS draws as 3D geometry rather than in through mode, so no render-state test can
+	// see them for what they are. They cover every pixel and sit AT the camera, so once the mask
+	// keeps the nearest surface they win every pixel of it, and the mask comes back as one flat
+	// value: measured at 0.6 units across, centred on the recovered camera, filling the frame.
+	//
+	// The camera is never inside real geometry, and the third-person camera sits 4.6 units behind
+	// the player, so there is a wide gap to put this in.
+	float nearCameraCutoff;
+
+	// A draw whose world-space footprint is wider than this is captured as a shadow RECEIVER only
+	// and never enters the depth pass. The sky and the map-spanning ground and water quads are
+	// what this is for: geometry that covers the whole cascade would fill the shadow map with one
+	// surface and put the entire city in its shadow. Nothing that reads as a building comes near
+	// this span.
+	float maxCasterSpan;
 
 	// Which way up the shadow map's V axis runs depends on the backend's clip convention. Wrong,
 	// and the shadows track the right shapes in the wrong places - so it is a toggle to be
@@ -226,6 +277,10 @@ struct Settings {
 
 	// 0 shadow term, 1 sampled shadow-map depth, 2 light-space Z, 3 shadow UV as red/green.
 	int debugView;
+
+	// Draw the mask straight over the frame instead of multiplying by it. The one view that
+	// answers "is the mask lined up with what the game drew" with nothing else in the way.
+	bool showMask;
 
 	// The cascade coverage count runs the light matrix over every captured vertex on the CPU,
 	// a second full pass purely to produce one diagnostic number. It earned its place while the
@@ -246,6 +301,23 @@ struct CaptureStats {
 	bool overflowed;   // hit the cap; the map will be missing geometry rather than corrupt
 	bool rendered;     // the depth pass actually ran this frame
 	bool maskRendered; // ...and so did the screen-space mask
+	bool composited;   // ...and the mask actually reached the game's own framebuffer
+
+	// Indices in each of the two streams. Everything captured is a receiver; the subset small
+	// enough to be believable as a caster is what the depth pass draws - see maxCasterSpan.
+	int casterIndices;
+	int receiverIndices;
+	int receiverOnlyDraws;
+
+	// Draws thrown out for sitting on top of the camera - see nearCameraCutoff. One or two a
+	// frame is the colour filter and is expected; zero means the filter is not finding it, and
+	// the mask will be a flat colour.
+	int nearCameraDraws;
+
+	// The size the mask was built at, which follows the game's render target rather than being
+	// configured. Shown because a mask that is not the size of the frame cannot line up with it.
+	int maskWidth;
+	int maskHeight;
 
 	// Which step of the mask setup failed, if it did. "Did not run" on its own says nothing -
 	// four different things can fail there and they need four different fixes.
@@ -318,20 +390,29 @@ bool IsEnabled();
 void Init();
 void Shutdown();
 
-// Per-frame reset, and the one place the depth pass runs.
+// Per-frame publish and reset. Nothing renders from here.
 //
-// Publishing, projecting and rendering all happen here, in that order, against the frame that
-// just ended - so the view matrix, the sun and the geometry all come from the same frame rather
-// than from three different ones. The shadow map is therefore one frame behind what is on screen,
-// which at these frame rates nobody can see, and in exchange the pass never has to interleave
-// itself with the game's own render passes.
+// An earlier version DID render from here, against the frame that had just ended, to keep the
+// passes out of the way of the game's own. That is fine for the shadow map, which is geometry and
+// barely moves in a frame - and wrong for the screen-space mask, which is the camera's own view
+// and slides bodily across the picture the moment the camera turns. The passes moved into the
+// frame; this kept the bookkeeping.
 void BeginFrame(Draw::DrawContext *draw);
+
+// Called from the draw engine at the top of every vertex flush, before it establishes any state.
+//
+// `through` is whether the batch about to be drawn is 2D. The first 2D batch of a frame that has
+// captured any 3D is the seam between the world and the HUD, and that is when all three passes
+// run and the mask is multiplied into `target` - the framebuffer the game is currently drawing
+// into. Returns true if anything was drawn, which is the caller's cue to rebind its own render
+// target; false is the ordinary case and costs one bool test.
+bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target);
 
 // The depth target, for the debugger to preview. Null until the pass has run once.
 Draw::Framebuffer *ShadowMap();
 
-// The screen-space mask: white where the sun reaches, black where it does not. This is what
-// milestone 3b will multiply the game's colour by.
+// The screen-space mask: white where the sun reaches, black where it does not. This is what the
+// composite multiplies the game's colour by.
 Draw::Framebuffer *ShadowMask();
 
 // Called from the draw engine for every draw that reaches the GPU. `vertTypeID` is the decoder's

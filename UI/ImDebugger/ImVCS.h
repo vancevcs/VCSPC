@@ -43,6 +43,7 @@ private:
 	void DrawInputTester();
 	void DrawCamera();
 	void DrawVault();
+	void DrawShadows();
 	void DrawFrontEnd();
 	void DrawRoute();
 

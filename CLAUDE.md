@@ -55,6 +55,9 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
   VCSGame.h/cpp     lifecycle + per-frame tick; the only entry point the rest of PPSSPP sees
   VCSSettings.h/cpp the player-facing option table, and the only thing that persists any of it
 
+GPU/Common/
+  VCSShadow.h/cpp   dynamic sun shadows: caster capture, cascade, screen mask, composite
+
 UI/ImDebugger/
   ImVCS.h/cpp       the "VCS" debugger window (lives here so Core stays ImGui-free)
 
@@ -208,7 +211,9 @@ The entire integration is five small edits. Keep it that way.
 | Shutdown | `__KernelShutdown()` in [Core/HLE/sceKernel.cpp](Core/HLE/sceKernel.cpp) | *Before* `__CtrlShutdown`, so held buttons get released while sceCtrl is alive |
 | Host keys | `NativeKey()` in [UI/NativeApp.cpp](UI/NativeApp.cpp) | Inside the existing `passKeyThrough` branch, which already handles ImGui capture and UI-vs-ingame gating |
 | Mouse look | `NativeMouseDelta()` in [UI/NativeApp.cpp](UI/NativeApp.cpp) | Same claim pattern as keys; skipped while the ImGui debugger wants the mouse |
-| Compat flag | [Core/Compatibility.h](Core/Compatibility.h) + `.cpp` + [assets/compat.ini](assets/compat.ini) | One struct field, one `CheckSetting` line, one `[VCSInputOverhaul]` section |
+| Compat flag | [Core/Compatibility.h](Core/Compatibility.h) + `.cpp` + [assets/compat.ini](assets/compat.ini) | One struct field, one `CheckSetting` line, one `[VCSInputOverhaul]` section - and a second pair for `VCSDynamicShadows`, kept separate because one is a renderer feature and the other is input |
+| Shadow capture | `Flush()` in [GPU/Vulkan/DrawEngineVulkan.cpp](GPU/Vulkan/DrawEngineVulkan.cpp) | Classify + capture on both transform paths, the predecode gate, and `OnFlush` at the top for the 3D→2D seam |
+| Shadow frame reset | `BeginHostFrame()` in [GPU/Vulkan/GPU_Vulkan.cpp](GPU/Vulkan/GPU_Vulkan.cpp) | Publishes last frame's counts; renders nothing |
 | Pause menu | the three `GamePauseScreen` sites in [UI/EmuScreen.cpp](UI/EmuScreen.cpp) | All three now call `CreatePauseScreen()`, which returns PPSSPP's own screen unless `VCS::IsActive()` |
 
 **Mouse input requires "Use Mouse Control" to be on** (Settings → Controls, `UseMouse` in
@@ -3566,6 +3571,149 @@ exercised. If the question does come back, start there, and start from
 offsets are worth trusting: on this build `$gp` reads `0x08bb1d60`, putting the far clip at
 `0x08bb3bd4` and the model count at `0x08bb3b48`, right among `TimeStep` and `FrameCounter` in the
 address table.
+
+### Dynamic sun shadows
+
+**Status: working, confirmed in play, on by default.** Three passes inside every frame, at full
+speed (30.0 fps measured on an ordinary Vice Point street with 1369 draws and ~146k vertices in
+the frame). `GPU/Common/VCSShadow.cpp` holds all of it; the hooks are four lines in
+`DrawEngineVulkan` and one in `GPU_Vulkan`. The row is `Dynamic shadows` on the Graphics page, and
+everything worth tuning is on the debugger's **Shadows** tab.
+
+```
+capture    every draw the caster filter accepts is baked to world space on the CPU and
+           flattened into one triangle list - two index streams over one vertex buffer
+cascade    that list drawn once from the sun into a 2048^2 depth map
+mask       the same list drawn again from the camera, comparing against the map, into a
+           screen-sized black-and-white image of what the sun reaches
+composite   one triangle over the game's own framebuffer, multiplying it by that mask
+```
+
+**All three run inside the frame, at the seam where it turns from 3D to 2D**, not at the top of
+the next one against the frame that just ended. The earlier attempt did the latter to keep the
+passes out of the way of the game's own render passes, and for the shadow MAP that is fine -
+geometry barely moves in a frame. For the screen-space mask it is not: the mask is the camera's own
+view, so a frame of lag slides the whole shadow layer across the picture every time the player
+turns. `VCSShadow::OnFlush` runs from the top of `DrawEngineVulkan::Flush`, on the first flush of
+the frame whose batch is in through mode. That is the seam by construction: any change to the
+through bit goes through `Execute_VertexTypeSkinning`, which flushes first. It is also why the HUD
+is not shadowed - the radar and the wanted stars are drawn after this, over the top.
+
+#### The mask has to line up with the frame, and view*proj is not enough
+
+The projection the mask rasterises with is `view * proj * post`, and `post` is the rest of what
+PPSSPP's own vertex shader does: the perspective divide, the PSP's viewport scale and offset, the
+raster offset, and the remap into the render target's NDC. All of that is linear in the clip vector
+- the divide the viewport transform needs is undone again by the multiply back into clip space at
+the end - so it folds into one more 4x4 rather than having to be replayed. Measured on this game:
+scale `(256, -160, -32755.5)`, offset `(2048, 2048, 32763.5)`, raster offset `(1792, 1888)`, render
+target 512x320 PSP pixels. Stopping at `view * proj` gets a mask that resembles the frame and does
+not sit on it, and a shadow mask a few pixels out is worse than no shadow at all.
+
+**Depth is the one axis deliberately not copied.** Those numbers are a REVERSED depth buffer - near
+maps to 65519 and far to 8, and the game sets a matching `GEQUAL` compare, which is visible in any
+draw's state. This pass owns its own depth buffer and tests `LESS` against it, so copying the
+mapping verbatim makes the FARTHEST surface win every pixel of the mask. Nothing downstream cares
+which way camera depth runs, because the shadow comparison happens in light space, so
+`BuildPostProjMatrix` inverts it when the Z scale is negative and stops there.
+
+#### The game draws full-screen overlays as world geometry, and they own the mask
+
+The single hardest bug here, and it looks like nothing else. With the depth direction fixed, the
+mask came back as one flat colour over the entire frame - not white, not black, a specific
+mid-value - while every count in the panel read healthy.
+
+What it is: a quad **0.6 world units across, centred exactly on the recovered camera**, covering
+every pixel. It is one of the game's own full-screen overlays - the colour filter - drawn as 3D
+geometry rather than in through mode, so no render-state test can see it for what it is: it writes
+depth, its blend is a copy, and it is a perfectly ordinary triangle strip. Once the mask keeps the
+nearest surface, it wins every pixel, and every pixel then samples the same texel of the shadow map
+and gets the same answer.
+
+`nearCameraCutoff` (2.0 units) throws away any draw whose whole footprint sits within that of the
+camera, caster and receiver both. The camera is never inside real geometry and the third-person
+camera sits 4.6 units behind the player, so there is a wide gap to put the threshold in. The
+Shadows tab counts what it drops - a frame here drops 8 - and a count of zero next to a flat mask
+is the signature of this returning.
+
+**How it was found is the transferable part.** Four rounds of reasoning about the light matrix,
+the depth pass, the sampler and the shader all failed, because all four were arguments about
+mechanism from a symptom. What settled it in one build was carrying the raw `a_position` through as
+a second varying and drawing `fract(world * 0.05)` to the screen: uniform to within 0.6 units
+across the whole frame, with one visible diagonal seam. That is not a fact about shadows, it is a
+fact about what is being rasterised, and it could not be argued with. When an interpolated value is
+constant and it should not be, ask what geometry is actually there before asking what is wrong with
+the maths.
+
+#### A one-character bug in PPSSPP that this feature was the first to hit
+
+`VKContext::DrawIndexedUP` in `Common/GPU/Vulkan/thin3d_vulkan.cpp` filled the index buffer from
+`vdata` instead of `idata`. **Nothing in PPSSPP itself calls `DrawIndexedUP`**, which is how it
+survived - this fork's shadow passes are its only user on any backend.
+
+It does not fail loudly. The vertex data reinterpreted as `u16` indices is still a list of valid
+vertex numbers, so the draw renders a mesh - an arbitrary triangulation of the real vertices, which
+from a distance looks like *something*. What it cost:
+
+- the shadow map and the mask were both drawn from garbage topology, so every value read out of
+  them was meaningless while looking plausible;
+- and the enormous triangles that topology produces cover the screen many times over, which took
+  the game from 30 fps to **1.24 fps**. That number was read off the game's own frame counter over
+  the WebSocket debugger, and it is what made the bug findable: a 24x cost is not a shadow pass
+  being expensive, it is something structurally wrong.
+
+Worth reporting upstream. The fix is one identifier.
+
+#### What the filters are for
+
+- **`nearCameraCutoff`** - the overlays above.
+- **`maxCasterSpan`** (400 units) - a draw wider than this receives shadow but never casts it. The
+  sky and the map-spanning ground and water quads are what it is for: one surface across the whole
+  cascade fills the shadow map and puts the entire city in its own shadow. This is why there are
+  two index streams over one vertex buffer rather than one.
+- **the caster filter itself** - unchanged from the first attempt and still the interesting one.
+  Through mode is 2D. Sprites are rejected because a camera-facing billboard casts a shadow that
+  swings as you turn. Depth-write-off catches particles, coronas and the vanilla blob. And
+  `BlendAltersDestination` is the test that matters: VCS switches blending on for its opaque pass
+  and specifies a blend that copies, so asking "is blending enabled" throws away the entire city
+  and asking "can this blend change the destination" keeps it.
+- **an off-screen-target reject** - a render-to-texture pass has its own camera, and mixing its
+  geometry into the capture would project one frame's shadows from two of them.
+
+#### Bias, and why it is not the usual bias
+
+Only ~24 draws in 161 carry vertex normals - the peds and the vehicles. The world is prelit into
+vertex colours and ships without them, so normal-offset bias, the good answer to shadow acne, is
+not available for the geometry that needs it most. The mask uses `fwidth` of the light-space depth
+instead: it is large exactly where the light grazes a surface, which is where acne is, and near
+zero on a wall facing the sun. `slopeBias` is that term and `depthBias` is the constant under it.
+
+#### The sun is the game's own, and so is the strength
+
+VCS hands the GE a white directional light and the shadow direction comes straight off it - no
+game clock, no solar model. Two things about it:
+
+- **The pick has to reject a light that is level with the horizon.** A capture came back with
+  channel 0 at exactly `(1, 0, 0)` at full white, which is what a channel holds when nobody has set
+  it, and brightness cannot separate that from the real sun when both are white. Z is up here, so
+  candidates at or below the horizon are refused. Every genuine sun measured sat between 0.17 and
+  0.54 in Z; the impostor sat at 0.
+- **The shadow's strength is multiplied by that light's own luminance**, so shadows thin out
+  towards dusk and are gone at night without anything here having to know the time.
+
+**Not established: whether the direction turns with the clock.** Every sample logged this session,
+between 18:34 and 19:10, read `(0.50, 0.50, 0.71)` - the same vector. That may mean the game holds
+a fixed key-light direction and only moves its colour through the day, which would mean shadows
+fade rather than sweep. The Shadows tab lists all four channels with their directions and is where
+to check it; do not write it down as fact until someone has.
+
+#### Known, and deliberately left
+
+**The vanilla blob shadow is still drawn.** The game paints a soft dark oval under peds and
+vehicles, and with this on they have two shadows. It is rejected as a CASTER (depth write off) but
+nothing stops the game drawing it. Suppressing it means identifying that draw, and the render state
+it uses is the same state a dozen harmless things use - the same class of hunt the caster filter
+already went through once. It is the obvious next piece of work here.
 
 ### Two traps in patching this emulator's code
 

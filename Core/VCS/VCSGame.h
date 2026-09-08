@@ -112,6 +112,11 @@ bool IsGameBuild();
 struct VCSGameSettings {
 	bool showFps = false;
 
+	// Dynamic sun shadows. Ours rather than the game's - see GPU/Common/VCSShadow.cpp - and the
+	// only setting on this struct that reaches the renderer rather than PSP memory, which is why
+	// it is pushed by an onChange in the option table instead of by ApplyGamePrefs.
+	bool dynamicShadows = true;
+
 	// Both default to what the game ships with, so a player who never opens the page gets the
 	// retail behaviour rather than this fork's opinion of it.
 	bool subtitles = true;

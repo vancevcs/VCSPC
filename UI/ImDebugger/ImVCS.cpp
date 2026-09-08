@@ -24,6 +24,7 @@
 
 #include "UI/ImDebugger/ImVCS.h"
 #include "UI/ImDebugger/ImDebugger.h"
+#include "ext/imgui/imgui_impl_thin3d.h"
 
 #include "Core/HLE/sceCtrl.h"
 #include "Core/System.h"
@@ -39,6 +40,8 @@
 #include "Core/VCS/VCSRoute.h"
 #include "Core/VCS/VCSVault.h"
 #include "Core/VCS/VCSWorld.h"
+
+#include "GPU/Common/VCSShadow.h"
 
 static const ImVec4 kUnsetColor = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
 static const ImVec4 kGoodColor = ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
@@ -1944,6 +1947,372 @@ void ImVCSWindow::DrawVault() {
 	}
 }
 
+void ImVCSWindow::DrawShadows() {
+	if (!VCSShadow::IsAvailable()) {
+		ImGui::TextColored(kUnsetColor, "inactive - VCSDynamicShadows is not set for this disc");
+		return;
+	}
+
+	bool enabled = VCSShadow::IsEnabled();
+	if (ImGui::Checkbox("Dynamic shadows (experimental)", &enabled)) {
+		VCSShadow::SetEnabled(enabled);
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Off costs nothing: no capture, no passes, no per-draw work at all.");
+	}
+	if (!VCSShadow::IsActive()) {
+		ImGui::TextDisabled("Off. The game renders exactly as it would without this fork's shadow code.");
+		return;
+	}
+
+	const VCSShadow::FrameStats &s = VCSShadow::LastFrameStats();
+
+	ImGui::Separator();
+
+	// The sun, taken from the GE rather than from PSP memory. If this never goes valid while the
+	// city is on screen then the game is not lighting the world through the hardware, and the
+	// shadow projection needs another source - most likely the game clock, which would mean an
+	// address hunt and a hand-built solar model instead of a value the game already computes.
+	if (s.sunValid) {
+		ImGui::TextColored(kGoodColor, "sun: directional light %d", s.sunChannel);
+		ImGui::Text("   towards light: %7.3f %7.3f %7.3f", s.sunDir[0], s.sunDir[1], s.sunDir[2]);
+		ImGui::Text("   diffuse:       %7.3f %7.3f %7.3f", s.sunDiffuse[0], s.sunDiffuse[1], s.sunDiffuse[2]);
+	} else {
+		ImGui::TextColored(kBadColor, "sun: no enabled directional light this frame");
+	}
+	// Every directional light the frame offered, so a bad pick is visible as a bad pick rather
+	// than as a strange-looking shadow map.
+	for (int i = 0; i < 4; i++) {
+		const VCSShadow::FrameStats::SunCandidate &c = s.sunCandidates[i];
+		if (!c.valid) {
+			continue;
+		}
+		// Deliberately not marked "chosen": the sun is picked across the whole frame while this
+		// row is only the channel's last state, and labelling it that way produced a panel that
+		// claimed a below-horizon light had been chosen when it had not.
+		ImGui::TextColored(c.aboveHorizon ? kUnsetColor : kBadColor,
+			"   light %d last: %6.3f %6.3f %6.3f  rgb %.2f %.2f %.2f  %s, %d draws, %d changes",
+			i, c.dir[0], c.dir[1], c.dir[2], c.diffuse[0], c.diffuse[1], c.diffuse[2],
+			c.aboveHorizon ? "above horizon" : "below horizon", c.draws, c.directionChanges);
+	}
+
+	ImGui::Text("draws lit by hardware: %d, of those with a directional light: %d",
+		s.lightingDraws, s.dirLightDraws);
+
+	ImGui::Separator();
+
+	// By construction draws == casters + sum(rejected). If that ever stops adding up, the filter
+	// has grown a path that returns without counting and every number below is suspect.
+	int rejectedTotal = 0;
+	for (int i = 0; i < (int)VCSShadow::Reject::Count; i++) {
+		rejectedTotal += s.rejected[i];
+	}
+	ImGui::Text("draws last frame: %d", s.draws);
+	if (s.casters + rejectedTotal != s.draws) {
+		ImGui::TextColored(kBadColor, "counts do not partition: %d + %d != %d",
+			s.casters, rejectedTotal, s.draws);
+	}
+
+	const float pct = s.draws ? 100.0f / (float)s.draws : 0.0f;
+
+	if (ImGui::BeginTable("vcsshadowcasters", 3,
+			ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersH | ImGuiTableFlags_Resizable)) {
+		ImGui::TableSetupColumn("");
+		ImGui::TableSetupColumn("count");
+		ImGui::TableSetupColumn("note");
+		ImGui::TableHeadersRow();
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::TextColored(kGoodColor, "casters");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.casters);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f%% of draws", s.casters * pct);
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::Text("   skinned");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.castersSkinned);
+		ImGui::TableNextColumn(); ImGui::TextDisabled("peds and the player");
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::Text("   with normals");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.castersWithNormals);
+		ImGui::TableNextColumn(); ImGui::TextDisabled("can use normal-offset bias");
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn(); ImGui::Text("   elements");
+		ImGui::TableNextColumn(); ImGui::Text("%d", s.casterVerts);
+		ImGui::TableNextColumn(); ImGui::TextDisabled("indices in, before strip expansion");
+
+		for (int i = 1; i < (int)VCSShadow::Reject::Count; i++) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::Text("rejected: %s", VCSShadow::RejectName((VCSShadow::Reject)i));
+			ImGui::TableNextColumn(); ImGui::Text("%d", s.rejected[i]);
+			ImGui::TableNextColumn(); ImGui::Text("%.1f%%", s.rejected[i] * pct);
+		}
+
+		ImGui::EndTable();
+	}
+
+	// The blend breakdown. If the big bucket turns out to be a blend that cannot change the
+	// destination - or one whose source was fully opaque every time - then those draws are the
+	// world, the filter is throwing away the entire scene, and the blend test is the thing to
+	// fix rather than anything downstream.
+	if (s.rejected[(int)VCSShadow::Reject::Blended] > 0) {
+		ImGui::Separator();
+		ImGui::Text("blended rejects by blend setup (all of these write depth):");
+		if (ImGui::BeginTable("vcsshadowblends", 4,
+				ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersH | ImGuiTableFlags_Resizable)) {
+			ImGui::TableSetupColumn("src");
+			ImGui::TableSetupColumn("dst");
+			ImGui::TableSetupColumn("eq");
+			ImGui::TableSetupColumn("draws (opaque verts)");
+			ImGui::TableHeadersRow();
+			for (int i = 0; i < s.blendBucketCount; i++) {
+				const VCSShadow::BlendBucket &b = s.blendBuckets[i];
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::Text("%s", VCSShadow::BlendSrcName(b.funcA));
+				ImGui::TableNextColumn(); ImGui::Text("%s", VCSShadow::BlendDstName(b.funcB));
+				ImGui::TableNextColumn(); ImGui::Text("%s", VCSShadow::BlendEqName(b.eq));
+				ImGui::TableNextColumn(); ImGui::Text("%d  (%d)", b.count, b.fullAlpha);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TextColored(kGoodColor, "casters if the blend test were dropped: %d", s.castersIfBlendIgnored);
+	}
+
+
+	// --- the shadow projection -------------------------------------------------------------
+	ImGui::Separator();
+
+	VCSShadow::Settings &set = VCSShadow::GetSettings();
+	const VCSShadow::ShadowView &v = VCSShadow::View();
+
+	if (!v.valid) {
+		ImGui::TextColored(kBadColor, "projection: not built - needs a caster and a sun in the same frame");
+	} else {
+		// The camera position is recovered by inverting the game's view matrix. Two things
+		// establish that it is right, and neither is the player position: the round trip below
+		// lands on the origin, and the camera falls inside the bounding box of the caster world
+		// matrices - the geometry the game is actually drawing.
+		//
+		// The player position is shown anyway, but as what it is: a reading from a *different*
+		// coordinate system. The game keeps absolute world coordinates in its own structures and
+		// hands the hardware rebased ones, so the two disagree by a large constant offset while
+		// both being correct. Measured across captures the offset holds steady and the two move
+		// together, which is why nothing here needs to know what it is - the shadow projection
+		// lives entirely in the space the GE is fed.
+		ImGui::Text("camera:  %8.2f %8.2f %8.2f", v.cameraPos[0], v.cameraPos[1], v.cameraPos[2]);
+
+		const std::optional<u32> playerBase = VCS::ReadAddrU32(VCS::VCSAddr::PlayerBase);
+		if (playerBase && *playerBase) {
+			const std::optional<float> px = VCS::ReadFloat(*playerBase + VCS::kVCSEntityPositionOffset + 0);
+			const std::optional<float> py = VCS::ReadFloat(*playerBase + VCS::kVCSEntityPositionOffset + 4);
+			const std::optional<float> pz = VCS::ReadFloat(*playerBase + VCS::kVCSEntityPositionOffset + 8);
+			if (px && py && pz) {
+				ImGui::Text("player:  %8.2f %8.2f %8.2f  (the game's own space, not the GE's)", *px, *py, *pz);
+				ImGui::TextDisabled("   offset %.1f %.1f %.1f - constant, and not something anything here uses",
+					v.cameraPos[0] - *px, v.cameraPos[1] - *py, v.cameraPos[2] - *pz);
+			}
+		}
+
+		// Which space is the GE actually being fed? The caster world matrices answer it. If this
+		// box brackets the player position, the GE sees absolute world coordinates and the camera
+		// recovery is wrong. If it brackets the recovered camera instead, the game is handing the
+		// hardware rebased coordinates, the recovery is fine, and the cross-check above was
+		// comparing two different spaces rather than finding a bug.
+		if (s.casterBoundsValid) {
+			ImGui::Text("casters:  x %8.1f .. %-8.1f", s.casterMin[0], s.casterMax[0]);
+			ImGui::Text("          y %8.1f .. %-8.1f", s.casterMin[1], s.casterMax[1]);
+			ImGui::Text("          z %8.1f .. %-8.1f", s.casterMin[2], s.casterMax[2]);
+
+			// A few units of slack: the camera routinely sits exactly on this boundary, because
+			// the player's own draws are part of what defines it, and an exact test flickers red
+			// on a frame that is completely healthy. What this is actually checking is that the
+			// camera is in the same coordinate space as the geometry - a wrong space misses by
+			// more than a thousand units, not by a rounding error.
+			const float slack = 8.0f;
+			bool inside = true;
+			for (int i = 0; i < 3; i++) {
+				if (v.cameraPos[i] < s.casterMin[i] - slack || v.cameraPos[i] > s.casterMax[i] + slack) {
+					inside = false;
+				}
+			}
+			ImGui::TextColored(inside ? kGoodColor : kBadColor, inside
+				? "camera sits inside the caster bounds - same space, as it must be"
+				: "camera is OUTSIDE the caster bounds - the recovery or the space is wrong");
+		}
+
+		// A wrong convention would survive this; an algebra slip would not.
+		const float residual = fabsf(v.viewResidual[0]) + fabsf(v.viewResidual[1]) + fabsf(v.viewResidual[2]);
+		ImGui::TextColored(residual < 0.01f ? kGoodColor : kBadColor,
+			"view round trip: %.4f %.4f %.4f", v.viewResidual[0], v.viewResidual[1], v.viewResidual[2]);
+
+		if (s.viewMatrixChanges > 0) {
+			ImGui::TextColored(kBadColor, "view matrix changed %d times after the first caster - more than one camera in the frame",
+				s.viewMatrixChanges);
+		} else {
+			ImGui::TextColored(kGoodColor, "view matrix: one camera for the whole frame");
+		}
+
+
+		// The captured geometry. This is what will go into the shadow map: one triangle list,
+		// already in the GE's space, ready to be drawn in a single call.
+		const VCSShadow::CaptureStats &cap = VCSShadow::LastCapture();
+		ImGui::Separator();
+		ImGui::Text("captured: %d draws -> %d verts, %d indices (%d tris), %.0f KB",
+			cap.draws, cap.vertices, cap.indices, cap.indices / 3, cap.bytes / 1024.0);
+		ImGui::TextColored(cap.rendered ? kGoodColor : kBadColor,
+			"depth pass: %s, %d batch%s", cap.rendered ? "ran" : "did not run",
+			cap.batches, cap.batches == 1 ? "" : "es");
+		const char *maskStepName = "?";
+		switch (cap.maskStep) {
+		case VCSShadow::CaptureStats::MaskStep::Ok: maskStepName = "ok"; break;
+		case VCSShadow::CaptureStats::MaskStep::NotAttempted: maskStepName = "not attempted - no depth map or no geometry"; break;
+		case VCSShadow::CaptureStats::MaskStep::Framebuffer: maskStepName = "framebuffer creation failed"; break;
+		case VCSShadow::CaptureStats::MaskStep::VertexShader: maskStepName = "vertex shader would not compile"; break;
+		case VCSShadow::CaptureStats::MaskStep::FragmentShader: maskStepName = "fragment shader would not compile"; break;
+		case VCSShadow::CaptureStats::MaskStep::Pipeline: maskStepName = "pipeline creation failed"; break;
+		}
+		ImGui::TextColored(cap.maskRendered ? kGoodColor : kBadColor,
+			"mask pass: %s (%s) at %dx%d", cap.maskRendered ? "ran" : "did not run", maskStepName,
+			cap.maskWidth, cap.maskHeight);
+		// The one row that says whether any of this reached the screen. Everything above can read
+		// healthy with the composite never running - a mask nobody multiplies in is invisible.
+		ImGui::TextColored(cap.composited ? kGoodColor : kBadColor,
+			"composite: %s", cap.composited ? "multiplied into the frame" : "did NOT reach the frame");
+		ImGui::Text("indices: %d casting, %d receiving; %d draw%s too large to cast",
+			cap.casterIndices, cap.receiverIndices, cap.receiverOnlyDraws,
+			cap.receiverOnlyDraws == 1 ? "" : "s");
+		// The game's full-screen overlays, drawn as 3D geometry sitting on the camera. If this
+		// reads zero while the mask is a flat colour, they are getting through and winning every
+		// pixel of it - see nearCameraCutoff.
+		ImGui::TextColored(cap.nearCameraDraws > 0 ? kGoodColor : kUnsetColor,
+			"dropped for sitting on the camera: %d", cap.nearCameraDraws);
+		if (cap.vertices > 0 && cap.verticesInCascade >= 0) {
+			const float pctIn = 100.0f * (float)cap.verticesInCascade / (float)cap.vertices;
+			ImGui::TextColored(cap.verticesInCascade > 0 ? kGoodColor : kBadColor,
+				"in cascade: %d verts (%.1f%% of captured)", cap.verticesInCascade, pctIn);
+		}
+		if (cap.overflowed) {
+			ImGui::TextColored(kBadColor, "capture hit its cap - the map would be missing geometry");
+		}
+		if (cap.boundsValid) {
+			const float ex = cap.max[0] - cap.min[0];
+			const float ey = cap.max[1] - cap.min[1];
+			const float ez = cap.max[2] - cap.min[2];
+			ImGui::Text("caster extent: %.0f x %.0f x %.0f units", ex, ey, ez);
+			if (cap.largeDraws > 0) {
+				const bool few = cap.largeDraws <= 4;
+				ImGui::TextColored(few ? kGoodColor : kBadColor,
+					"   %d draw%s span over 500 units (largest %d verts)%s",
+					cap.largeDraws, cap.largeDraws == 1 ? "" : "s", cap.largestDrawVerts,
+					few ? " - ground or water, as expected" : " - positions are probably being misread");
+			} else {
+				ImGui::TextColored(kGoodColor, "   no map-spanning draws");
+			}
+			// A cascade far larger than the scene wastes all its resolution; far smaller and it
+			// covers a sliver. Neither is wrong, but the ratio should be a number that makes
+			// sense rather than a surprise.
+			const float largest = ex > ey ? ex : ey;
+			if (largest > 0.0f) {
+				ImGui::TextDisabled("   cascade covers %.0f%% of the horizontal extent",
+					100.0f * (2.0f * set.cascadeRadius) / largest);
+			}
+		}
+
+		ImGui::Text("forward: %8.3f %8.3f %8.3f", v.cameraForward[0], v.cameraForward[1], v.cameraForward[2]);
+		ImGui::Text("light:   %8.3f %8.3f %8.3f  (direction of travel)", v.lightDir[0], v.lightDir[1], v.lightDir[2]);
+		ImGui::Text("centre:  %8.2f %8.2f %8.2f", v.centre[0], v.centre[1], v.centre[2]);
+		ImGui::Text("radius %.1f, texel %.3f world units", v.radius, v.texelWorldSize);
+
+		if (ImGui::TreeNode("world -> light clip matrix")) {
+			for (int row = 0; row < 4; row++) {
+				ImGui::Text("%9.4f %9.4f %9.4f %9.4f",
+					v.lightViewProj[row * 4 + 0], v.lightViewProj[row * 4 + 1],
+					v.lightViewProj[row * 4 + 2], v.lightViewProj[row * 4 + 3]);
+			}
+			ImGui::TreePop();
+		}
+	}
+
+	ImGui::Separator();
+	ImGui::SliderFloat("Strength", &set.strength, 0.0f, 1.0f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("How dark a shadowed pixel goes. Multiplied by the sun's own brightness, so this is the value at noon.");
+	}
+	ImGui::ColorEdit3("Shadow tint", set.tint);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("What a shadow goes towards. Outdoors that is the sky, so blue rather than black.");
+	}
+	ImGui::SliderFloat("Cascade radius", &set.cascadeRadius, 8.0f, 200.0f, "%.0f units");
+	ImGui::SliderFloat("Centre ahead", &set.centreDistance, 0.0f, 100.0f, "%.0f units");
+	const char *mapSizeNames[] = { "512", "1024", "2048", "4096" };
+	int mapSizeIndex = set.mapSize <= 512 ? 0 : set.mapSize <= 1024 ? 1 : set.mapSize <= 2048 ? 2 : 3;
+	if (ImGui::Combo("Shadow map size", &mapSizeIndex, mapSizeNames, 4)) {
+		set.mapSize = 512 << mapSizeIndex;
+	}
+	ImGui::SliderFloat("Mask scale", &set.maskScale, 0.25f, 1.0f, "%.2f x render res");
+	ImGui::SliderFloat("Depth bias", &set.depthBias, 0.0f, 0.02f, "%.4f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Too little and flat ground self-shadows into stripes. Too much and shadows detach from what casts them.");
+	}
+	ImGui::SliderFloat("Slope bias", &set.slopeBias, 0.0f, 8.0f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Bias where the light grazes the surface, from the depth derivatives. This is the one to raise for acne on the road, not the constant above.");
+	}
+	ImGui::SliderInt("PCF radius", &set.pcfRadius, 0, 4, "%d texels");
+	ImGui::SliderFloat("Edge fade", &set.edgeFade, 0.0f, 0.5f, "%.2f");
+	ImGui::SliderFloat("Near camera cutoff", &set.nearCameraCutoff, 0.0f, 6.0f, "%.1f units");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Geometry entirely within this of the camera is thrown away. It is the game's full-screen colour filter, which is 3D geometry 0.6 units across sitting on the camera and covers every pixel of the mask if it gets through. The camera sits 4.6 units behind the player, so there is room.");
+	}
+	ImGui::SliderFloat("Max caster span", &set.maxCasterSpan, 50.0f, 2000.0f, "%.0f units");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("A draw wider than this receives shadow but never casts it. This is what keeps the sky and the map-spanning ground quad out of the depth map.");
+	}
+	ImGui::Checkbox("Show the mask instead of the frame", &set.showMask);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Draws the mask over the game rather than multiplying by it. The one view that answers whether it lines up.");
+	}
+	ImGui::Checkbox("Count cascade coverage (costs a full CPU pass)", &set.countCascadeCoverage);
+	const char *debugViewNames[] = { "shadow term", "sampled map depth", "light-space Z", "shadow UV (r,g)" };
+	ImGui::Combo("Mask shows", &set.debugView, debugViewNames, 4);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("An all-black mask can mean the sample returns nothing or the comparison is inverted. These tell those apart.");
+	}
+	ImGui::Checkbox("Flip shadow V", &set.flipShadowV);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("If the mask shows shadows of the right shape in the wrong place, mirrored vertically, this is it.");
+	}
+	ImGui::Checkbox("View forward is -Z", &set.forwardIsNegativeZ);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Which view-space axis points into the scene. If the camera/player distance above is sane but the centre sits behind you, this is the wrong way round.");
+	}
+
+	if (Draw::Framebuffer *shadowFbo = VCSShadow::ShadowMap()) {
+		ImGui::Separator();
+		ImGui::Text("cascade 0 depth:");
+		ImTextureID texId = ImGui_ImplThin3d_AddFBAsTextureTemp(shadowFbo, Draw::Aspect::DEPTH_BIT,
+			ImGuiPipeline::TexturedOpaque);
+		ImGui::Image(texId, ImVec2(256.0f, 256.0f));
+		ImGui::TextDisabled("A depth map is mostly near-white. Look for the shape of the buildings");
+		ImGui::TextDisabled("around you, seen from where the sun is - not for a picture.");
+	}
+
+	if (Draw::Framebuffer *maskFbo = VCSShadow::ShadowMask()) {
+		ImGui::Separator();
+		ImGui::Text("shadow mask (white = sunlit):");
+		ImTextureID maskId = ImGui_ImplThin3d_AddFBAsTextureTemp(maskFbo, Draw::Aspect::COLOR_BIT,
+			ImGuiPipeline::TexturedOpaque);
+		ImGui::Image(maskId, ImVec2(384.0f, 218.0f));
+		ImGui::TextDisabled("This one is meant to be recognisable: it is your view, in black and white.");
+	}
+
+	// What to actually do with this tab. The counts are only worth anything as a response to
+	// something you did in the game.
+	ImGui::TextDisabled("Walk around, get in a car, then open a menu. Casters should track the geometry\non screen, skinned casters should follow the pedestrians, and the 2D count\nshould jump the moment the menu opens.");
+}
+
 void ImVCSWindow::Draw(ImConfig &cfg) {
 	ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("VCS", &cfg.vcsOpen)) {
@@ -1985,6 +2354,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Vault")) {
 			DrawVault();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Shadows")) {
+			DrawShadows();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
