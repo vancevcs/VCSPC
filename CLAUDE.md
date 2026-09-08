@@ -3873,6 +3873,25 @@ captured, frame rate fine - because the only wrong number was one nobody was pri
 initialisers for a struct that is still growing are a trap; the order is now called out in a
 comment at the top of the list.
 
+#### The near plane, which is what "the building behind me casts nothing" actually was
+
+Reported again after the cache was fixed, and the cache was never the problem - it had the
+building. The depth pass was throwing it away.
+
+A shadow travels along the light and nowhere else, so in light space a caster sits at the same
+place as the shadow it throws and differs from it only in DEPTH. The light box was pulled back
+along the light by exactly one cascade radius, which meant anything more than seventy units
+towards the sun was clipped out of the map before it could cast into it. With the sun behind you
+that is most of a street.
+
+`casterReach` (300 units) moves the near plane back instead. It costs depth range and nothing
+else: the sides of the box were already exactly right, because a caster outside them lands outside
+them too. Widening the cascade would have fixed the same thing by spending resolution everywhere.
+
+The cache's own reach test had to learn the same lesson - it was culling cells by distance from the
+cascade centre, which is the camera's way of measuring. It measures in the light's frame now:
+across the light a cell has to be inside the box, along it a cell can be most of a street away.
+
 #### Known, and deliberately left
 
 **Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which

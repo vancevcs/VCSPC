@@ -202,6 +202,10 @@ struct ShadowView {
 
 	float centre[3];      // cascade centre in world space, after texel snapping
 	float radius;
+
+	// How far up-sun of the centre the depth map still holds casters - see casterReach. The box
+	// is `radius` wide and `casterReach + radius` deep, which is why the two are separate.
+	float casterReach;
 	float texelWorldSize;
 
 	float lightViewProj[16];
@@ -228,6 +232,21 @@ struct Settings {
 	// map on screen without first having to decompose the game's projection matrix.
 	float cascadeRadius;
 	float centreDistance;
+
+	// How far UP-SUN of the cascade the depth pass still accepts casters.
+	//
+	// This is the whole of "the building behind me casts no shadow", and it was never the cache -
+	// the cache had the building. A shadow travels along the light and nowhere else, so in light
+	// space a caster sits at the same place as the shadow it throws and differs only in depth.
+	// The box was pulled back by exactly one cascade radius, so anything more than seventy units
+	// towards the sun was clipped out of the map before it could cast into it - which is most of
+	// a street when the sun is behind you.
+	//
+	// Widening the cascade would have cost resolution everywhere to fix it. Moving the near plane
+	// costs only depth range, because the SIDES of the box are already exactly right: a caster
+	// outside them lands outside them too.
+	float casterReach;
+
 	int mapSize;
 
 	// Which view-space axis points into the scene. The GL convention is -Z and that is the

@@ -2269,6 +2269,10 @@ void ImVCSWindow::DrawShadows() {
 	}
 	ImGui::SliderFloat("Cascade radius", &set.cascadeRadius, 8.0f, 200.0f, "%.0f units");
 	ImGui::SliderFloat("Centre ahead", &set.centreDistance, 0.0f, 100.0f, "%.0f units");
+	ImGui::SliderFloat("Caster reach up-sun", &set.casterReach, 50.0f, 600.0f, "%.0f units");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("How far towards the sun the depth pass still accepts casters. A shadow travels along the light, so a building well behind you throws into the road in front of you - and was being clipped out of the map. Costs depth range, not resolution.");
+	}
 	const char *mapSizeNames[] = { "512", "1024", "2048", "4096" };
 	int mapSizeIndex = set.mapSize <= 512 ? 0 : set.mapSize <= 1024 ? 1 : set.mapSize <= 2048 ? 2 : 3;
 	if (ImGui::Combo("Shadow map size", &mapSizeIndex, mapSizeNames, 4)) {

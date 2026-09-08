@@ -59,6 +59,7 @@ static Settings s_settings = {
 	          // close in a car: shadows arrived a second before you reached them.
 	40.0f,    // centreDistance ahead of the camera - the faster you travel, the further ahead
 	          // the shadows have to already exist
+	300.0f,   // casterReach - how far up-sun a caster can be and still reach the cascade
 	2048,     // mapSize. 70 units across 2048 texels is about 7cm a texel.
 	true,     // forwardIsNegativeZ
 	1.0f,     // maskScale - the game's own render resolution
@@ -70,8 +71,8 @@ static Settings s_settings = {
 	{ 0.35f, 0.38f, 0.48f },  // tint - blue, because what fills a shadow outdoors is the sky
 	true,     // cacheCasters
 	8.0f,     // cacheHoldSeconds
-	220.0f,   // cacheRadius - has to reach past the cascade, which is 70 with its centre 40
-	          // ahead, so a caster 180 units away can still be inside it a moment later
+	350.0f,   // cacheRadius - has to hold everything that can cast INTO the cascade, which
+	          // reaches 300 units up-sun, not just what is near the camera
 	true,     // castBackFacesOnly
 	false,    // flipCasterWinding
 	0.35f,    // moonStrength
@@ -273,16 +274,17 @@ void BuildLightViewProj(ShadowView *view) {
 	const float *up = view->lightUp;
 	const float *forward = view->lightDir;
 
-	// Pull back along the light by the cascade radius, so the whole sphere is in front of the
-	// near plane and nothing that should cast gets clipped away behind it.
+	// Pull back along the light far enough that everything which could cast INTO the cascade is
+	// in front of the near plane - a much longer way than the cascade is wide. See casterReach.
+	const float reach = view->casterReach;
 	const float origin[3] = {
-		view->centre[0] - forward[0] * view->radius,
-		view->centre[1] - forward[1] * view->radius,
-		view->centre[2] - forward[2] * view->radius,
+		view->centre[0] - forward[0] * reach,
+		view->centre[1] - forward[1] * reach,
+		view->centre[2] - forward[2] * reach,
 	};
 
 	const float invRadius = 1.0f / view->radius;
-	const float invDepth = 1.0f / (2.0f * view->radius);
+	const float invDepth = 1.0f / (reach + view->radius);
 
 	float *m = view->lightViewProj;
 	m[0]  = right[0] * invRadius;  m[1]  = up[0] * invRadius;  m[2]  = forward[0] * invDepth;  m[3]  = 0.0f;
@@ -391,6 +393,8 @@ static void ComputeShadowView(const FrameStats &stats) {
 	Normalize(s_view.lightUp);
 
 	s_view.radius = s_settings.cascadeRadius;
+	s_view.casterReach = s_settings.casterReach > s_view.radius
+		? s_settings.casterReach : s_view.radius;
 	s_view.texelWorldSize = (2.0f * s_view.radius) / (float)s_settings.mapSize;
 
 	float centre[3] = {
@@ -728,16 +732,24 @@ static void SubmitCachedCasters() {
 		}
 
 		// Kept because it may be needed a moment from now, but only submitted if it can reach the
-		// cascade this frame.
+		// cascade this frame - and "reach" is measured in the LIGHT's frame, not the camera's.
+		// Across the light a cell has to be inside the box, because a shadow lands where its
+		// caster is; along the light it can be most of a street away and still throw into it.
 		bool reaches = true;
 		if (s_view.valid) {
-			float d2 = 0.0f;
+			float rel[3];
 			for (int c = 0; c < 3; c++) {
-				const float d = b.centre[c] - s_view.centre[c];
-				d2 += d * d;
+				rel[c] = b.centre[c] - s_view.centre[c];
 			}
-			const float reach = s_view.radius * 1.75f + kBucketSize;
-			reaches = d2 < reach * reach;
+			const float along = Dot(rel, s_view.lightDir);
+			float acrossSq = 0.0f;
+			for (int c = 0; c < 3; c++) {
+				const float a = rel[c] - along * s_view.lightDir[c];
+				acrossSq += a * a;
+			}
+			const float across = s_view.radius + kBucketSize;
+			reaches = acrossSq < across * across &&
+				along > -(s_view.casterReach + kBucketSize) && along < s_view.radius + kBucketSize;
 		}
 		if (reaches && b.idx.size() >= 3) {
 			AppendGeometry(b.pos.data(), (int)(b.pos.size() / 3), b.idx.data(), (int)b.idx.size(),
