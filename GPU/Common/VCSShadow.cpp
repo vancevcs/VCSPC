@@ -70,7 +70,8 @@ static Settings s_settings = {
 	0.7f,     // strength
 	{ 0.35f, 0.38f, 0.48f },  // tint - blue, because what fills a shadow outdoors is the sky
 	true,     // cacheCasters
-	8.0f,     // cacheHoldSeconds
+	25.0f,    // cacheHoldSeconds - the radius is what bounds this cache, not the clock; the
+	          // clock is only here so a thing that moved cannot haunt its old place forever
 	350.0f,   // cacheRadius - has to hold everything that can cast INTO the cascade, which
 	          // reaches 300 units up-sun, not just what is near the camera
 	true,     // castBackFacesOnly
@@ -690,6 +691,27 @@ static void RememberCaster(const float drawMin[3], const float drawMax[3], int v
 	}
 }
 
+// Is this cell far enough inside the frame that what the game drew in it is the whole of it?
+//
+// Uses the same camera matrix the mask rasterises with, so "in view" here means exactly what it
+// means to the game. The margin is what makes it useful: a cell straddling the edge of the screen
+// has been partly culled, and its capture is a sliver rather than its contents.
+static bool CellIsWhollyInView(const float centre[3]) {
+	if (!s_view.valid) {
+		return false;
+	}
+	const float *m = s_view.cameraViewProj;
+	const float x = centre[0] * m[0] + centre[1] * m[4] + centre[2] * m[8] + m[12];
+	const float y = centre[0] * m[1] + centre[1] * m[5] + centre[2] * m[9] + m[13];
+	const float z = centre[0] * m[2] + centre[1] * m[6] + centre[2] * m[10] + m[14];
+	const float w = centre[0] * m[3] + centre[1] * m[7] + centre[2] * m[11] + m[15];
+	if (w <= 0.0f) {
+		return false;
+	}
+	const float margin = 0.75f * w;
+	return x > -margin && x < margin && y > -margin && y < margin && z > 0.0f && z < w;
+}
+
 // Promotes this frame's cells over what they held, re-submits the cells nobody drew, and drops
 // what has gone stale or out of range. Runs once, immediately before the passes.
 static void SubmitCachedCasters() {
@@ -711,8 +733,20 @@ static void SubmitCachedCasters() {
 			// Drawn by the game this frame, so it is already in the streams. What was captured
 			// replaces what was remembered, wholesale - which is the property that makes a grid
 			// immune to the game re-batching its draws.
-			b.pos.swap(b.pendingPos);
-			b.idx.swap(b.pendingIdx);
+			//
+			// But only when the whole cell was on screen to be captured. This is the bug that
+			// survived two rounds of looking for it: as a building slides off the edge, the part
+			// still visible keeps its cell alive and OVERWRITES the memory of the rest with just
+			// that sliver - so the shadow shrank away exactly as the caster left the view, which
+			// is the symptom the cache was built to remove. A cell that is only half visible
+			// keeps what it already had.
+			//
+			// An empty cell always takes what it is offered, or a cell that is never fully seen
+			// would never hold anything at all.
+			if (b.pos.empty() || CellIsWhollyInView(b.centre)) {
+				b.pos.swap(b.pendingPos);
+				b.idx.swap(b.pendingIdx);
+			}
 			b.pendingPos.clear();
 			b.pendingIdx.clear();
 			b.lastSeenFrame = s_frameIndex;
@@ -1567,7 +1601,10 @@ static bool EnsureCompositeResources(Draw::DrawContext *draw) {
 		writer.C("  vec3 shaded = mix(u_shadowTint.rgb, vec3(1.0, 1.0, 1.0), lit);\n");
 		writer.C("  vec3 col = mix(vec3(1.0, 1.0, 1.0), shaded, u_shadowTint.a);\n");
 		writer.C("  vec4 outColor = vec4(col, 1.0);\n");
-		writer.C("  if (u_compositeParams.x > 0.5) { outColor = vec4(lit, lit, lit, 1.0); }\n");
+		writer.C("  if (u_compositeParams.x > 0.5) {\n");
+		writer.C("    float v = u_compositeParams.y > 0.5 ? clamp((1.0 - lit) * 6.0, 0.0, 1.0) : lit;\n");
+		writer.C("    outColor = vec4(v, v, v, 1.0);\n");
+		writer.C("  }\n");
 		writer.EndFSMain("outColor");
 	}
 	ShaderModule *fs = draw->CreateShaderModule(ShaderStage::Fragment, lang.shaderLanguage,
@@ -1664,7 +1701,14 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 	draw->BindFramebufferAsRenderTarget(target,
 		{ RPAction::KEEP, RPAction::KEEP, RPAction::KEEP, 0, 0.0f, 0, "vcs_shadow_composite" },
 		"vcs_shadow_composite");
-	draw->BindFramebufferAsTexture(s_maskFbo, 0, Aspect::COLOR_BIT, 0);
+	// Debug view 4 puts the depth map itself on the screen instead of the mask. It is the one
+	// picture that says what the depth pass actually holds, which is how the cache was finally
+	// shown to be working when three rounds of reasoning about it had not.
+	if (s_settings.debugView == 4 && s_settings.showMask && s_fbo) {
+		draw->BindFramebufferAsTexture(s_fbo, 0, Aspect::DEPTH_BIT, 0);
+	} else {
+		draw->BindFramebufferAsTexture(s_maskFbo, 0, Aspect::COLOR_BIT, 0);
+	}
 	draw->BindSamplerStates(0, 1, &s_compositeSampler);
 
 	Viewport viewport{ 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
@@ -1695,7 +1739,8 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 		}
 	}
 	ub.params[0] = s_settings.showMask ? 1.0f : 0.0f;
-	ub.params[1] = 0.0f;
+	// The depth map is almost all near-white at these ranges, so it is stretched to be legible.
+	ub.params[1] = s_settings.debugView == 4 ? 1.0f : 0.0f;
 	ub.params[2] = 0.0f;
 	ub.params[3] = 0.0f;
 	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));

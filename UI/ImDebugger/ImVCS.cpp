@@ -2324,8 +2324,8 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::SetTooltip("Draws the mask over the game rather than multiplying by it. The one view that answers whether it lines up.");
 	}
 	ImGui::Checkbox("Count cascade coverage (costs a full CPU pass)", &set.countCascadeCoverage);
-	const char *debugViewNames[] = { "shadow term", "sampled map depth", "light-space Z", "shadow UV (r,g)" };
-	ImGui::Combo("Mask shows", &set.debugView, debugViewNames, 4);
+	const char *debugViewNames[] = { "shadow term", "sampled map depth", "light-space Z", "shadow UV (r,g)", "the depth map itself" };
+	ImGui::Combo("Mask shows", &set.debugView, debugViewNames, 5);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("An all-black mask can mean the sample returns nothing or the comparison is inverted. These tell those apart.");
 	}

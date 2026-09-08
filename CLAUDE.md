@@ -3892,7 +3892,40 @@ The cache's own reach test had to learn the same lesson - it was culling cells b
 cascade centre, which is the camera's way of measuring. It measures in the light's frame now:
 across the light a cell has to be inside the box, along it a cell can be most of a street away.
 
+#### A cell that is half on screen was overwriting its own memory
+
+Reported a third time, after the cache and after the near plane, and it was neither of those. The
+cache was working - proved by switching the LIVE casters off for one build and leaving only what
+had been remembered, which still shaded the street. The depth map, put on screen as debug view 4,
+holds a whole neighbourhood: roads, buildings, lamp posts well outside the view.
+
+The bug was in how a cell is refreshed. A cell is replaced wholesale by whatever the game drew in
+it, which is the property that makes a grid immune to re-batching - and it is wrong the moment a
+cell is only PARTLY visible. As a building slides off the edge of the screen, the sliver of it
+still being drawn keeps its cell alive and overwrites the memory of the whole with the memory of
+the sliver. The shadow shrank away exactly as the caster left the view, which is the symptom the
+cache exists to remove, wearing the cache's own clothes.
+
+`CellIsWhollyInView` gates the replacement on the cell's centre being comfortably inside the same
+camera matrix the mask rasterises with - three quarters of the way to the edge. Outside that, the
+cell keeps what it had and only its timestamp is refreshed. An empty cell always accepts what it is
+offered, or a cell that is never fully seen would never hold anything.
+
+**The method note is the part worth keeping.** Three rounds went into this: a cache, a near plane,
+and this. The first two were reasoned from the symptom and both were real bugs that were not THE
+bug. What ended it was two pictures - the depth map on screen, and the frame with live casters
+disabled - neither of which is an argument about mechanism. Both took one build each. The reasoning
+took several.
+
 #### Known, and deliberately left
+
+**Geometry you have never looked at cannot cast.** The capture only ever sees what the game
+draws, and the cache only remembers places that have been on screen. Walk into a street facing away
+from a building and it casts nothing until you have seen it once. Fixing that properly means
+widening the game's OWN frustum culling - hooking whatever `CRenderer::ScanWorld` uses to decide
+visibility so it draws more than the camera can see - which is an address hunt of the kind the
+fire hook and the climb calls went through, and it costs frame time in the game's own rendering
+rather than in ours.
 
 **Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which
 needs UVs in the capture and a draw call per texture rather than one for the whole cascade. The
