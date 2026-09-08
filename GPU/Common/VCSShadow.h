@@ -66,6 +66,7 @@ enum class Reject : u8 {
 	Primitive,      // lines, points, sprites - nothing that bounds a volume
 	NoDepthWrite,   // particles, coronas, and the vanilla blob shadow
 	Blended,        // blending that genuinely composites: glass, smoke, water
+	Cutout,         // alpha-tested, and the texture is what cuts the shape out
 	TooFewVerts,    // degenerate; not worth a draw call in the shadow pass
 	Count,
 };
@@ -252,6 +253,37 @@ struct Settings {
 	float strength;
 	float tint[3];
 
+	// The game culls what it draws to the camera's own frustum - that is how a PSP ran this at
+	// all - and the capture only ever sees what reaches the GPU. So a building just off the left
+	// edge stops casting the moment it leaves the view, and its shadow blinks out of the middle
+	// of the road. Keeping recently-seen scenery and re-submitting it to the DEPTH pass fixes
+	// that without asking the game to draw one triangle more.
+	//
+	// Casters only. A receiver has to be on screen to be shaded, so a cached one would be
+	// shading nothing.
+	bool cacheCasters;
+
+	// How long a caster keeps casting after it was last drawn. This is also the ghost window: an
+	// object that both moves and leaves the view in the same frame holds its old shadow for this
+	// long. Everything that moves in this game is either skinned or gets caught by the
+	// same-model-different-matrix eviction, so it is a backstop rather than the usual path.
+	float cacheHoldSeconds;
+
+	// Cached casters further than this from the camera are dropped. The cascade is 50 units, so
+	// there is nothing to be gained by remembering the far side of the island - and this is what
+	// keeps the cache from growing into the whole city as you drive across it.
+	float cacheRadius;
+
+	// The game's own blob shadow - a flat alpha-blended quad under peds and vehicles - is not
+	// wanted once there are real ones, or everything that moves has two shadows.
+	//
+	// The textures it uses are LEARNED rather than named: a small flat blended quad that writes
+	// no depth and lies directly underneath something the capture accepted is that object's
+	// shadow, whatever texture it happens to be using today. Its texture address goes into a
+	// small set and every later draw using one is dropped. A decal on open road has nothing
+	// above it and is left alone, which is the distinction a render-state test cannot make.
+	bool hideBlobShadows;
+
 	// A draw whose whole footprint sits within this distance of the camera is thrown away, caster
 	// and receiver both. It is the game's full-screen overlays - the colour filter, the fades -
 	// which VCS draws as 3D geometry rather than in through mode, so no render-state test can
@@ -314,6 +346,20 @@ struct CaptureStats {
 	// the mask will be a flat colour.
 	int nearCameraDraws;
 
+	// The caster cache: how many entries it holds, how many of them this frame's shadow map got
+	// from it rather than from the game, and how much memory that is. A cached count of zero
+	// while shadows still blink out means nothing is being recognised as scenery.
+	int cachedEntries;
+	int cachedDraws;
+	int cachedVertices;
+	size_t cachedBytes;
+
+	// The blob-shadow suppressor: how many textures it has learned, and how many draws it
+	// dropped this frame. Learned staying at zero means the "sits under something" test never
+	// fires and the game's own shadows are still on screen.
+	int blobTextures;
+	int blobDraws;
+
 	// The size the mask was built at, which follows the game's render target rather than being
 	// configured. Shown because a mask that is not the size of the frame cannot line up with it.
 	int maskWidth;
@@ -362,8 +408,22 @@ const CaptureStats &LastCapture();
 //
 // Safe to call with `indices` null for a non-indexed draw. `numDecodedVerts` is the decoded
 // vertex count for the whole flush, which is what the index buffer indexes into.
+//
+// `vertexAddr` is where the draw's vertices live in PSP memory, and it is the model's identity:
+// every instance of a building shares it, so together with the world matrix it names a placement.
+// That is the key the caster cache is built on.
 void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
-	int stride, int posOffset, GEPrimitiveType prim, const float world[12]);
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12], u32 vertexAddr);
+
+// Offered every draw the caster filter threw out for writing no depth, with its geometry, so the
+// blob-shadow suppressor can see where it is. Cheap by construction - it is only called for small
+// draws, and it returns immediately unless hideBlobShadows is on.
+void NoteGroundQuad(const u8 *decoded, int numDecodedVerts, int stride, int posOffset,
+	const float world[12], u32 textureAddr);
+
+// Whether the draw about to be issued is one of the game's own blob shadows, and should not be
+// drawn at all. Called once per flush from the draw engine, after classification.
+bool ShouldSkipDraw();
 
 // The accumulated triangle list, valid until the next BeginFrame.
 Settings &GetSettings();

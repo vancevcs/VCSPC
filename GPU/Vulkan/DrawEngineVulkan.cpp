@@ -295,11 +295,23 @@ void DrawEngineVulkan::Flush() {
 		// Classify and capture here rather than after the draw: this has to run once
 		// vertexFullAlpha is settled, because the blend test reads it, and once the indices
 		// are decoded, because that is what produces the counts.
-		if (VCSShadow::IsActive() &&
-			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount) == VCSShadow::Reject::None) {
+		if (VCSShadow::IsActive()) {
 			const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
-			VCSShadow::AddCaster(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
-				vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
+			const VCSShadow::Reject reject = VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
+			if (reject == VCSShadow::Reject::None) {
+				VCSShadow::AddCaster(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix, gstate_c.vertexAddr);
+			} else if (reject == VCSShadow::Reject::NoDepthWrite && numDecodedVerts_ <= 64) {
+				// Small, writes no depth: a candidate for the game's own blob shadow. Offered
+				// with its geometry, because where it is is the only thing that separates one
+				// from a decal.
+				VCSShadow::NoteGroundQuad(decoded_, numDecodedVerts_, fmt.stride, fmt.posoff,
+					gstate.worldMatrix, gstate.getTextureAddress(0));
+			}
+			if (VCSShadow::ShouldSkipDraw()) {
+				ResetAfterDrawInline();
+				return;
+			}
 		}
 
 		bool textureNeedsApply = false;
@@ -419,11 +431,20 @@ void DrawEngineVulkan::Flush() {
 		if (useDepthRaster_) {
 			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
 		}
-		if (VCSShadow::IsActive() &&
-			VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount) == VCSShadow::Reject::None) {
+		if (VCSShadow::IsActive()) {
 			const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
-			VCSShadow::AddCaster(decoded_, numDecodedVerts_, decIndex_,
-				vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
+			const VCSShadow::Reject reject = VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
+			if (reject == VCSShadow::Reject::None) {
+				VCSShadow::AddCaster(decoded_, numDecodedVerts_, decIndex_,
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix, gstate_c.vertexAddr);
+			} else if (reject == VCSShadow::Reject::NoDepthWrite && numDecodedVerts_ <= 64) {
+				VCSShadow::NoteGroundQuad(decoded_, numDecodedVerts_, fmt.stride, fmt.posoff,
+					gstate.worldMatrix, gstate.getTextureAddress(0));
+			}
+			if (VCSShadow::ShouldSkipDraw()) {
+				ResetAfterDrawInline();
+				return;
+			}
 		}
 
 		u16 *inds = decIndex_;

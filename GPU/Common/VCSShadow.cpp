@@ -17,15 +17,18 @@
 
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "Common/CommonFuncs.h"
 #include "Common/Log.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/GPU/ShaderWriter.h"
+#include "Core/MemMap.h"
 #include "Core/System.h"
 #include "GPU/GPU.h"
 #include "GPU/GPUState.h"
+#include "GPU/Common/TextureDecoder.h"
 #include "GPU/Common/VCSShadow.h"
 
 namespace VCSShadow {
@@ -61,6 +64,10 @@ static Settings s_settings = {
 	0.15f,    // edgeFade
 	0.7f,     // strength
 	{ 0.35f, 0.38f, 0.48f },  // tint - blue, because what fills a shadow outdoors is the sky
+	true,     // cacheCasters
+	4.0f,     // cacheHoldSeconds
+	150.0f,   // cacheRadius
+	true,     // hideBlobShadows
 	2.0f,     // nearCameraCutoff
 	400.0f,   // maxCasterSpan
 	false,    // flipShadowV
@@ -96,6 +103,8 @@ static ViewportCapture s_frameViewport;
 // The camera, recovered as soon as the view matrix is captured rather than at the end of the
 // frame, because the capture itself has to test against it - see nearCameraCutoff.
 static float s_frameCameraPos[3];
+static float s_lastCameraPos[3];
+static bool s_haveLastCameraPos;
 
 // The frame's caster geometry. Kept as std::vector so the capacity settles after a few frames
 // and then stops allocating - clear() keeps the storage.
@@ -126,6 +135,69 @@ static CaptureStats s_capturePublished;
 // Set once the frame's passes have run, so a frame produces exactly one shadow composite and the
 // capture stops growing behind it.
 static bool s_frameComposited;
+
+// Host frames since boot. The cache ages in these rather than in seconds so that nothing here
+// needs a clock, and a stalled emulator does not silently expire the whole cache.
+static int s_frameIndex;
+
+struct Vec3Key {
+	float v[3];
+};
+
+// One placement of one model, kept so it can go on casting after the game stops drawing it.
+//
+// Positions are already in the space the GE is fed, which is the space the projection lives in,
+// so a cached entry needs no transform to be re-submitted - it is appended to the depth pass
+// exactly as it was captured.
+struct CacheEntry {
+	std::vector<float> pos;
+	std::vector<u16> idx;
+	u32 modelKey;        // the model, shared by every instance of it
+	float centre[3];
+	float radius;
+	int lastSeenFrame;
+	int seenCount;       // a placement has to hold still for two frames before it is kept
+};
+
+// Keyed on the placement: the model plus the matrix that puts it somewhere. A building's key is
+// the same every frame; a moving car's is different every frame, which is why one gets cached and
+// the other never does.
+static std::unordered_map<u64, CacheEntry> s_cache;
+
+// Where each model was drawn this frame, so a cached placement can be told apart from a model
+// that has simply moved. Same model, nearly the same place, different matrix means it moved; the
+// same model a street away is the second copy of a building and says nothing.
+static std::unordered_map<u32, std::vector<Vec3Key>> s_placementsThisFrame;
+
+// The textures the game's own blob shadows are drawn with, learned rather than named.
+//
+// A texture is not believed on one sighting. A quad happening to pass under something once is a
+// coincidence; the same texture doing it repeatedly is the game drawing a shadow under everything
+// that moves. Without the count the learner filled its whole table in a few seconds, which is
+// what over-learning looks like from outside.
+static const int kMaxBlobTextures = 16;
+static const int kBlobSightingsToLearn = 8;
+static u32 s_blobTextures[kMaxBlobTextures];
+static int s_blobTextureCount;
+
+static const int kMaxBlobCandidates = 24;
+struct BlobCandidate {
+	u32 addr;
+	int sightings;
+};
+static BlobCandidate s_blobCandidates[kMaxBlobCandidates];
+static int s_blobCandidateCount;
+
+// This frame's object-sized casters, for the test that decides what a flat quad is lying under.
+struct ObjectBounds {
+	float min[3];
+	float max[3];
+};
+static std::vector<ObjectBounds> s_objectBounds;
+
+// Scratch for one draw, so a rejected draw costs no growth in the capture buffers.
+static std::vector<float> s_drawPos;
+static std::vector<u16> s_drawIdx;
 
 // A frame that wants more than this is not a frame we can help. At 12 bytes a vertex this is
 // about 12 MB of positions, against a measured ~38k vertices a frame - roughly 25x headroom, so
@@ -373,19 +445,23 @@ static void ComputeShadowView(const FrameStats &stats) {
 	s_view.valid = true;
 }
 
-void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
-	int stride, int posOffset, GEPrimitiveType prim, const float world[12]) {
-	if (numDecodedVerts <= 0 || indexCount < 3 || s_frameComposited) {
+// Appends one piece of world-space geometry to the frame's streams, batching it so the 16-bit
+// indices stay in range. Shared by the live capture and by the caster cache, which is the whole
+// reason it is a function: a remembered caster has to enter the depth pass by exactly the same
+// road a fresh one does.
+static void AppendGeometry(const float *pos, int vertCount, const u16 *idx, int idxCount,
+	bool casts, bool receives) {
+	if (vertCount <= 0 || idxCount < 3) {
 		return;
 	}
-	if (s_positions.size() / 3 + (size_t)numDecodedVerts > kMaxCapturedVertices) {
+	if (s_positions.size() / 3 + (size_t)vertCount > kMaxCapturedVertices) {
 		s_capture.overflowed = true;
 		return;
 	}
 
 	// A single caster never approaches 64k vertices - the largest measured here is about a
 	// thousand - so starting a fresh batch whenever this one would overflow is always enough.
-	if (s_batches.empty() || s_batches.back().vertexCount + numDecodedVerts > kMaxBatchVertices) {
+	if (s_batches.empty() || s_batches.back().vertexCount + vertCount > kMaxBatchVertices) {
 		Batch fresh;
 		fresh.firstVertex = (u32)(s_positions.size() / 3);
 		fresh.vertexCount = 0;
@@ -401,37 +477,137 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 	// the batch because they are 16-bit, while the position write goes to the end of the shared
 	// buffer. They coincide while there is only one batch, which is most frames - so this only
 	// ever breaks once a scene gets busy enough to need a second one.
-	const u32 base = (u32)batch.vertexCount;
-	const size_t writeOffset = s_positions.size();
-	s_positions.resize(s_positions.size() + (size_t)numDecodedVerts * 3);
-	float *out = s_positions.data() + writeOffset;
+	const u16 base = (u16)batch.vertexCount;
+	s_positions.insert(s_positions.end(), pos, pos + (size_t)vertCount * 3);
 
-	// Row-vector, matching the vertex shader: world = vec4(pos, 1.0) * m, with the 4x3 matrix
-	// holding its translation in the last row. The decoded position is always three floats -
-	// the decoder guarantees that regardless of how the game encoded it - and for a skinned mesh
-	// the bones have already been folded in here, which is what gets peds into pose for free.
-	float drawMin[3] = { 1e30f, 1e30f, 1e30f };
-	float drawMax[3] = { -1e30f, -1e30f, -1e30f };
+	for (int i = 0; i < idxCount; i++) {
+		const u16 v = (u16)(base + idx[i]);
+		if (receives) {
+			s_receiverIndices.push_back(v);
+		}
+		if (casts) {
+			s_casterIndices.push_back(v);
+		}
+	}
 
+	batch.vertexCount += vertCount;
+	batch.casterIndexCount = (int)(s_casterIndices.size() - batch.firstCasterIndex);
+	batch.receiverIndexCount = (int)(s_receiverIndices.size() - batch.firstReceiverIndex);
+
+	s_capture.batches = (int)s_batches.size();
+	s_capture.vertices = (int)(s_positions.size() / 3);
+	s_capture.casterIndices = (int)s_casterIndices.size();
+	s_capture.receiverIndices = (int)s_receiverIndices.size();
+	s_capture.indices = s_capture.receiverIndices;
+	s_capture.bytes = s_positions.size() * sizeof(float)
+		+ (s_casterIndices.size() + s_receiverIndices.size()) * sizeof(u16);
+}
+
+// Transforms a draw's decoded vertices into `s_drawPos` and expands its topology into
+// `s_drawIdx` as a plain triangle list.
+//
+// Row-vector, matching the vertex shader: world = vec4(pos, 1.0) * m, with the 4x3 matrix holding
+// its translation in the last row. The decoded position is always three floats - the decoder
+// guarantees that regardless of how the game encoded it - and for a skinned mesh the bones have
+// already been folded in here, which is what gets peds into pose for free.
+static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12],
+	float drawMin[3], float drawMax[3]) {
+	s_drawPos.resize((size_t)numDecodedVerts * 3);
+	s_drawIdx.clear();
+
+	for (int c = 0; c < 3; c++) {
+		drawMin[c] = 1e30f;
+		drawMax[c] = -1e30f;
+	}
+
+	float *out = s_drawPos.data();
 	for (int i = 0; i < numDecodedVerts; i++) {
 		const float *p = (const float *)(decoded + (size_t)i * stride + posOffset);
-		const float x = p[0] * world[0] + p[1] * world[3] + p[2] * world[6] + world[9];
-		const float y = p[0] * world[1] + p[1] * world[4] + p[2] * world[7] + world[10];
-		const float z = p[0] * world[2] + p[1] * world[5] + p[2] * world[8] + world[11];
-		out[i * 3 + 0] = x;
-		out[i * 3 + 1] = y;
-		out[i * 3 + 2] = z;
-
-		const float v[3] = { x, y, z };
+		const float v[3] = {
+			p[0] * world[0] + p[1] * world[3] + p[2] * world[6] + world[9],
+			p[0] * world[1] + p[1] * world[4] + p[2] * world[7] + world[10],
+			p[0] * world[2] + p[1] * world[5] + p[2] * world[8] + world[11],
+		};
 		for (int c = 0; c < 3; c++) {
+			out[i * 3 + c] = v[c];
 			if (v[c] < drawMin[c]) drawMin[c] = v[c];
 			if (v[c] > drawMax[c]) drawMax[c] = v[c];
 		}
 	}
 
+	// Everything becomes a triangle list, because the whole cascade is going out as a single
+	// draw and one draw cannot carry three topologies. Strips and fans are cheap to expand and
+	// the alternative is a draw call per caster.
+	const auto index = [&](int i) -> u16 {
+		return (u16)(indices ? indices[i] : i);
+	};
+	switch (prim) {
+	case GE_PRIM_TRIANGLES:
+		for (int i = 0; i + 2 < indexCount; i += 3) {
+			s_drawIdx.push_back(index(i));
+			s_drawIdx.push_back(index(i + 1));
+			s_drawIdx.push_back(index(i + 2));
+		}
+		break;
+	case GE_PRIM_TRIANGLE_STRIP:
+		// Every other triangle in a strip has reversed winding. Keeping that consistent matters
+		// because the depth pass culls faces to halve the acne problem.
+		for (int i = 0; i + 2 < indexCount; i++) {
+			if (i & 1) {
+				s_drawIdx.push_back(index(i + 1));
+				s_drawIdx.push_back(index(i));
+			} else {
+				s_drawIdx.push_back(index(i));
+				s_drawIdx.push_back(index(i + 1));
+			}
+			s_drawIdx.push_back(index(i + 2));
+		}
+		break;
+	case GE_PRIM_TRIANGLE_FAN:
+		for (int i = 1; i + 1 < indexCount; i++) {
+			s_drawIdx.push_back(index(0));
+			s_drawIdx.push_back(index(i));
+			s_drawIdx.push_back(index(i + 1));
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+// The model's identity, and this placement of it. Every instance of a building shares the first
+// - the vertex data is one copy in PSP memory - and the matrix is what tells them apart.
+static u32 ModelKey(u32 vertexAddr, int numDecodedVerts) {
+	return vertexAddr * 2654435761u + (u32)numDecodedVerts;
+}
+
+static u64 PlacementKey(u32 modelKey, const float world[12]) {
+	u32 h = modelKey;
+	for (int i = 0; i < 12; i++) {
+		u32 bits;
+		memcpy(&bits, &world[i], sizeof(bits));
+		h = h * 16777619u ^ bits;
+	}
+	return ((u64)modelKey << 32) | h;
+}
+
+void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12], u32 vertexAddr) {
+	if (numDecodedVerts <= 0 || indexCount < 3 || s_frameComposited) {
+		return;
+	}
+
+	float drawMin[3], drawMax[3];
+	BakeDraw(decoded, numDecodedVerts, indices, indexCount, stride, posOffset, prim, world,
+		drawMin, drawMax);
+	if (s_drawIdx.size() < 3) {
+		return;
+	}
+
 	// A draw sitting on top of the camera is one of the game's full-screen overlays, drawn as
 	// world geometry. Dropped whole - it is neither a caster nor a receiver, and left in it wins
-	// every pixel of the mask. The positions written above are handed back rather than kept.
+	// every pixel of the mask.
 	if (s_haveViewMatrix && s_settings.nearCameraCutoff > 0.0f) {
 		float furthest = 0.0f;
 		for (int c = 0; c < 3; c++) {
@@ -441,7 +617,6 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 			furthest += d * d;
 		}
 		if (furthest < s_settings.nearCameraCutoff * s_settings.nearCameraCutoff) {
-			s_positions.resize(writeOffset);
 			s_capture.nearCameraDraws++;
 			return;
 		}
@@ -473,60 +648,270 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		s_capture.receiverOnlyDraws++;
 	}
 
-	// Everything becomes a triangle list, because the whole cascade is going out as a single
-	// draw and one draw cannot carry three topologies. Strips and fans are cheap to expand and
-	// the alternative is a draw call per caster.
-	const auto index = [&](int i) -> u16 {
-		return (u16)(base + (indices ? (u32)indices[i] : (u32)i));
-	};
-	const auto emit = [&](u16 a, u16 b, u16 c) {
-		s_receiverIndices.push_back(a);
-		s_receiverIndices.push_back(b);
-		s_receiverIndices.push_back(c);
-		if (casts) {
-			s_casterIndices.push_back(a);
-			s_casterIndices.push_back(b);
-			s_casterIndices.push_back(c);
+	// Object-sized casters are what a flat quad has to be lying under to be a blob shadow.
+	if (s_settings.hideBlobShadows && casts && spanX <= 20.0f && spanY <= 20.0f) {
+		ObjectBounds b;
+		for (int c = 0; c < 3; c++) {
+			b.min[c] = drawMin[c];
+			b.max[c] = drawMax[c];
 		}
-	};
-	switch (prim) {
-	case GE_PRIM_TRIANGLES:
-		for (int i = 0; i + 2 < indexCount; i += 3) {
-			emit(index(i), index(i + 1), index(i + 2));
-		}
-		break;
-	case GE_PRIM_TRIANGLE_STRIP:
-		// Every other triangle in a strip has reversed winding. Keeping that consistent matters
-		// because the depth pass culls faces to halve the acne problem.
-		for (int i = 0; i + 2 < indexCount; i++) {
-			if (i & 1) {
-				emit(index(i + 1), index(i), index(i + 2));
-			} else {
-				emit(index(i), index(i + 1), index(i + 2));
-			}
-		}
-		break;
-	case GE_PRIM_TRIANGLE_FAN:
-		for (int i = 1; i + 1 < indexCount; i++) {
-			emit(index(0), index(i), index(i + 1));
-		}
-		break;
-	default:
-		break;
+		s_objectBounds.push_back(b);
 	}
 
-	batch.vertexCount += numDecodedVerts;
-	batch.casterIndexCount = (int)(s_casterIndices.size() - batch.firstCasterIndex);
-	batch.receiverIndexCount = (int)(s_receiverIndices.size() - batch.firstReceiverIndex);
-
+	AppendGeometry(s_drawPos.data(), numDecodedVerts, s_drawIdx.data(), (int)s_drawIdx.size(),
+		casts, true);
 	s_capture.draws++;
-	s_capture.batches = (int)s_batches.size();
-	s_capture.vertices = (int)(s_positions.size() / 3);
-	s_capture.casterIndices = (int)s_casterIndices.size();
-	s_capture.receiverIndices = (int)s_receiverIndices.size();
-	s_capture.indices = s_capture.receiverIndices;
-	s_capture.bytes = s_positions.size() * sizeof(float)
-		+ (s_casterIndices.size() + s_receiverIndices.size()) * sizeof(u16);
+
+	// --- the cache -----------------------------------------------------------------------
+	//
+	// Skinned meshes are peds and never go in: their vertices arrive already in pose, so a
+	// remembered copy is a person frozen mid-stride.
+	if (!s_settings.cacheCasters || !casts || !s_haveViewMatrix ||
+		(gstate.vertType & GE_VTYPE_WEIGHT_MASK) != GE_VTYPE_WEIGHT_NONE) {
+		return;
+	}
+
+	const u32 modelKey = ModelKey(vertexAddr, numDecodedVerts);
+	const u64 key = PlacementKey(modelKey, world);
+
+	Vec3Key here;
+	for (int c = 0; c < 3; c++) {
+		here.v[c] = (drawMin[c] + drawMax[c]) * 0.5f;
+	}
+	s_placementsThisFrame[modelKey].push_back(here);
+
+	auto it = s_cache.find(key);
+	if (it != s_cache.end()) {
+		it->second.lastSeenFrame = s_frameIndex;
+		it->second.seenCount++;
+		// Kept from the second sighting on, and not before: a one-frame entry is what a moving
+		// object leaves behind, and it is never worth the copy. The copy has to happen here,
+		// while s_drawPos still holds THIS draw.
+		if (it->second.seenCount == 2) {
+			it->second.pos = s_drawPos;
+			it->second.idx = s_drawIdx;
+		}
+		return;
+	}
+
+	// Two consecutive frames before it is kept, which is what a moving object can never manage -
+	// its matrix, and so its key, is different every frame. The first sighting only reserves an
+	// empty slot, so a car driving past costs one map entry and no geometry.
+	CacheEntry entry;
+	entry.modelKey = modelKey;
+	entry.lastSeenFrame = s_frameIndex;
+	entry.seenCount = 1;
+	for (int c = 0; c < 3; c++) {
+		entry.centre[c] = here.v[c];
+	}
+	float radiusSq = 0.0f;
+	for (int c = 0; c < 3; c++) {
+		const float half = (drawMax[c] - drawMin[c]) * 0.5f;
+		radiusSq += half * half;
+	}
+	entry.radius = sqrtf(radiusSq);
+	s_cache[key] = std::move(entry);
+}
+
+// Fills in the geometry of cache entries that have now been seen twice, drops the ones that have
+// gone stale or out of range, and re-submits everything that survived but was not drawn this
+// frame. Runs once, immediately before the passes.
+static void SubmitCachedCasters() {
+	s_capture.cachedDraws = 0;
+	s_capture.cachedVertices = 0;
+	s_capture.cachedBytes = 0;
+	if (!s_settings.cacheCasters || !s_haveViewMatrix) {
+		s_capture.cachedEntries = (int)s_cache.size();
+		return;
+	}
+
+	const int holdFrames = (int)(s_settings.cacheHoldSeconds * 60.0f);
+	const float radius = s_settings.cacheRadius;
+
+	for (auto it = s_cache.begin(); it != s_cache.end(); ) {
+		CacheEntry &e = it->second;
+
+		float distSq = 0.0f;
+		for (int c = 0; c < 3; c++) {
+			const float d = e.centre[c] - s_frameCameraPos[c];
+			distSq += d * d;
+		}
+		const bool inRange = distSq < (radius + e.radius) * (radius + e.radius);
+		const bool stale = s_frameIndex - e.lastSeenFrame > holdFrames;
+		if (!inRange || stale) {
+			it = s_cache.erase(it);
+			continue;
+		}
+
+		if (e.lastSeenFrame == s_frameIndex) {
+			// Drawn by the game this frame, so it is already in the streams.
+			++it;
+			continue;
+		}
+
+		// Not drawn this frame. If the same model IS on screen within a few units of where this
+		// placement was, the thing moved rather than being culled, and the memory of it is a
+		// ghost. A second copy of the same building a street away does not trip this.
+		auto placements = s_placementsThisFrame.find(e.modelKey);
+		if (placements != s_placementsThisFrame.end()) {
+			bool moved = false;
+			for (const Vec3Key &p : placements->second) {
+				float d2 = 0.0f;
+				for (int c = 0; c < 3; c++) {
+					const float d = p.v[c] - e.centre[c];
+					d2 += d * d;
+				}
+				if (d2 < 12.0f * 12.0f) {
+					moved = true;
+					break;
+				}
+			}
+			if (moved) {
+				it = s_cache.erase(it);
+				continue;
+			}
+		}
+
+		// Kept because it may be needed a moment from now, but only SUBMITTED if it can reach the
+		// cascade this frame. The cascade is a hundred units across and the cache holds a hundred
+		// and fifty in every direction, so most of what is remembered is not casting into it.
+		bool reaches = true;
+		if (s_view.valid) {
+			float d2 = 0.0f;
+			for (int c = 0; c < 3; c++) {
+				const float d = e.centre[c] - s_view.centre[c];
+				d2 += d * d;
+			}
+			const float reach = s_view.radius * 1.75f + e.radius;
+			reaches = d2 < reach * reach;
+		}
+		if (reaches && !e.pos.empty()) {
+			AppendGeometry(e.pos.data(), (int)(e.pos.size() / 3), e.idx.data(), (int)e.idx.size(),
+				true, false);
+			s_capture.cachedDraws++;
+			s_capture.cachedVertices += (int)(e.pos.size() / 3);
+		}
+		++it;
+	}
+
+	for (const auto &kv : s_cache) {
+		s_capture.cachedBytes += kv.second.pos.size() * sizeof(float)
+			+ kv.second.idx.size() * sizeof(u16);
+	}
+	s_capture.cachedEntries = (int)s_cache.size();
+
+	// Once per boot, so a build where the cache silently never engages says so in the log rather
+	// than only in a panel the Release build cannot open.
+	static bool s_saidCacheWorks = false;
+	if (!s_saidCacheWorks && s_capture.cachedDraws > 0) {
+		s_saidCacheWorks = true;
+		WARN_LOG(Log::G3D, "VCS: the caster cache is carrying %d draws the game no longer draws (%d entries)",
+			s_capture.cachedDraws, s_capture.cachedEntries);
+	}
+}
+
+// --- the game's own blob shadows ---------------------------------------------------------
+//
+// A flat, small, alpha-blended quad that writes no depth and lies directly underneath something
+// the capture accepted is that object's shadow. That is the whole test, and it is positional
+// rather than about render state, because the render state a blob uses is the render state a
+// decal uses. A tyre mark on open road has nothing above it.
+
+static bool IsLearnedBlobTexture(u32 textureAddr) {
+	for (int i = 0; i < s_blobTextureCount; i++) {
+		if (s_blobTextures[i] == textureAddr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void NoteGroundQuad(const u8 *decoded, int numDecodedVerts, int stride, int posOffset,
+	const float world[12], u32 textureAddr) {
+	if (!g_active || !s_settings.hideBlobShadows || numDecodedVerts < 3 || !textureAddr) {
+		return;
+	}
+	if (IsLearnedBlobTexture(textureAddr)) {
+		return;
+	}
+
+	float qMin[3] = { 1e30f, 1e30f, 1e30f };
+	float qMax[3] = { -1e30f, -1e30f, -1e30f };
+	for (int i = 0; i < numDecodedVerts; i++) {
+		const float *p = (const float *)(decoded + (size_t)i * stride + posOffset);
+		const float v[3] = {
+			p[0] * world[0] + p[1] * world[3] + p[2] * world[6] + world[9],
+			p[0] * world[1] + p[1] * world[4] + p[2] * world[7] + world[10],
+			p[0] * world[2] + p[1] * world[5] + p[2] * world[8] + world[11],
+		};
+		for (int c = 0; c < 3; c++) {
+			if (v[c] < qMin[c]) qMin[c] = v[c];
+			if (v[c] > qMax[c]) qMax[c] = v[c];
+		}
+	}
+
+	// Flat, and no bigger than a vehicle. A blob is a decal on the ground; anything with height
+	// is something else entirely.
+	if (qMax[2] - qMin[2] > 1.5f) {
+		return;
+	}
+	if (qMax[0] - qMin[0] > 12.0f || qMax[1] - qMin[1] > 12.0f) {
+		return;
+	}
+
+	const float cx = (qMin[0] + qMax[0]) * 0.5f;
+	const float cy = (qMin[1] + qMax[1]) * 0.5f;
+	for (const ObjectBounds &b : s_objectBounds) {
+		if (cx < b.min[0] || cx > b.max[0] || cy < b.min[1] || cy > b.max[1]) {
+			continue;
+		}
+		// Underneath it, not floating somewhere above it. A ped's own feet are the bottom of its
+		// bounds, and the blob sits within a stride of them.
+		if (qMax[2] > b.min[2] + 2.0f || qMax[2] < b.min[2] - 3.0f) {
+			continue;
+		}
+		BlobCandidate *candidate = nullptr;
+		for (int i = 0; i < s_blobCandidateCount; i++) {
+			if (s_blobCandidates[i].addr == textureAddr) {
+				candidate = &s_blobCandidates[i];
+				break;
+			}
+		}
+		if (!candidate) {
+			if (s_blobCandidateCount >= kMaxBlobCandidates) {
+				return;
+			}
+			candidate = &s_blobCandidates[s_blobCandidateCount++];
+			candidate->addr = textureAddr;
+			candidate->sightings = 0;
+		}
+		if (++candidate->sightings < kBlobSightingsToLearn) {
+			return;
+		}
+		if (s_blobTextureCount < kMaxBlobTextures) {
+			s_blobTextures[s_blobTextureCount++] = textureAddr;
+			WARN_LOG(Log::G3D, "VCS: %08x is a blob shadow texture (%d known)",
+				textureAddr, s_blobTextureCount);
+		}
+		return;
+	}
+}
+
+bool ShouldSkipDraw() {
+	if (!g_active || !s_settings.hideBlobShadows || s_blobTextureCount == 0) {
+		return false;
+	}
+	// The shape as well as the texture. A learned texture is one this game happens to use for
+	// blobs, and nothing says it is used for nothing else - the through-mode HUD in particular
+	// is not ours to edit.
+	if (gstate.isModeThrough() || gstate.isDepthWriteEnabled() || !gstate.isAlphaBlendEnabled()) {
+		return false;
+	}
+	if (!IsLearnedBlobTexture(gstate.getTextureAddress(0))) {
+		return false;
+	}
+	s_capture.blobDraws++;
+	return true;
 }
 
 const CaptureStats &LastCapture() {
@@ -1321,6 +1706,7 @@ bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target) {
 	if (viewW <= 0 || viewW > maskW) viewW = maskW;
 	if (viewH <= 0 || viewH > maskH) viewH = maskH;
 
+	SubmitCachedCasters();
 	RenderCascade(draw);
 	RenderMask(draw, maskW, maskH, viewW, viewH);
 	RenderComposite(draw, target, fbWidth, fbHeight);
@@ -1344,7 +1730,13 @@ void Init() {
 	memset(&s_view, 0, sizeof(s_view));
 	memset(&s_frameViewport, 0, sizeof(s_frameViewport));
 	s_haveViewMatrix = false;
+	s_haveLastCameraPos = false;
 	s_frameComposited = false;
+	s_cache.clear();
+	s_placementsThisFrame.clear();
+	s_objectBounds.clear();
+	s_blobTextureCount = 0;
+	s_blobCandidateCount = 0;
 
 	// The flag is only set for ULUS10160 in compat.ini, so this is the disc-ID check as well.
 	RefreshAvailability();
@@ -1369,6 +1761,9 @@ void SetEnabled(bool enabled) {
 		s_casterIndices.clear();
 		s_receiverIndices.clear();
 		s_batches.clear();
+		s_cache.clear();
+		s_placementsThisFrame.clear();
+		s_objectBounds.clear();
 		memset(&s_capture, 0, sizeof(s_capture));
 		memset(&s_capturePublished, 0, sizeof(s_capturePublished));
 	}
@@ -1393,7 +1788,13 @@ void Shutdown() {
 	memset(&s_frameViewport, 0, sizeof(s_frameViewport));
 	s_sunLuminance = 0.0f;
 	s_haveViewMatrix = false;
+	s_haveLastCameraPos = false;
 	s_frameComposited = false;
+	s_cache.clear();
+	s_placementsThisFrame.clear();
+	s_objectBounds.clear();
+	s_blobTextureCount = 0;
+	s_blobCandidateCount = 0;
 }
 
 void BeginFrame(Draw::DrawContext *draw) {
@@ -1415,6 +1816,10 @@ void BeginFrame(Draw::DrawContext *draw) {
 	s_sunLuminance = 0.0f;
 	s_haveViewMatrix = false;
 	s_frameComposited = false;
+	s_frameIndex++;
+	s_objectBounds.clear();
+	s_placementsThisFrame.clear();
+	s_capture.blobTextures = s_blobTextureCount;
 }
 
 // Finds the sun among the four GE light channels. GTA hands the hardware a directional light for
@@ -1499,6 +1904,153 @@ static void NoteLights() {
 	}
 }
 
+// Does the texture this draw is using cut its own shape out?
+//
+// This exists because the obvious source for the answer is wrong here. PPSSPP tracks it as
+// `gstate_c.textureSolidAlpha`, set from the decoded texture's alpha - and it is only ever set on
+// the path that decodes the PSP's texture. With texture replacement on, which is this port's
+// whole point, the replaced path leaves it at TextureAlpha::Any and every texture in the game
+// reads as "might have holes". Believing it threw out the entire city: 0 casters, 58 of 58
+// blendable draws rejected, and no shadows at all.
+//
+// So ask the game's own texture instead of the pack's. That is also the more correct question -
+// whether a palm leaf is a cut-out is a fact about the game, not about which pack is installed -
+// and the answer is cached per texture, so it costs one scan each and a hash lookup per draw.
+namespace {
+
+struct TexAlphaKey {
+	u32 addr;
+	u32 clutAddr;
+	u32 shape;   // format, bufw and height packed - two textures at one address differ by these
+};
+
+// A texture is a cut-out if a real share of it is transparent. A threshold rather than "any
+// non-opaque texel", because an antialiased edge or a stray pixel is not a hole, and a leaf card
+// is mostly hole.
+static const float kCutoutFraction = 0.02f;
+
+static std::unordered_map<u64, bool> s_texCutout;
+
+inline bool PaletteEntryIsClear(const u8 *clut, u32 index, GEPaletteFormat fmt) {
+	switch (fmt) {
+	case GE_CMODE_16BIT_ABGR5551:
+		return (((const u16 *)clut)[index] & 0x8000) == 0;
+	case GE_CMODE_16BIT_ABGR4444:
+		return (((const u16 *)clut)[index] >> 12) < 0x8;
+	case GE_CMODE_32BIT_ABGR8888:
+		return (((const u32 *)clut)[index] >> 24) < 0x80;
+	default:
+		return false;   // 5650 has no alpha at all
+	}
+}
+
+}  // namespace
+
+// True when the texture is opaque enough to be believed as a solid caster. Unknown formats answer
+// true, so a format nobody here has thought about keeps the behaviour the fork already had rather
+// than silently deleting shadows.
+static bool TextureIsSolid() {
+	if (!gstate.isTextureMapEnabled()) {
+		return true;
+	}
+	const u32 addr = gstate.getTextureAddress(0);
+	if (!addr) {
+		return true;
+	}
+	const GETextureFormat fmt = gstate.getTextureFormat();
+	const int bufw = (int)GetTextureBufw(0, addr, fmt);
+	const int h = gstate.getTextureHeight(0);
+	if (bufw <= 0 || h <= 0) {
+		return true;
+	}
+
+	const u32 clutAddr = (fmt >= GE_TFMT_CLUT4 && fmt <= GE_TFMT_CLUT32) ? gstate.getClutAddress() : 0;
+	const u32 shape = ((u32)fmt << 28) ^ ((u32)bufw << 14) ^ (u32)h;
+	const u64 key = ((u64)addr << 32) ^ ((u64)clutAddr << 8) ^ shape;
+
+	auto cached = s_texCutout.find(key);
+	if (cached != s_texCutout.end()) {
+		return !cached->second;
+	}
+
+	const int texels = bufw * h;
+	int clear = 0;
+	bool known = true;
+
+	switch (fmt) {
+	case GE_TFMT_5650:
+		break;   // no alpha channel at all
+	case GE_TFMT_5551:
+	case GE_TFMT_4444: {
+		if (!Memory::IsValidRange(addr, texels * 2)) { known = false; break; }
+		const u16 *p = (const u16 *)Memory::GetPointerUnchecked(addr);
+		if (fmt == GE_TFMT_5551) {
+			for (int i = 0; i < texels; i++) { if (!(p[i] & 0x8000)) clear++; }
+		} else {
+			for (int i = 0; i < texels; i++) { if ((p[i] >> 12) < 0x8) clear++; }
+		}
+		break;
+	}
+	case GE_TFMT_8888: {
+		if (!Memory::IsValidRange(addr, texels * 4)) { known = false; break; }
+		const u32 *p = (const u32 *)Memory::GetPointerUnchecked(addr);
+		for (int i = 0; i < texels; i++) { if ((p[i] >> 24) < 0x80) clear++; }
+		break;
+	}
+	case GE_TFMT_CLUT4:
+	case GE_TFMT_CLUT8: {
+		// The indices decide which palette entries matter, so scan them rather than scanning the
+		// palette: one transparent colour nobody uses is not a hole.
+		const int bytes = fmt == GE_TFMT_CLUT4 ? texels / 2 : texels;
+		if (!clutAddr || !Memory::IsValidRange(addr, bytes) ||
+			!Memory::IsValidRange(clutAddr, 1024)) { known = false; break; }
+		const u8 *p = Memory::GetPointerUnchecked(addr);
+		const u8 *clut = Memory::GetPointerUnchecked(clutAddr);
+		const GEPaletteFormat clutFmt = gstate.getClutPaletteFormat();
+		const u32 start = gstate.getClutIndexStartPos();
+		const u32 shift = gstate.getClutIndexShift();
+		const u32 mask = gstate.getClutIndexMask();
+		const u32 entries = clutFmt == GE_CMODE_32BIT_ABGR8888 ? 256u : 512u;
+		for (int i = 0; i < texels; i++) {
+			u32 index = fmt == GE_TFMT_CLUT4
+				? ((p[i >> 1] >> ((i & 1) * 4)) & 0xF)
+				: p[i];
+			index = ((index >> shift) & mask) | start;
+			if (index >= entries) { continue; }
+			if (PaletteEntryIsClear(clut, index, clutFmt)) { clear++; }
+		}
+		break;
+	}
+	default:
+		known = false;
+		break;
+	}
+
+	const bool cutout = known && texels > 0 && (float)clear > kCutoutFraction * (float)texels;
+	if (s_texCutout.size() < 4096) {
+		s_texCutout[key] = cutout;
+	}
+	return !cutout;
+}
+
+// Whether this draw's fragments are fully opaque - BOTH halves of it.
+//
+// The vertex colour is only half the answer, and the half that was being asked. The final alpha
+// is vertex alpha times texture alpha, and PPSSPP's texture cache already knows the second half:
+// `textureSolidAlpha` is set from the bound texture's own alpha status. GPUStateUtils asks the
+// question in exactly this form when it decides whether a blend can be simplified away.
+//
+// This is what makes a palm cast a palm instead of a box. A leaf quad has fully opaque vertex
+// colours over a texture that is mostly holes, so on vertex alpha alone it reads as solid and the
+// depth pass writes the whole rectangle. There is no cut-out shadow to be had this way - the
+// depth pass carries no textures - so the honest answer is to stop claiming the quad is a caster.
+static bool FinalAlphaIsOpaque() {
+	if (!gstate_c.vertexFullAlpha) {
+		return false;
+	}
+	return !gstate.isTextureAlphaUsed() || TextureIsSolid();
+}
+
 // Whether the current blend setup can actually change what is already in the framebuffer.
 //
 // This is the whole lesson of the first run of the counters. Testing gstate.isAlphaBlendEnabled()
@@ -1508,11 +2060,9 @@ static void NoteLights() {
 // specifies a blend that does nothing. Asking "is blending enabled" is the wrong question;
 // asking "can this blend alter the destination" is the right one.
 //
-// Caveat worth writing down: on a modulating texture the final alpha is vertex alpha times
-// texture alpha, and PPSSPP does not track the texture half, so a fully opaque vertex colour
-// over a texture with holes reads as opaque here. That errs towards including a draw as a
-// caster, which costs a slightly too-dark shadow - much cheaper than the error in the other
-// direction, and alpha-tested foliage and fences are draws we want as casters anyway.
+// This asked only about VERTEX alpha for a long time, and the note here used to say that erring
+// towards calling a draw opaque was the cheap direction to be wrong in. It is not: it is what put
+// solid rectangles in the sky where palm leaves are. See FinalAlphaIsOpaque.
 static bool BlendAltersDestination() {
 	// Anything other than a straight multiply-and-add is doing something deliberate.
 	if (gstate.getBlendEq() != GE_BLENDMODE_MUL_AND_ADD) {
@@ -1529,7 +2079,7 @@ static bool BlendAltersDestination() {
 
 	// The standard alpha blend, which is a copy whenever the source is fully opaque.
 	if (funcA == GE_SRCBLEND_SRCALPHA && funcB == GE_DSTBLEND_INVSRCALPHA) {
-		return !gstate_c.vertexFullAlpha;
+		return !FinalAlphaIsOpaque();
 	}
 
 	return true;
@@ -1571,11 +2121,19 @@ static Reject TestDraw(GEPrimitiveType prim, int vertexCount) {
 
 	// Blending that genuinely composites catches glass, smoke and water. A blend that cannot
 	// change the destination is not transparency at all - see BlendAltersDestination, which
-	// is where the entire city was being thrown away. Alpha *testing* is deliberately not a
-	// rejection either: fences and foliage are alpha-tested opaque geometry and their cut-out
-	// shape is most of what makes their shadow look right.
+	// is where the entire city was being thrown away.
 	if (gstate.isAlphaBlendEnabled() && BlendAltersDestination()) {
 		return Reject::Blended;
+	}
+
+	// And the same question again for the draws that cut their shape out with the alpha TEST
+	// rather than with a blend - foliage and chain-link. This used to be waved through on the
+	// grounds that a cut-out shape is most of what makes their shadow look right, which is true
+	// and is not on offer: the depth pass carries no textures, so it would write the rectangle.
+	// A palm with no shadow reads better than a palm with a crate's.
+	if (gstate.isAlphaTestEnabled() && gstate.getAlphaTestFunction() != GE_COMP_ALWAYS &&
+		!FinalAlphaIsOpaque()) {
+		return Reject::Cutout;
 	}
 
 	if (vertexCount < 3) {
@@ -1663,6 +2221,23 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 			s_frameCameraPos[2] = -(t[0] * m[6] + t[1] * m[7] + t[2] * m[8]);
 		}
 		s_haveViewMatrix = true;
+
+		// The cache holds positions in the space the GE is fed, and the game rebases that space.
+		// A rebase - or a teleport, or a load - shows up as the recovered camera jumping further
+		// in one frame than any camera can move, and everything remembered in the old space is
+		// then in the wrong place. Cheaper to throw it away than to track the offset.
+		if (s_haveLastCameraPos) {
+			float moved = 0.0f;
+			for (int c = 0; c < 3; c++) {
+				const float d = s_frameCameraPos[c] - s_lastCameraPos[c];
+				moved += d * d;
+			}
+			if (moved > 40.0f * 40.0f) {
+				s_cache.clear();
+			}
+		}
+		memcpy(s_lastCameraPos, s_frameCameraPos, sizeof(s_lastCameraPos));
+		s_haveLastCameraPos = true;
 	} else if (memcmp(s_frameViewMatrix, gstate.viewMatrix, sizeof(s_frameViewMatrix)) != 0) {
 		s_current.viewMatrixChanges++;
 	}
@@ -1725,6 +2300,7 @@ const char *RejectName(Reject r) {
 	case Reject::Primitive: return "not a triangle";
 	case Reject::NoDepthWrite: return "no depth write";
 	case Reject::Blended: return "alpha blended";
+	case Reject::Cutout: return "alpha-tested cutout";
 	case Reject::TooFewVerts: return "too few verts";
 	default: return "?";
 	}

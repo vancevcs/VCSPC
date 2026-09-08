@@ -3707,13 +3707,100 @@ a fixed key-light direction and only moves its colour through the day, which wou
 fade rather than sweep. The Shadows tab lists all four channels with their directions and is where
 to check it; do not write it down as fact until someone has.
 
+#### Three things the first working version got wrong
+
+Reported from play, and each one is a different kind of mistake.
+
+**1. Shadows blinked out of the middle of the road.** The capture only ever sees what reaches the
+GPU, and the game culls to its own camera frustum - that is how a PSP ran this at all. So a
+building a few degrees off the left edge is not drawn, is not captured, and stops casting the
+shadow that was lying across the road in front of you.
+
+The fix is a **caster cache**, not a wider frustum. Making the game draw more costs frames on top
+of everything the shadows already cost, and the geometry that matters here does not move: a
+placement that was captured recently is still exactly where it was. Entries are keyed on
+`(vertexAddr, vertex count, world matrix)` - the model plus where it was put - and re-submitted to
+the DEPTH pass alone, never the mask, because a receiver has to be on screen to be shaded.
+
+Four rules keep it honest, and each is there because of a specific way it could ghost:
+
+- **Two consecutive sightings before an entry is kept.** A moving object has a different matrix
+  every frame and therefore a different key every frame, so it can never reach two - the cost of a
+  car driving past is one map entry and no geometry at all.
+- **Skinned meshes never go in.** Their vertices arrive already in pose, so a remembered copy is a
+  person frozen mid-stride.
+- **Same model, nearly the same place, different matrix means it moved**, and the old memory of it
+  is evicted at once. Distance is what makes that safe: the second copy of a building a street
+  away is the same model in a different place and says nothing about the first.
+- **A hold, and a radius.** Four seconds and 150 units. The radius is what stops the cache growing
+  into the whole city as you drive across it; the hold is the backstop for the one case the rules
+  above cannot catch, an object that moves and leaves the view in the same frame.
+
+Kept is not the same as submitted: an entry only enters the depth pass if its sphere reaches the
+cascade, which is a hundred units across against a cache a hundred and fifty in every direction.
+On an ordinary street that is ~600 draws re-submitted out of ~1400 held, at no cost in frame rate,
+because it is geometry the game was going to make us pay for anyway and the GPU is not the
+bottleneck here.
+
+The cache holds positions in the space the GE is fed, and the game rebases that space. A rebase, a
+teleport or a load shows up as the recovered camera jumping further in one frame than any camera
+can move, and everything remembered is then in the wrong place - so that jump clears the cache.
+Cheaper than tracking the offset, and it cannot be subtly wrong.
+
+**2. Palm leaves cast their bounding boxes.** A leaf card is a quad with a texture that is mostly
+hole, and the depth pass carries no textures, so it wrote the rectangle.
+
+The caster filter had this backwards and said so in its own comment: it asked
+`gstate_c.vertexFullAlpha` and noted that erring towards "opaque" was the cheap direction to be
+wrong in. It is not - it is the direction that puts crates in the sky. The final alpha is vertex
+alpha TIMES texture alpha, and only the first half was being asked about.
+
+**PPSSPP tracks the second half and it is unusable here.** `gstate_c.textureSolidAlpha` is set from
+the decoded texture's own alpha, and only on the path that decodes the PSP's texture: with
+replacement on, which is this port's whole point, `LoadTextureLevel` takes the replaced branch and
+leaves the status at `TextureAlpha::Any`. Believing it threw out the entire city - 0 casters, 58 of
+58 blendable draws rejected, no shadows anywhere. That is worth remembering as a shape: a flag that
+is correct for the emulator's own purposes can be systematically wrong for yours, and the way it
+fails is silent.
+
+So `TextureIsSolid()` asks the GAME's texture instead, which is also the better question - whether
+a palm leaf is a cut-out is a fact about VCS, not about which pack is installed. It scans level 0
+for texels below half alpha (5551, 4444, 8888, and CLUT4/8 through the palette entries the indices
+actually use), calls it a cut-out past 2% - an antialiased edge is not a hole - and caches the
+answer per texture, so it costs one scan each and a hash lookup per draw. Swizzling does not matter
+to a scan that only counts.
+
+Alpha-*tested* draws get the same question and their own reject reason. The result is that foliage
+casts nothing rather than casting a box, which is the honest outcome until the depth pass can carry
+a texture; cut-out shadows are the obvious next step and need a draw call per texture.
+
+**3. The vanilla blob shadow was still there, so everything that moves had two.**
+
+The textures it uses are **learned, not named**. A flat, small, alpha-blended quad that writes no
+depth and lies directly underneath something the capture accepted is that object's shadow,
+whatever texture it is using today - and the addresses move, so naming them would not have worked
+anyway. The test is positional on purpose: the render state a blob uses is the render state a decal
+uses, and a tyre mark on open road has nothing above it.
+
+A texture is not believed on one sighting. Eight are needed before it goes in the table, because
+without that count the learner filled all eight of its slots within seconds of the world loading -
+which is what over-learning looks like from outside. With the count it settles at around ten
+textures on an ordinary street and drops five or six draws a frame.
+
+`ShouldSkipDraw` re-checks the shape as well as the texture before dropping anything, so a learned
+texture that also turns up in through mode - the HUD is not ours to edit - is left alone.
+
 #### Known, and deliberately left
 
-**The vanilla blob shadow is still drawn.** The game paints a soft dark oval under peds and
-vehicles, and with this on they have two shadows. It is rejected as a CASTER (depth write off) but
-nothing stops the game drawing it. Suppressing it means identifying that draw, and the render state
-it uses is the same state a dozen harmless things use - the same class of hunt the caster filter
-already went through once. It is the obvious next piece of work here.
+**Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which
+needs UVs in the capture and a draw call per texture rather than one for the whole cascade. The
+image views are reachable - `TextureCacheVulkan::GetVulkanHandles` hands them out at capture time
+and thin3d has `BindNativeTexture` - so this is a known road rather than an open question, but it
+makes the pass Vulkan-specific and it is not free.
+
+**The sun may not turn.** See above: every sample read the same direction. If it is fixed, shadows
+fade through the day rather than sweeping, and giving them a real solar direction would mean
+building one rather than reading it.
 
 ### Two traps in patching this emulator's code
 

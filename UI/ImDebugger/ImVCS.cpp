@@ -2188,6 +2188,19 @@ void ImVCSWindow::DrawShadows() {
 		// pixel of it - see nearCameraCutoff.
 		ImGui::TextColored(cap.nearCameraDraws > 0 ? kGoodColor : kUnsetColor,
 			"dropped for sitting on the camera: %d", cap.nearCameraDraws);
+
+		// The caster cache. The game culls to its own frustum, so without this a building just
+		// off the edge of the screen stops casting and its shadow blinks out of the road.
+		ImGui::TextColored(cap.cachedDraws > 0 ? kGoodColor : kUnsetColor,
+			"remembered: %d entries, %d re-submitted this frame (%d verts, %.0f KB held)",
+			cap.cachedEntries, cap.cachedDraws, cap.cachedVertices, cap.cachedBytes / 1024.0);
+
+		// The game's own blob shadows. Learned textures at zero while blobs are on screen means
+		// the "sits under something" test never fired.
+		ImGui::TextColored(cap.blobTextures > 0 ? kGoodColor : kUnsetColor,
+			"blob shadows: %d texture%s learned, %d draw%s dropped this frame",
+			cap.blobTextures, cap.blobTextures == 1 ? "" : "s",
+			cap.blobDraws, cap.blobDraws == 1 ? "" : "s");
 		if (cap.vertices > 0 && cap.verticesInCascade >= 0) {
 			const float pctIn = 100.0f * (float)cap.verticesInCascade / (float)cap.vertices;
 			ImGui::TextColored(cap.verticesInCascade > 0 ? kGoodColor : kBadColor,
@@ -2262,6 +2275,16 @@ void ImVCSWindow::DrawShadows() {
 	}
 	ImGui::SliderInt("PCF radius", &set.pcfRadius, 0, 4, "%d texels");
 	ImGui::SliderFloat("Edge fade", &set.edgeFade, 0.0f, 0.5f, "%.2f");
+	ImGui::Checkbox("Remember casters the game stops drawing", &set.cacheCasters);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("The game only draws what its own camera can see, so without this a caster stops casting the moment it leaves the view and its shadow blinks out of the road. Costs memory, not frames - the cache only ever feeds the depth pass.");
+	}
+	ImGui::SliderFloat("Remember for", &set.cacheHoldSeconds, 0.5f, 20.0f, "%.1f s");
+	ImGui::SliderFloat("Remember within", &set.cacheRadius, 50.0f, 400.0f, "%.0f units");
+	ImGui::Checkbox("Hide the game's own blob shadows", &set.hideBlobShadows);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Otherwise everything that moves has two shadows. The textures are learned from flat quads that sit under something, not named, so a decal on open road is left alone.");
+	}
 	ImGui::SliderFloat("Near camera cutoff", &set.nearCameraCutoff, 0.0f, 6.0f, "%.1f units");
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Geometry entirely within this of the camera is thrown away. It is the game's full-screen colour filter, which is 3D geometry 0.6 units across sitting on the camera and covers every pixel of the mask if it gets through. The camera sits 4.6 units behind the player, so there is room.");
