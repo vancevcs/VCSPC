@@ -1595,7 +1595,11 @@ void VKContext::DrawIndexedUP(const void *vdata, int vertexCount, const void *id
 	uint32_t ibBindOffset;
 	uint8_t *idataPtr = push_->Allocate(idataSize, 4, &vulkanIbuf, &ibBindOffset);
 	_assert_(idataPtr != nullptr);
-	memcpy(idataPtr, vdata, idataSize);
+	// idata, not vdata. Copying the vertices into the index buffer fills it with whatever the
+	// first bytes of the vertex data happen to be, which draws the mesh as an arbitrary set of
+	// triangles between real vertices - so it renders SOMETHING, plausibly shaped, and nothing
+	// about it is right. Nothing in PPSSPP itself calls DrawIndexedUP, which is how it survived.
+	memcpy(idataPtr, idata, idataSize);
 
 	uint32_t ubo_offset = (uint32_t)curPipeline_->PushUBO(push_, vulkan_, &vulkanUBObuf);
 
