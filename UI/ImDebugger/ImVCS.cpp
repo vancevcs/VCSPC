@@ -1974,7 +1974,9 @@ void ImVCSWindow::DrawShadows() {
 	// shadow projection needs another source - most likely the game clock, which would mean an
 	// address hunt and a hand-built solar model instead of a value the game already computes.
 	if (s.sunValid) {
-		ImGui::TextColored(kGoodColor, "sun: directional light %d", s.sunChannel);
+		ImGui::TextColored(kGoodColor, "%s: directional light %d",
+			s.sunIsMoon ? "moon (the game's light, mirrored above the horizon)" : "sun",
+			s.sunChannel);
 		ImGui::Text("   towards light: %7.3f %7.3f %7.3f", s.sunDir[0], s.sunDir[1], s.sunDir[2]);
 		ImGui::Text("   diffuse:       %7.3f %7.3f %7.3f", s.sunDiffuse[0], s.sunDiffuse[1], s.sunDiffuse[2]);
 	} else {
@@ -2192,8 +2194,16 @@ void ImVCSWindow::DrawShadows() {
 		// The caster cache. The game culls to its own frustum, so without this a building just
 		// off the edge of the screen stops casting and its shadow blinks out of the road.
 		ImGui::TextColored(cap.cachedDraws > 0 ? kGoodColor : kUnsetColor,
-			"remembered: %d entries, %d re-submitted this frame (%d verts, %.0f KB held)",
+			"remembered: %d cells, %d re-submitted this frame (%d verts, %.0f KB held)",
 			cap.cachedEntries, cap.cachedDraws, cap.cachedVertices, cap.cachedBytes / 1024.0);
+
+		// The back-face split. Nearly all of one and none of the other means the winding
+		// convention is upside down, which reads as acne rather than as a missing shadow.
+		const int facing = s.trianglesFacingAway + s.trianglesFacingLight;
+		ImGui::TextColored(s.trianglesFacingAway > 0 ? kGoodColor : kBadColor,
+			"triangles: %d cast (turned from the light), %d do not (%.0f%% cast)",
+			s.trianglesFacingAway, s.trianglesFacingLight,
+			facing ? 100.0f * s.trianglesFacingAway / facing : 0.0f);
 
 		// The game's own blob shadows. Learned textures at zero while blobs are on screen means
 		// the "sits under something" test never fired.
@@ -2275,6 +2285,18 @@ void ImVCSWindow::DrawShadows() {
 	}
 	ImGui::SliderInt("PCF radius", &set.pcfRadius, 0, 4, "%d texels");
 	ImGui::SliderFloat("Edge fade", &set.edgeFade, 0.0f, 0.5f, "%.2f");
+	ImGui::Checkbox("Cast only faces turned from the light", &set.castBackFacesOnly);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Storing the far side of every object rather than the near one. This is what removed the stripes across the road: both passes read the same vertices, so a surface is compared against itself and no bias small enough to keep shadows attached is reliably bigger than the texel grid.");
+	}
+	ImGui::Checkbox("Flip caster winding", &set.flipCasterWinding);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("If the row above is on and the acne got WORSE, the map is holding the near side of everything and this is the fix.");
+	}
+	ImGui::SliderFloat("Moon strength", &set.moonStrength, 0.0f, 1.0f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("After dark the game's own light is below the horizon and casts nothing, so it is mirrored back above it. Zero turns night shadows off.");
+	}
 	ImGui::Checkbox("Remember casters the game stops drawing", &set.cacheCasters);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("The game only draws what its own camera can see, so without this a caster stops casting the moment it leaves the view and its shadow blinks out of the road. Costs memory, not frames - the cache only ever feeds the depth pass.");

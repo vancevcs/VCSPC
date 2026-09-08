@@ -3701,11 +3701,10 @@ game clock, no solar model. Two things about it:
 - **The shadow's strength is multiplied by that light's own luminance**, so shadows thin out
   towards dusk and are gone at night without anything here having to know the time.
 
-**Not established: whether the direction turns with the clock.** Every sample logged this session,
-between 18:34 and 19:10, read `(0.50, 0.50, 0.71)` - the same vector. That may mean the game holds
-a fixed key-light direction and only moves its colour through the day, which would mean shadows
-fade rather than sweep. The Shadows tab lists all four channels with their directions and is where
-to check it; do not write it down as fact until someone has.
+**It does turn with the clock** - `(0.50, 0.50, 0.71)` early on, `(-0.39, 0.60, 0.70)` an
+afternoon later. An earlier version of this note said the opposite, on the strength of half a dozen
+samples that all happened to fall within half an hour of game time. A constant is not established
+by measuring it repeatedly at the same moment.
 
 #### Three things the first working version got wrong
 
@@ -3790,6 +3789,90 @@ textures on an ordinary street and drops five or six draws a frame.
 `ShouldSkipDraw` re-checks the shape as well as the texture before dropping anything, so a learned
 texture that also turns up in through mode - the HUD is not ours to edit - is left alone.
 
+#### And six more from the next play session
+
+**Stripes across the road.** Shadow acne, and the bias was never going to fix it. Both passes read
+the *same* captured vertices, so a surface is compared against ITSELF and the only error is where
+the shadow map's texel grid falls - and no bias small enough to keep shadows attached to their
+casters is reliably bigger than that.
+
+The answer is the textbook one: **only faces turned away from the light go into the depth map**.
+Storing the far side of every object puts a whole object's thickness between the caster and the
+receiver, which no rasterisation difference can cross. It is done on the CPU during the capture,
+per triangle, against the light direction the frame has seen so far - the light moves far too
+slowly for last frame's to decide the wrong side. Winding comes from `gstate.getCullMode()`,
+because PPSSPP culls with the game's own cull mode rather than normalising it away, so a draw with
+mode 1 has the opposite front face and a facing test that ignored that would be right half the
+time. `flipCasterWinding` is there if the whole convention turns out inverted, which reads as
+worse acne rather than as missing shadows.
+
+It also halves what the depth pass draws. Measured on an ordinary street: 28k triangles cast,
+127k do not - and most of that difference is the ground, which faces the sky and so never casts
+onto itself. That is the acne, gone by construction rather than by tuning.
+
+**Shadows still vanished when the caster left the view, and the cache was the reason.** It held
+almost nothing while moving: fifteen hits against fourteen hundred inserts a frame, *standing
+still*. Two findings, in order:
+
+- The key was `(vertexAddr, world matrix)`, and **VCS feeds its geometry through a per-frame
+  scratch buffer** - the same wall is at a different address every frame, so every key was new.
+- Keying on the geometry instead - vertex count, triangle count, bounding box - did no better,
+  and the reason is the more useful one: **`AddCaster` sees one FLUSH, not one object.** PPSSPP
+  merges draw calls until some piece of state changes, and where those merges fall moves from
+  frame to frame even when the scene is identical. No key built out of a flush can repeat.
+
+So the cache remembers **places, not draws**: a 32-unit grid, and whatever was captured inside a
+cell replaces whatever was there before. A grid does not care how draws are grouped. It is also
+simpler than what it replaced - no model identity, no placement keys, no "did this move" rule,
+because a cell that is drawn is simply overwritten. Now carrying ~60 cells and ~17k vertices the
+game is no longer drawing, at no cost in frame rate.
+
+Two things make it safe. Skinned meshes are never remembered, because their vertices arrive
+already in pose and a remembered copy is a person frozen mid-stride. And the geometry is stored in
+the space the GE is fed, which was worth checking rather than assuming: a 3609-vertex building
+reported the same bounding box corner to four decimal places across several seconds of play, and
+the offset between that space and the game's own coordinates measured a constant (-287, 216). A
+jump in the recovered camera bigger than any camera could move in a frame still clears the whole
+cache, for the rebase or the load that would invalidate all of it at once.
+
+**Shadows arriving late while driving.** The cascade was 50 units with its centre 25 ahead, which
+is fine on foot and about a second short in a car. 70 and 40 now, with the cache reaching 220 - it
+has to hold what the cascade will want next, not what it wants now.
+
+**Palm leaves cast their bounding boxes** and **the vanilla blob shadow was still there** - both
+covered in the section above; they were reported in the same session.
+
+**No shadows at all after dark.** Correct, and not what anyone wants: the game's brightest
+directional light is genuinely below the horizon at night, and a light below the horizon casts
+nothing. It is mirrored back above it instead - which is roughly where the moon is - lifted to a
+plausible elevation if mirroring alone leaves it grazing, and scaled by `moonStrength`. The
+impostor channel that the horizon test used to catch is now named directly instead: a channel at
+exactly `(1, 0, 0)` is what one holds when nobody has set it, and no real solar or lunar direction
+lands on an axis.
+
+This also corrected the note above about the sun not turning. It does: sampled across an afternoon
+it moved from `(0.50, 0.50, 0.71)` to `(-0.39, 0.60, 0.70)`. The earlier samples all read the same
+because they were all taken within half an hour of game time.
+
+**Microstuttering while travelling.** Two causes, both from work that arrives in bursts rather
+than steadily:
+
+- **Texture alpha scans.** A 256x256 32-bit texture is a quarter of a megabyte to read, and new
+  ones arrive in clumps as the streamer works. Two a frame now; a texture that has not been
+  scanned yet is treated as solid, so the worst a delay costs is one frame of a leaf quad casting
+  its box.
+- **The capture buffers growing a piece at a time.** They settle after a few frames and then stop
+  allocating, but the first frames of a new area reallocate a megabyte at a time - which is a
+  hitch exactly when the world is streaming. Reserved up front.
+
+**One bug worth recording for its shape rather than its cause.** `Settings` is initialised
+positionally, three new fields went in at the top of the initialiser and in the middle of the
+struct, and the compiler had nothing to say: `cacheHoldSeconds` took a `bool`, became zero, and the
+cache expired every frame. Every count in the panel stayed plausible - cells held, geometry
+captured, frame rate fine - because the only wrong number was one nobody was printing. Positional
+initialisers for a struct that is still growing are a trap; the order is now called out in a
+comment at the top of the list.
+
 #### Known, and deliberately left
 
 **Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which
@@ -3798,9 +3881,8 @@ image views are reachable - `TextureCacheVulkan::GetVulkanHandles` hands them ou
 and thin3d has `BindNativeTexture` - so this is a known road rather than an open question, but it
 makes the pass Vulkan-specific and it is not free.
 
-**The sun may not turn.** See above: every sample read the same direction. If it is fixed, shadows
-fade through the day rather than sweeping, and giving them a real solar direction would mean
-building one rather than reading it.
+**The moon is the sun's light mirrored, not a real lunar position.** It puts night shadows
+somewhere plausible rather than somewhere correct.
 
 ### Two traps in patching this emulator's code
 

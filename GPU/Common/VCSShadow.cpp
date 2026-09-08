@@ -51,22 +51,30 @@ static const float kMinSunElevation = 0.05f;
 
 static ShadowView s_view;
 static Settings s_settings = {
-	50.0f,    // cascadeRadius, world units. GTA is roughly one unit to the metre, so this is a
-	          // couple of blocks around the player - enough that the buildings casting onto the
-	          // street are inside it, which is the shot this is for.
-	25.0f,    // centreDistance ahead of the camera
-	2048,     // mapSize. 50 units across 2048 texels is about 5cm a texel.
+	// Designated by position, so the ORDER HERE MUST MATCH THE STRUCT. It did not, once, and the
+	// symptom was not a compile error: cacheHoldSeconds took a bool and the cache expired every
+	// frame while every count in the panel looked healthy.
+	70.0f,    // cascadeRadius, world units. GTA is roughly one unit to the metre, so this is a
+	          // couple of blocks around the player. It was 50, which is fine on foot and too
+	          // close in a car: shadows arrived a second before you reached them.
+	40.0f,    // centreDistance ahead of the camera - the faster you travel, the further ahead
+	          // the shadows have to already exist
+	2048,     // mapSize. 70 units across 2048 texels is about 7cm a texel.
 	true,     // forwardIsNegativeZ
 	1.0f,     // maskScale - the game's own render resolution
-	0.0015f,  // depthBias
-	2.0f,     // slopeBias
+	0.0008f,  // depthBias - small, because the back-face rule does the work a bias used to
+	1.5f,     // slopeBias
 	1,        // pcfRadius
 	0.15f,    // edgeFade
 	0.7f,     // strength
 	{ 0.35f, 0.38f, 0.48f },  // tint - blue, because what fills a shadow outdoors is the sky
 	true,     // cacheCasters
-	4.0f,     // cacheHoldSeconds
-	150.0f,   // cacheRadius
+	8.0f,     // cacheHoldSeconds
+	220.0f,   // cacheRadius - has to reach past the cascade, which is 70 with its centre 40
+	          // ahead, so a caster 180 units away can still be inside it a moment later
+	true,     // castBackFacesOnly
+	false,    // flipCasterWinding
+	0.35f,    // moonStrength
 	true,     // hideBlobShadows
 	2.0f,     // nearCameraCutoff
 	400.0f,   // maxCasterSpan
@@ -75,6 +83,7 @@ static Settings s_settings = {
 	false,    // showMask
 	false,    // countCascadeCoverage
 };
+
 
 // gstate's view matrix as of the first caster of the frame. Captured rather than read at end of
 // frame because the game leaves whatever matrix the last draw used in place, and the last draw is
@@ -103,6 +112,13 @@ static ViewportCapture s_frameViewport;
 // The camera, recovered as soon as the view matrix is captured rather than at the end of the
 // frame, because the capture itself has to test against it - see nearCameraCutoff.
 static float s_frameCameraPos[3];
+
+// The direction light travels, as far as the capture knows it so far. The back-face test needs it
+// while draws are arriving, and the projection is not built until the frame turns to 2D - so this
+// is this frame's sun once one has been seen and last frame's until then. It moves slowly enough
+// that the difference cannot decide which side of a triangle faces the light.
+static float s_captureLightDir[3];
+static bool s_haveCaptureLightDir;
 static float s_lastCameraPos[3];
 static bool s_haveLastCameraPos;
 
@@ -140,34 +156,9 @@ static bool s_frameComposited;
 // needs a clock, and a stalled emulator does not silently expire the whole cache.
 static int s_frameIndex;
 
-struct Vec3Key {
-	float v[3];
-};
-
-// One placement of one model, kept so it can go on casting after the game stops drawing it.
-//
-// Positions are already in the space the GE is fed, which is the space the projection lives in,
-// so a cached entry needs no transform to be re-submitted - it is appended to the depth pass
-// exactly as it was captured.
-struct CacheEntry {
-	std::vector<float> pos;
-	std::vector<u16> idx;
-	u32 modelKey;        // the model, shared by every instance of it
-	float centre[3];
-	float radius;
-	int lastSeenFrame;
-	int seenCount;       // a placement has to hold still for two frames before it is kept
-};
-
-// Keyed on the placement: the model plus the matrix that puts it somewhere. A building's key is
-// the same every frame; a moving car's is different every frame, which is why one gets cached and
-// the other never does.
-static std::unordered_map<u64, CacheEntry> s_cache;
-
-// Where each model was drawn this frame, so a cached placement can be told apart from a model
-// that has simply moved. Same model, nearly the same place, different matrix means it moved; the
-// same model a street away is the second copy of a building and says nothing.
-static std::unordered_map<u32, std::vector<Vec3Key>> s_placementsThisFrame;
+// Texture alpha scans allowed this frame - see kTexScansPerFrame, far below, for why there is a
+// budget at all. Declared up here because BeginFrame resets it.
+static int s_texScansThisFrame;
 
 // The textures the game's own blob shadows are drawn with, learned rather than named.
 //
@@ -195,9 +186,12 @@ struct ObjectBounds {
 };
 static std::vector<ObjectBounds> s_objectBounds;
 
-// Scratch for one draw, so a rejected draw costs no growth in the capture buffers.
+// Scratch for one draw, so a rejected draw costs no growth in the capture buffers. Two index
+// lists: everything, which receives, and the half turned away from the light, which casts.
 static std::vector<float> s_drawPos;
 static std::vector<u16> s_drawIdx;
+static std::vector<u16> s_drawCastIdx;
+static bool s_drawFlipWinding;
 
 // A frame that wants more than this is not a frame we can help. At 12 bytes a vertex this is
 // about 12 MB of positions, against a measured ~38k vertices a frame - roughly 25x headroom, so
@@ -449,9 +443,9 @@ static void ComputeShadowView(const FrameStats &stats) {
 // indices stay in range. Shared by the live capture and by the caster cache, which is the whole
 // reason it is a function: a remembered caster has to enter the depth pass by exactly the same
 // road a fresh one does.
-static void AppendGeometry(const float *pos, int vertCount, const u16 *idx, int idxCount,
-	bool casts, bool receives) {
-	if (vertCount <= 0 || idxCount < 3) {
+static void AppendGeometry(const float *pos, int vertCount, const u16 *castIdx, int castCount,
+	const u16 *recvIdx, int recvCount) {
+	if (vertCount <= 0 || (castCount < 3 && recvCount < 3)) {
 		return;
 	}
 	if (s_positions.size() / 3 + (size_t)vertCount > kMaxCapturedVertices) {
@@ -480,14 +474,11 @@ static void AppendGeometry(const float *pos, int vertCount, const u16 *idx, int 
 	const u16 base = (u16)batch.vertexCount;
 	s_positions.insert(s_positions.end(), pos, pos + (size_t)vertCount * 3);
 
-	for (int i = 0; i < idxCount; i++) {
-		const u16 v = (u16)(base + idx[i]);
-		if (receives) {
-			s_receiverIndices.push_back(v);
-		}
-		if (casts) {
-			s_casterIndices.push_back(v);
-		}
+	for (int i = 0; i < recvCount; i++) {
+		s_receiverIndices.push_back((u16)(base + recvIdx[i]));
+	}
+	for (int i = 0; i < castCount; i++) {
+		s_casterIndices.push_back((u16)(base + castIdx[i]));
 	}
 
 	batch.vertexCount += vertCount;
@@ -503,6 +494,54 @@ static void AppendGeometry(const float *pos, int vertCount, const u16 *idx, int 
 		+ (s_casterIndices.size() + s_receiverIndices.size()) * sizeof(u16);
 }
 
+// One triangle of the draw being baked, in the winding the game asked for, split into the two
+// streams by which way it faces the light.
+//
+// The facing test is the whole answer to self-shadowing here, and it is worth more than a bias
+// because both passes read these same vertices: a surface is compared against ITSELF, so the only
+// error is where the shadow map's texel grid happens to fall, and no bias small enough to keep
+// shadows attached is reliably bigger than that. Storing the far side of every object instead puts
+// a whole object's thickness between the two. It also halves what the depth pass draws.
+static inline void EmitTriangle(u16 a, u16 b, u16 c) {
+	if (s_drawFlipWinding) {
+		const u16 t = b;
+		b = c;
+		c = t;
+	}
+	s_drawIdx.push_back(a);
+	s_drawIdx.push_back(b);
+	s_drawIdx.push_back(c);
+
+	if (!s_settings.castBackFacesOnly || !s_haveCaptureLightDir) {
+		s_drawCastIdx.push_back(a);
+		s_drawCastIdx.push_back(b);
+		s_drawCastIdx.push_back(c);
+		return;
+	}
+
+	const float *p0 = s_drawPos.data() + (size_t)a * 3;
+	const float *p1 = s_drawPos.data() + (size_t)b * 3;
+	const float *p2 = s_drawPos.data() + (size_t)c * 3;
+	const float e0[3] = { p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2] };
+	const float e1[3] = { p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2] };
+	const float n[3] = {
+		e0[1] * e1[2] - e0[2] * e1[1],
+		e0[2] * e1[0] - e0[0] * e1[2],
+		e0[0] * e1[1] - e0[1] * e1[0],
+	};
+	// Light travels along s_captureLightDir, so a face whose normal points the same way is the
+	// far side of whatever it belongs to. Degenerate triangles fall out on the >= and cost
+	// nothing either way.
+	if (n[0] * s_captureLightDir[0] + n[1] * s_captureLightDir[1] + n[2] * s_captureLightDir[2] > 0.0f) {
+		s_drawCastIdx.push_back(a);
+		s_drawCastIdx.push_back(b);
+		s_drawCastIdx.push_back(c);
+		s_current.trianglesFacingAway++;
+	} else {
+		s_current.trianglesFacingLight++;
+	}
+}
+
 // Transforms a draw's decoded vertices into `s_drawPos` and expands its topology into
 // `s_drawIdx` as a plain triangle list.
 //
@@ -515,6 +554,7 @@ static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices,
 	float drawMin[3], float drawMax[3]) {
 	s_drawPos.resize((size_t)numDecodedVerts * 3);
 	s_drawIdx.clear();
+	s_drawCastIdx.clear();
 
 	for (int c = 0; c < 3; c++) {
 		drawMin[c] = 1e30f;
@@ -542,12 +582,15 @@ static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices,
 	const auto index = [&](int i) -> u16 {
 		return (u16)(indices ? indices[i] : i);
 	};
+
+	// The winding the game asked for. PPSSPP culls with the game's own cull mode rather than
+	// normalising it away, so a draw with mode 1 has the opposite front face from one with mode
+	// 0, and a facing test that ignored that would be right half the time.
+	s_drawFlipWinding = (gstate.getCullMode() != 0) != s_settings.flipCasterWinding;
 	switch (prim) {
 	case GE_PRIM_TRIANGLES:
 		for (int i = 0; i + 2 < indexCount; i += 3) {
-			s_drawIdx.push_back(index(i));
-			s_drawIdx.push_back(index(i + 1));
-			s_drawIdx.push_back(index(i + 2));
+			EmitTriangle(index(i), index(i + 1), index(i + 2));
 		}
 		break;
 	case GE_PRIM_TRIANGLE_STRIP:
@@ -555,20 +598,15 @@ static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices,
 		// because the depth pass culls faces to halve the acne problem.
 		for (int i = 0; i + 2 < indexCount; i++) {
 			if (i & 1) {
-				s_drawIdx.push_back(index(i + 1));
-				s_drawIdx.push_back(index(i));
+				EmitTriangle(index(i + 1), index(i), index(i + 2));
 			} else {
-				s_drawIdx.push_back(index(i));
-				s_drawIdx.push_back(index(i + 1));
+				EmitTriangle(index(i), index(i + 1), index(i + 2));
 			}
-			s_drawIdx.push_back(index(i + 2));
 		}
 		break;
 	case GE_PRIM_TRIANGLE_FAN:
 		for (int i = 1; i + 1 < indexCount; i++) {
-			s_drawIdx.push_back(index(0));
-			s_drawIdx.push_back(index(i));
-			s_drawIdx.push_back(index(i + 1));
+			EmitTriangle(index(0), index(i), index(i + 1));
 		}
 		break;
 	default:
@@ -576,24 +614,155 @@ static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices,
 	}
 }
 
-// The model's identity, and this placement of it. Every instance of a building shares the first
-// - the vertex data is one copy in PSP memory - and the matrix is what tells them apart.
-static u32 ModelKey(u32 vertexAddr, int numDecodedVerts) {
-	return vertexAddr * 2654435761u + (u32)numDecodedVerts;
+// --- remembering casters the game has stopped drawing --------------------------------------
+//
+// The game culls to its own camera frustum, so a building a few degrees off the edge of the
+// screen is not drawn, is not captured, and stops casting the shadow that was lying across the
+// road in front of you. What is remembered here is re-submitted to the DEPTH pass alone - a
+// receiver has to be on screen to be shaded.
+//
+// It remembers PLACES, not draws, and that is the second design. The first kept one entry per
+// draw, keyed on what the draw was and where: it looked right and cached nothing, measured at
+// fifteen hits against fourteen hundred inserts a frame while standing still. The reason is that
+// `AddCaster` sees one FLUSH rather than one object - PPSSPP merges draw calls until some piece
+// of state changes - and where those merges fall moves from frame to frame even when the scene is
+// identical. So no key built out of a flush can repeat, however stable the world is.
+//
+// A grid does not care. Whatever was captured inside a cell replaces whatever was there before,
+// and a cell nobody has seen lately keeps what it had. The geometry is already in world space, and
+// a static object holds still there to four decimal places - measured, on a 3609-vertex building
+// across several seconds - so a remembered cell needs no transform to be correct.
+
+static const float kBucketSize = 32.0f;
+static const int kMaxBucketVertices = 60000;   // indices into a bucket are 16-bit
+
+struct Bucket {
+	std::vector<float> pos;
+	std::vector<u16> idx;
+	std::vector<float> pendingPos;
+	std::vector<u16> pendingIdx;
+	int lastSeenFrame;
+	int touchedFrame;
+	float centre[3];
+};
+
+static std::unordered_map<u64, Bucket> s_buckets;
+
+static u64 BucketKey(const float centre[3]) {
+	const s64 x = (s64)floorf(centre[0] / kBucketSize);
+	const s64 y = (s64)floorf(centre[1] / kBucketSize);
+	const s64 z = (s64)floorf(centre[2] / kBucketSize);
+	return ((u64)(x & 0x1FFFFF) << 42) | ((u64)(y & 0x1FFFFF) << 21) | (u64)(z & 0x1FFFFF);
 }
 
-static u64 PlacementKey(u32 modelKey, const float world[12]) {
-	u32 h = modelKey;
-	for (int i = 0; i < 12; i++) {
-		u32 bits;
-		memcpy(&bits, &world[i], sizeof(bits));
-		h = h * 16777619u ^ bits;
+// Adds this draw's casting triangles to the cell it sits in. Whole draws go to the cell of their
+// centre rather than being split across cells - a wall that straddles a boundary is remembered by
+// one side of it, which is all the accuracy a hundred-unit cascade can use.
+static void RememberCaster(const float drawMin[3], const float drawMax[3], int vertCount) {
+	if (!s_settings.cacheCasters || s_drawCastIdx.size() < 3) {
+		return;
 	}
-	return ((u64)modelKey << 32) | h;
+	float centre[3];
+	for (int c = 0; c < 3; c++) {
+		centre[c] = (drawMin[c] + drawMax[c]) * 0.5f;
+	}
+
+	Bucket &b = s_buckets[BucketKey(centre)];
+	if (b.touchedFrame != s_frameIndex) {
+		b.touchedFrame = s_frameIndex;
+		b.pendingPos.clear();
+		b.pendingIdx.clear();
+		for (int c = 0; c < 3; c++) {
+			b.centre[c] = floorf(centre[c] / kBucketSize) * kBucketSize + kBucketSize * 0.5f;
+		}
+	}
+	const size_t base = b.pendingPos.size() / 3;
+	if (base + (size_t)vertCount > (size_t)kMaxBucketVertices) {
+		return;
+	}
+	b.pendingPos.insert(b.pendingPos.end(), s_drawPos.begin(), s_drawPos.begin() + (size_t)vertCount * 3);
+	for (u16 i : s_drawCastIdx) {
+		b.pendingIdx.push_back((u16)(base + i));
+	}
+}
+
+// Promotes this frame's cells over what they held, re-submits the cells nobody drew, and drops
+// what has gone stale or out of range. Runs once, immediately before the passes.
+static void SubmitCachedCasters() {
+	s_capture.cachedDraws = 0;
+	s_capture.cachedVertices = 0;
+	s_capture.cachedBytes = 0;
+	if (!s_settings.cacheCasters || !s_haveViewMatrix) {
+		s_capture.cachedEntries = (int)s_buckets.size();
+		return;
+	}
+
+	const int holdFrames = (int)(s_settings.cacheHoldSeconds * 60.0f);
+	const float radius = s_settings.cacheRadius;
+
+	for (auto it = s_buckets.begin(); it != s_buckets.end(); ) {
+		Bucket &b = it->second;
+
+		if (b.touchedFrame == s_frameIndex) {
+			// Drawn by the game this frame, so it is already in the streams. What was captured
+			// replaces what was remembered, wholesale - which is the property that makes a grid
+			// immune to the game re-batching its draws.
+			b.pos.swap(b.pendingPos);
+			b.idx.swap(b.pendingIdx);
+			b.pendingPos.clear();
+			b.pendingIdx.clear();
+			b.lastSeenFrame = s_frameIndex;
+			s_capture.cachedBytes += b.pos.size() * sizeof(float) + b.idx.size() * sizeof(u16);
+			++it;
+			continue;
+		}
+
+		float distSq = 0.0f;
+		for (int c = 0; c < 3; c++) {
+			const float d = b.centre[c] - s_frameCameraPos[c];
+			distSq += d * d;
+		}
+		if (distSq > radius * radius || s_frameIndex - b.lastSeenFrame > holdFrames) {
+			it = s_buckets.erase(it);
+			continue;
+		}
+
+		// Kept because it may be needed a moment from now, but only submitted if it can reach the
+		// cascade this frame.
+		bool reaches = true;
+		if (s_view.valid) {
+			float d2 = 0.0f;
+			for (int c = 0; c < 3; c++) {
+				const float d = b.centre[c] - s_view.centre[c];
+				d2 += d * d;
+			}
+			const float reach = s_view.radius * 1.75f + kBucketSize;
+			reaches = d2 < reach * reach;
+		}
+		if (reaches && b.idx.size() >= 3) {
+			AppendGeometry(b.pos.data(), (int)(b.pos.size() / 3), b.idx.data(), (int)b.idx.size(),
+				nullptr, 0);
+			s_capture.cachedDraws++;
+			s_capture.cachedVertices += (int)(b.pos.size() / 3);
+		}
+		s_capture.cachedBytes += b.pos.size() * sizeof(float) + b.idx.size() * sizeof(u16);
+		++it;
+	}
+
+	s_capture.cachedEntries = (int)s_buckets.size();
+
+	// Once per boot, so a build where the cache silently never engages says so in the log rather
+	// than only in a panel the Release build cannot open.
+	static bool s_saidCacheWorks = false;
+	if (!s_saidCacheWorks && s_capture.cachedDraws > 0) {
+		s_saidCacheWorks = true;
+		WARN_LOG(Log::G3D, "VCS: the caster cache is carrying %d cells the game no longer draws (%d held)",
+			s_capture.cachedDraws, s_capture.cachedEntries);
+	}
 }
 
 void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
-	int stride, int posOffset, GEPrimitiveType prim, const float world[12], u32 vertexAddr) {
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12]) {
 	if (numDecodedVerts <= 0 || indexCount < 3 || s_frameComposited) {
 		return;
 	}
@@ -658,155 +827,15 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		s_objectBounds.push_back(b);
 	}
 
-	AppendGeometry(s_drawPos.data(), numDecodedVerts, s_drawIdx.data(), (int)s_drawIdx.size(),
-		casts, true);
+	AppendGeometry(s_drawPos.data(), numDecodedVerts,
+		casts ? s_drawCastIdx.data() : nullptr, casts ? (int)s_drawCastIdx.size() : 0,
+		s_drawIdx.data(), (int)s_drawIdx.size());
 	s_capture.draws++;
 
-	// --- the cache -----------------------------------------------------------------------
-	//
-	// Skinned meshes are peds and never go in: their vertices arrive already in pose, so a
+	// Skinned meshes are peds and never remembered: their vertices arrive already in pose, so a
 	// remembered copy is a person frozen mid-stride.
-	if (!s_settings.cacheCasters || !casts || !s_haveViewMatrix ||
-		(gstate.vertType & GE_VTYPE_WEIGHT_MASK) != GE_VTYPE_WEIGHT_NONE) {
-		return;
-	}
-
-	const u32 modelKey = ModelKey(vertexAddr, numDecodedVerts);
-	const u64 key = PlacementKey(modelKey, world);
-
-	Vec3Key here;
-	for (int c = 0; c < 3; c++) {
-		here.v[c] = (drawMin[c] + drawMax[c]) * 0.5f;
-	}
-	s_placementsThisFrame[modelKey].push_back(here);
-
-	auto it = s_cache.find(key);
-	if (it != s_cache.end()) {
-		it->second.lastSeenFrame = s_frameIndex;
-		it->second.seenCount++;
-		// Kept from the second sighting on, and not before: a one-frame entry is what a moving
-		// object leaves behind, and it is never worth the copy. The copy has to happen here,
-		// while s_drawPos still holds THIS draw.
-		if (it->second.seenCount == 2) {
-			it->second.pos = s_drawPos;
-			it->second.idx = s_drawIdx;
-		}
-		return;
-	}
-
-	// Two consecutive frames before it is kept, which is what a moving object can never manage -
-	// its matrix, and so its key, is different every frame. The first sighting only reserves an
-	// empty slot, so a car driving past costs one map entry and no geometry.
-	CacheEntry entry;
-	entry.modelKey = modelKey;
-	entry.lastSeenFrame = s_frameIndex;
-	entry.seenCount = 1;
-	for (int c = 0; c < 3; c++) {
-		entry.centre[c] = here.v[c];
-	}
-	float radiusSq = 0.0f;
-	for (int c = 0; c < 3; c++) {
-		const float half = (drawMax[c] - drawMin[c]) * 0.5f;
-		radiusSq += half * half;
-	}
-	entry.radius = sqrtf(radiusSq);
-	s_cache[key] = std::move(entry);
-}
-
-// Fills in the geometry of cache entries that have now been seen twice, drops the ones that have
-// gone stale or out of range, and re-submits everything that survived but was not drawn this
-// frame. Runs once, immediately before the passes.
-static void SubmitCachedCasters() {
-	s_capture.cachedDraws = 0;
-	s_capture.cachedVertices = 0;
-	s_capture.cachedBytes = 0;
-	if (!s_settings.cacheCasters || !s_haveViewMatrix) {
-		s_capture.cachedEntries = (int)s_cache.size();
-		return;
-	}
-
-	const int holdFrames = (int)(s_settings.cacheHoldSeconds * 60.0f);
-	const float radius = s_settings.cacheRadius;
-
-	for (auto it = s_cache.begin(); it != s_cache.end(); ) {
-		CacheEntry &e = it->second;
-
-		float distSq = 0.0f;
-		for (int c = 0; c < 3; c++) {
-			const float d = e.centre[c] - s_frameCameraPos[c];
-			distSq += d * d;
-		}
-		const bool inRange = distSq < (radius + e.radius) * (radius + e.radius);
-		const bool stale = s_frameIndex - e.lastSeenFrame > holdFrames;
-		if (!inRange || stale) {
-			it = s_cache.erase(it);
-			continue;
-		}
-
-		if (e.lastSeenFrame == s_frameIndex) {
-			// Drawn by the game this frame, so it is already in the streams.
-			++it;
-			continue;
-		}
-
-		// Not drawn this frame. If the same model IS on screen within a few units of where this
-		// placement was, the thing moved rather than being culled, and the memory of it is a
-		// ghost. A second copy of the same building a street away does not trip this.
-		auto placements = s_placementsThisFrame.find(e.modelKey);
-		if (placements != s_placementsThisFrame.end()) {
-			bool moved = false;
-			for (const Vec3Key &p : placements->second) {
-				float d2 = 0.0f;
-				for (int c = 0; c < 3; c++) {
-					const float d = p.v[c] - e.centre[c];
-					d2 += d * d;
-				}
-				if (d2 < 12.0f * 12.0f) {
-					moved = true;
-					break;
-				}
-			}
-			if (moved) {
-				it = s_cache.erase(it);
-				continue;
-			}
-		}
-
-		// Kept because it may be needed a moment from now, but only SUBMITTED if it can reach the
-		// cascade this frame. The cascade is a hundred units across and the cache holds a hundred
-		// and fifty in every direction, so most of what is remembered is not casting into it.
-		bool reaches = true;
-		if (s_view.valid) {
-			float d2 = 0.0f;
-			for (int c = 0; c < 3; c++) {
-				const float d = e.centre[c] - s_view.centre[c];
-				d2 += d * d;
-			}
-			const float reach = s_view.radius * 1.75f + e.radius;
-			reaches = d2 < reach * reach;
-		}
-		if (reaches && !e.pos.empty()) {
-			AppendGeometry(e.pos.data(), (int)(e.pos.size() / 3), e.idx.data(), (int)e.idx.size(),
-				true, false);
-			s_capture.cachedDraws++;
-			s_capture.cachedVertices += (int)(e.pos.size() / 3);
-		}
-		++it;
-	}
-
-	for (const auto &kv : s_cache) {
-		s_capture.cachedBytes += kv.second.pos.size() * sizeof(float)
-			+ kv.second.idx.size() * sizeof(u16);
-	}
-	s_capture.cachedEntries = (int)s_cache.size();
-
-	// Once per boot, so a build where the cache silently never engages says so in the log rather
-	// than only in a panel the Release build cannot open.
-	static bool s_saidCacheWorks = false;
-	if (!s_saidCacheWorks && s_capture.cachedDraws > 0) {
-		s_saidCacheWorks = true;
-		WARN_LOG(Log::G3D, "VCS: the caster cache is carrying %d draws the game no longer draws (%d entries)",
-			s_capture.cachedDraws, s_capture.cachedEntries);
+	if (casts && (gstate.vertType & GE_VTYPE_WEIGHT_MASK) == GE_VTYPE_WEIGHT_NONE) {
+		RememberCaster(drawMin, drawMax, numDecodedVerts);
 	}
 }
 
@@ -1638,11 +1667,20 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 	// The sun's own brightness carries the strength, so shadows thin out towards dusk and are
 	// gone at night without anything here having to know what time it is.
 	{
-		const float *d = s_current.sunValid ? s_current.sunDiffuse : s_published.sunDiffuse;
+		const bool live = s_current.sunValid;
+		const float *d = live ? s_current.sunDiffuse : s_published.sunDiffuse;
 		float luminance = d[0] * 0.299f + d[1] * 0.587f + d[2] * 0.114f;
 		if (luminance > 1.0f) luminance = 1.0f;
 		if (luminance < 0.0f) luminance = 0.0f;
-		ub.tint[3] = s_settings.strength * luminance;
+		// A moon's light is dim by definition, and the game's night colour is dim with it, so
+		// scaling by luminance alone would leave nothing at all. The floor is what makes night
+		// shadows visible; moonStrength is what keeps them from looking like noon.
+		const bool moon = live ? s_current.sunIsMoon : s_published.sunIsMoon;
+		if (moon) {
+			ub.tint[3] = s_settings.strength * s_settings.moonStrength;
+		} else {
+			ub.tint[3] = s_settings.strength * luminance;
+		}
 	}
 	ub.params[0] = s_settings.showMask ? 1.0f : 0.0f;
 	ub.params[1] = 0.0f;
@@ -1732,8 +1770,7 @@ void Init() {
 	s_haveViewMatrix = false;
 	s_haveLastCameraPos = false;
 	s_frameComposited = false;
-	s_cache.clear();
-	s_placementsThisFrame.clear();
+	s_buckets.clear();
 	s_objectBounds.clear();
 	s_blobTextureCount = 0;
 	s_blobCandidateCount = 0;
@@ -1761,8 +1798,7 @@ void SetEnabled(bool enabled) {
 		s_casterIndices.clear();
 		s_receiverIndices.clear();
 		s_batches.clear();
-		s_cache.clear();
-		s_placementsThisFrame.clear();
+		s_buckets.clear();
 		s_objectBounds.clear();
 		memset(&s_capture, 0, sizeof(s_capture));
 		memset(&s_capturePublished, 0, sizeof(s_capturePublished));
@@ -1790,8 +1826,7 @@ void Shutdown() {
 	s_haveViewMatrix = false;
 	s_haveLastCameraPos = false;
 	s_frameComposited = false;
-	s_cache.clear();
-	s_placementsThisFrame.clear();
+	s_buckets.clear();
 	s_objectBounds.clear();
 	s_blobTextureCount = 0;
 	s_blobCandidateCount = 0;
@@ -1811,6 +1846,11 @@ void BeginFrame(Draw::DrawContext *draw) {
 	s_casterIndices.clear();
 	s_receiverIndices.clear();
 	s_batches.clear();
+	// clear() keeps the storage, and these settle after a few frames - but the first frames of a
+	// scene reallocate a megabyte at a time, which is a hitch exactly when the world is streaming.
+	s_positions.reserve(768 * 1024);
+	s_casterIndices.reserve(768 * 1024);
+	s_receiverIndices.reserve(768 * 1024);
 
 	memset(&s_current, 0, sizeof(s_current));
 	s_sunLuminance = 0.0f;
@@ -1818,7 +1858,7 @@ void BeginFrame(Draw::DrawContext *draw) {
 	s_frameComposited = false;
 	s_frameIndex++;
 	s_objectBounds.clear();
-	s_placementsThisFrame.clear();
+	s_texScansThisFrame = 0;
 	s_capture.blobTextures = s_blobTextureCount;
 }
 
@@ -1880,20 +1920,46 @@ static void NoteLights() {
 			candidate.aboveHorizon = candidate.dir[2] > kMinSunElevation;
 		}
 
-		// The sun is above the horizon. Z is up here, so a light pointing level or below is not
-		// the sun whatever its colour, and taking one produces a shadow map that reads as an
-		// elevation of the city rather than a view of it from the sky. Every genuine sun this has
-		// measured sat between 0.17 and 0.54 in Z; the impostor sat at exactly 0.
-		if (dir[2] * invLength <= kMinSunElevation) {
+		float unit[3] = { dir[0] * invLength, dir[1] * invLength, dir[2] * invLength };
+
+		// An axis-aligned channel at full white is what a channel holds when nobody has set it,
+		// not a light. This used to be caught by the horizon test, which cannot stay - see below -
+		// so it is named directly: no real solar or lunar direction lands on an axis.
+		if (fabsf(unit[0]) > 0.999f || fabsf(unit[1]) > 0.999f || fabsf(unit[2]) > 0.999f) {
 			continue;
+		}
+
+		// Z is up here, and after dark the game's own light is below the horizon - which is
+		// correct for a sun and casts nothing. Refusing it meant no shadows at all for half of
+		// every day, which is a worse answer than the approximate one: mirror it back above the
+		// horizon, where the moon is, and light the night from there at a fraction of the
+		// strength. A light that is merely low keeps its own direction.
+		bool moon = false;
+		if (unit[2] <= kMinSunElevation) {
+			moon = true;
+			unit[2] = fabsf(unit[2]);
+			if (unit[2] < 0.35f) {
+				// Nearly level, so mirroring alone leaves it grazing and every shadow a mile
+				// long. Lift it to something a moon could plausibly be at and renormalise.
+				unit[2] = 0.35f;
+				const float xy = sqrtf(unit[0] * unit[0] + unit[1] * unit[1]);
+				const float want = sqrtf(1.0f - unit[2] * unit[2]);
+				if (xy > 1e-6f) {
+					unit[0] *= want / xy;
+					unit[1] *= want / xy;
+				} else {
+					unit[0] = want;
+				}
+			}
 		}
 
 		s_sunLuminance = luminance;
 		s_current.sunValid = true;
+		s_current.sunIsMoon = moon;
 		s_current.sunChannel = i;
-		s_current.sunDir[0] = dir[0] * invLength;
-		s_current.sunDir[1] = dir[1] * invLength;
-		s_current.sunDir[2] = dir[2] * invLength;
+		s_current.sunDir[0] = unit[0];
+		s_current.sunDir[1] = unit[1];
+		s_current.sunDir[2] = unit[2];
 		s_current.sunDiffuse[0] = r;
 		s_current.sunDiffuse[1] = g;
 		s_current.sunDiffuse[2] = b;
@@ -1901,6 +1967,13 @@ static void NoteLights() {
 
 	if (anyDirectional) {
 		s_current.dirLightDraws++;
+	}
+
+	if (s_current.sunValid) {
+		s_captureLightDir[0] = -s_current.sunDir[0];
+		s_captureLightDir[1] = -s_current.sunDir[1];
+		s_captureLightDir[2] = -s_current.sunDir[2];
+		s_haveCaptureLightDir = true;
 	}
 }
 
@@ -1930,6 +2003,13 @@ struct TexAlphaKey {
 static const float kCutoutFraction = 0.02f;
 
 static std::unordered_map<u64, bool> s_texCutout;
+
+// New textures arrive in bursts as the streamer works, and scanning a 256x256 32-bit texture is a
+// quarter of a megabyte of reads. Doing every new one the frame it appears is a stall you can feel
+// while driving. Two a frame gets through the burst in well under a second, and a texture that has
+// not been scanned yet is treated as solid - so the worst a delay costs is one frame of a leaf
+// quad casting its box, rather than a frame that arrives late.
+static const int kTexScansPerFrame = 2;
 
 inline bool PaletteEntryIsClear(const u8 *clut, u32 index, GEPaletteFormat fmt) {
 	switch (fmt) {
@@ -1972,6 +2052,10 @@ static bool TextureIsSolid() {
 	if (cached != s_texCutout.end()) {
 		return !cached->second;
 	}
+	if (s_texScansThisFrame >= kTexScansPerFrame) {
+		return true;
+	}
+	s_texScansThisFrame++;
 
 	const int texels = bufw * h;
 	int clear = 0;
@@ -2233,7 +2317,7 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 				moved += d * d;
 			}
 			if (moved > 40.0f * 40.0f) {
-				s_cache.clear();
+				s_buckets.clear();
 			}
 		}
 		memcpy(s_lastCameraPos, s_frameCameraPos, sizeof(s_lastCameraPos));

@@ -300,7 +300,7 @@ void DrawEngineVulkan::Flush() {
 			const VCSShadow::Reject reject = VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
 			if (reject == VCSShadow::Reject::None) {
 				VCSShadow::AddCaster(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
-					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix, gstate_c.vertexAddr);
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
 			} else if (reject == VCSShadow::Reject::NoDepthWrite && numDecodedVerts_ <= 64) {
 				// Small, writes no depth: a candidate for the game's own blob shadow. Offered
 				// with its geometry, because where it is is the only thing that separates one
@@ -436,7 +436,7 @@ void DrawEngineVulkan::Flush() {
 			const VCSShadow::Reject reject = VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
 			if (reject == VCSShadow::Reject::None) {
 				VCSShadow::AddCaster(decoded_, numDecodedVerts_, decIndex_,
-					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix, gstate_c.vertexAddr);
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
 			} else if (reject == VCSShadow::Reject::NoDepthWrite && numDecodedVerts_ <= 64) {
 				VCSShadow::NoteGroundQuad(decoded_, numDecodedVerts_, fmt.stride, fmt.posoff,
 					gstate.worldMatrix, gstate.getTextureAddress(0));

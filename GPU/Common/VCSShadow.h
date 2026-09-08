@@ -100,6 +100,14 @@ struct FrameStats {
 	// get them in pose rather than splayed out in bind pose.
 	int castersSkinned;
 
+	// Triangles kept and dropped by the back-face test. Roughly half and half on closed geometry;
+	// a count of nearly zero either way means the winding convention is wrong.
+	int trianglesFacingAway;
+	int trianglesFacingLight;
+
+	// Whether the light this frame is the sun or the mirrored one that stands in for the moon.
+	bool sunIsMoon;
+
 	// Casters carrying vertex normals. PSP world geometry frequently ships without them, and
 	// without normals there is no normal-offset bias, which is the good answer to shadow acne.
 	// This count decides whether milestone 4 can use it or has to fall back to slope-scaled
@@ -274,6 +282,28 @@ struct Settings {
 	// keeps the cache from growing into the whole city as you drive across it.
 	float cacheRadius;
 
+	// Only the faces turned AWAY from the light go into the depth map.
+	//
+	// This is the textbook answer to self-shadowing and it is worth more here than the usual
+	// bias tuning, because the two passes read the same captured vertices: a surface compares
+	// against ITSELF, and the only error is where the shadow map's texel grid falls. Storing the
+	// far side of every object puts a whole object's thickness between the two, which no
+	// rasterisation difference can cross. The stripes across the road were that error.
+	//
+	// It also halves the geometry the depth pass draws, which is free frame time.
+	bool castBackFacesOnly;
+
+	// Which way round the captured winding runs. Wrong, and the map holds the near side of
+	// everything instead of the far side - shadows stay roughly where they should be, because a
+	// silhouette is the same either way, and the acne comes back worse. One run settles it.
+	bool flipCasterWinding;
+
+	// At night the game's brightest directional light is below the horizon, and a light below the
+	// horizon casts nothing. Rather than switch the feature off for half the day, the vector is
+	// mirrored back above the horizon - which is roughly where the moon is - and the shadows it
+	// casts are scaled by this. Zero turns night shadows off.
+	float moonStrength;
+
 	// The game's own blob shadow - a flat alpha-blended quad under peds and vehicles - is not
 	// wanted once there are real ones, or everything that moves has two shadows.
 	//
@@ -408,12 +438,8 @@ const CaptureStats &LastCapture();
 //
 // Safe to call with `indices` null for a non-indexed draw. `numDecodedVerts` is the decoded
 // vertex count for the whole flush, which is what the index buffer indexes into.
-//
-// `vertexAddr` is where the draw's vertices live in PSP memory, and it is the model's identity:
-// every instance of a building shares it, so together with the world matrix it names a placement.
-// That is the key the caster cache is built on.
 void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
-	int stride, int posOffset, GEPrimitiveType prim, const float world[12], u32 vertexAddr);
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12]);
 
 // Offered every draw the caster filter threw out for writing no depth, with its geometry, so the
 // blob-shadow suppressor can see where it is. Cheap by construction - it is only called for small
