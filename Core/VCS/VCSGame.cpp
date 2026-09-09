@@ -29,7 +29,6 @@
 #include "Core/Util/PathUtil.h"
 #include "Core/VCS/VCSCamera.h"
 #include "Core/VCS/VCSCheats.h"
-#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSRoute.h"
@@ -227,7 +226,6 @@ void Shutdown() {
 	FrontEndReset();
 	// Put the game's own instruction back before anything else tears down.
 	RemoveFireHook();
-	RemoveDrawDistanceHook();
 	RemoveClimbSplashHook();
 	VaultReset();
 	RemoveWorldQuery();
@@ -299,10 +297,6 @@ void Tick() {
 	// The map's own cursor: put the game's full-screen cross away while the map is up, and work
 	// out where ours goes. Emu thread, because it patches an instruction and reads the widget.
 	MapCursorTick();
-
-	// How far the world reaches. A one-off hook install; nothing at all once it is in, and
-	// nothing ever if the setting is left at the game's own distance.
-	DrawDistanceTick();
 
 	// The GPS line. RadarTick is the one that matters: it reads the radar's origin, facing and
 	// range, projects the route through the game's own transform and leaves screen-space segments

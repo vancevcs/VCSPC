@@ -32,7 +32,6 @@
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSSettings.h"
 #include "Core/VCS/VCSVault.h"
-#include "Core/VCS/VCSDrawDistance.h"
 #include "GPU/Common/VCSShadow.h"
 
 namespace VCS {
@@ -405,16 +404,6 @@ const std::vector<Option> &Options() {
 			ARRAY_SIZE(kShadowLabels), kVCSShadowsEntities, false, []() {
 				ApplyShadowSetting();
 			});
-
-		// The whole map's draw distance goes through one global float, so this is a single
-		// multiplier rather than a quality ladder - and it is the one setting here that can
-		// cost frames in the GAME rather than in the emulator, because everything it keeps
-		// alive is geometry the game then has to draw. Shadows pay for it twice, since the
-		// depth pass draws the same geometry again.
-		addFloat(OptionPage::Graphics, "DrawDistance", "Draw distance",
-			"How far away the world keeps existing. Higher costs frames, and is what lets "
-			"distant things cast shadows at all.",
-			&GameSettings().drawDistance, 1.0f, kVCSDrawDistanceMax, "%.1fx");
 
 		addBool(OptionPage::Graphics, "ShowFps", "Show FPS",
 			"Draw the frame rate in the corner of the screen.",

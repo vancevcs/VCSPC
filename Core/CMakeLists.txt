@@ -431,7 +431,6 @@ add_library(Core STATIC
 	VCS/VCSAddresses.h
 	VCS/VCSCamera.cpp
 	VCS/VCSCheats.cpp
-	VCS/VCSDrawDistance.cpp
 	VCS/VCSFrontEnd.cpp
 	VCS/VCSRoute.cpp
 	VCS/VCSSaves.cpp
@@ -439,7 +438,6 @@ add_library(Core STATIC
 	VCS/VCSFireHook.cpp
 	VCS/VCSCamera.h
 	VCS/VCSCheats.h
-	VCS/VCSDrawDistance.h
 	VCS/VCSFrontEnd.h
 	VCS/VCSRoute.h
 	VCS/VCSSaveDialog.h

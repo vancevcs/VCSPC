@@ -240,9 +240,6 @@
     <ClCompile Include="VCS\VCSCheats.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
-    <ClCompile Include="VCS\VCSDrawDistance.cpp">
-      <Filter>VCS</Filter>
-    </ClCompile>
     <ClCompile Include="VCS\VCSFrontEnd.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -1576,9 +1573,6 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSCheats.h">
-      <Filter>VCS</Filter>
-    </ClInclude>
-    <ClInclude Include="VCS\VCSDrawDistance.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSFrontEnd.h">

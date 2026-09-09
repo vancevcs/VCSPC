@@ -4083,11 +4083,12 @@ of reasoning about which stage it is.**
 
 **Geometry you have never looked at cannot cast.** The capture only ever sees what the game
 draws, and the cache only remembers places that have been on screen. Walk into a street facing away
-from a building and it casts nothing until you have seen it once. Three mechanisms have now been found,
-decoded and measured - the camera frustum, the streamer's delete-behind pass, and the per-model
-draw distances - and none of the three decides anything. The three sections below are what is ruled
-out; what remains is entity construction, because an entity appears to cache what it needs from its
-model info at the moment it is made.
+from a building and it casts nothing until you have seen it once. FOUR mechanisms have now been
+found, decoded, patched and measured - the camera frustum, the streamer's delete-behind pass, the
+far clip, and the LOD distance multiplier - and not one of them decides anything for the map. What
+is left is that VCS draws whatever the streamer has loaded, so widening the view is a STREAMING
+question and nothing else. See "The LOD multiplier was patched properly" below for the four
+negatives in one table.
 
 **Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which
 needs UVs in the capture and a draw call per texture rather than one for the whole cascade. The
@@ -4420,66 +4421,97 @@ is unmeasured, because nothing in this environment holds still long enough to co
   10:52: a teleport to fixed coordinates does not reproduce, because the player falls to whatever
   ground is there and the clock keeps moving.
 
-So the scale was patched, and what that bought is measured in the section below - which also
-records the sampling recipe that finally made these numbers readable.
+So the scale was patched - twice, because the first hook reached one reader out of three - and the
+section below is what it bought, measured against a savestate rather than a teleport.
 
-### The scale is patched now, and eight times the draw distance buys seven per cent
+### The LOD multiplier was patched properly, and it decides nothing either
 
-`Core/VCS/VCSDrawDistance.{h,cpp}`, the `Draw distance` row on the Graphics page, and a slider on
-the debugger's Shadows tab. The setting is a plain multiplier on `CCamera + 0x7a8`, because that one
-float is what the whole map's draw distance goes through - see the section above for how it was
-found and why nothing else works.
+**Status: built, hooked at the right place this time, measured against a fixed savestate, and
+removed.** The multiplier is real and the patch works; what it governs turned out to be peds and
+vehicles, not the map. That makes it the fourth distance mechanism in this file to be found,
+decoded, verified and shown to be inert, and the four together now say something much more useful
+than any of them said alone - see the verdict at the end.
 
-**The hook is on the READER, not on any of the three sites that write the float.** `0x08aae0ec`
-loads `CCamera + 0x7a8` two instructions after its own entry, so a `REPFLAG_HOOKENTER` replacement
-there writes the scaled value and returns, and the game's own function then reads what we left. That
-cannot be raced by the frame that rebuilds the float, which every write-side patch would have been.
-It also leaves the haze alone by construction: the horizon fog is copied from this value *before*
-the final multiply, so the geometry reaches past the fog rather than dragging it along.
+**The first attempt hooked one reader out of three, and that is worth knowing before hooking
+anything.** `0x08aae0ec` (`GetLargestLodDistance`) is not the only function that multiplies a
+model's distance by `CCamera + 0x7a8`. Scanning the whole code region for `lwc1` of offset `0x7a8`
+and looking for a nearby load of the lodDistance array finds three, in adjacent functions:
 
-Two pieces of bookkeeping earn their place. `s_stock` and `s_written` are what stop the scale
-compounding - the hook runs many times a frame, and multiplying the live value each time takes the
-draw distance to infinity in about a second; a live value that is not the one we left is the game's
-own, freshly rebuilt, and that is the number to scale. And `RemoveDrawDistanceHook` hands the game's
-own float back as well as its instruction, or a savestate taken right afterwards carries a scaled
-value with nothing left to explain it.
+```
+08aae0a4  lwc1  $f13, 0x7a8($t1)    GetAtomicFromDistance - loops the LOD array and returns the
+08aae0a8  lwc1  $f14, 0x2c($a0)     atomic to DRAW, or nil. THIS is the render-time decision.
+08aae0ac  mul.s $f14, $f14, $f13
+08aae100  lwc1  $f12, 0x7A8($a3)    GetLargestLodDistance - what the streamer asks
+08aae194  lwc1  $f14, 0x7a8($a0)    the damaged / last-atomic variant
+```
 
-**Measured, and the number is the finding.** Two fresh boots of the same build, the same teleport to
-the same sector, the same settle, the player standing still on foot:
+A `REPFLAG_HOOKENTER` hook writes the scaled value when ITS function is entered, so hooking the
+middle one reached the middle one and nothing else. Measured at +6.8% of draws for an 8x setting,
+which was the stream-in path widening on its own while the renderer went on using 1.0.
 
-| | draws | vertices | fps |
-|---|---|---|---|
-| 1.0x | 648 (603-685) | 78,103 | 30.0 |
-| 8.0x | 692 (669-707) | 84,594 | 30.0 |
+**The right place is the write side, one instruction after the game's own final store**, which is
+the only point that reaches every reader in the frame:
 
-So it is real - the two distributions barely overlap - and it is **+6.8% of draws for eight times the
-distance**, at no cost in frame rate at all. That is not what "load everything" looks like.
+```
+08a240a4  swc1  $f12, 0x7a8($s0)   assigned outright - so nothing can compound across frames
+08a24104  swc1  $f28, 0x7a8($s0)   clamped DOWN to a ceiling
+08a2412c  swc1  $f12, 0x7a0($s0)   copied to the HAZE, before the last multiply
+08a2413c  mul.s $f12, $f12, $f0
+08a24140  swc1  $f12, 0x7a8($s0)   the final store
+08a24144  lbu   $a0, -0x1ba8($gp)  <- hook here
+```
 
-**What the small number says: the binding constraint is streaming, not draw distance.** An entity
-only draws if its model is in memory, and the streamer decides that on its own terms. Raising what
-an entity is *willing* to draw at cannot conjure geometry the streamer never loaded, which is
-exactly the shape of a 7% gain from an 8x lever. The far clip is a second ceiling on top of that and
-is deliberately untouched: it still reads ~1979, so the 300-unit class of models, now asking for
-2400, is clipped by the projection anyway.
+That also puts the scaling past the game's own clamp and leaves the horizon fog exactly where the
+artists put it, because the haze was taken two instructions earlier from the unscaled value. Verified
+live: `lodMult 8.0000, haze 1.0000` held every frame, against `1.0000 / 1.0000` stock.
 
-So the next lever is the streaming radius, and the streamer section above is where that hunt starts -
-with the standing caveat that `CStreaming::Update`'s four calls were already read once and none of
-them walks the sector grid, so the zone streamer at `0x08ad78dc` is the first thing to read rather
-than the last.
+**And then the measurement, which is the point of the section.** Same savestate, reloaded for each
+run, so the fixture is bit-identical - same clock, same camera (`yaw 0.5336`, `pitch -0.0537`), same
+player position, same far clip:
 
-**The measurement method is the part worth copying, because three earlier rounds of it were
-worthless.** Draw counts at a teleported spot swung 1131 / 749 / 436 in this file's own record, and
-the reason turned out to be nothing to do with the patch: those samples were taken while the player
-was still moving, or on a bike, or with the camera still swinging after the teleport. **A settled
-scene with the player standing still reads to within +/-6%** - 603 to 685 across twenty samples -
-which is tight enough to see a 7% effect. The recipe is: fresh boot, teleport, wait, sample twenty
-times over ten seconds, take the median, and change exactly one thing between runs.
+| lodMult | draws | vertices |
+|---|---|---|
+| 0.05 | 466 | 38,139 |
+| 1.0 (stock) | 486 | 40,587 |
+| 8.0 | 492 | 42,774 |
 
-What still cannot be done here is the visual judgement, and this time it is not for want of trying:
-two "same spot" screenshots came back facing different directions at different times of day, because
-the player falls to whatever ground is under the teleport and the clock keeps moving. The slider on
-the Shadows tab exists so that the next person to look at this can sweep the factor without a
-relaunch per value, which is what made the first round so expensive.
+**A 160-fold range moves four per cent of the frame.** And the shrink control says what the four per
+cent is: at 0.05 the entire skyline, the bridge and the far shore are still drawn, pixel for pixel,
+and the thing that vanishes is **the player**. The multiplier governs the models that carry real LOD
+ladders - peds and vehicles - and VCS's map is not distance-culled by it at all.
+
+The row is therefore gone, for the same reason the culling slider and the streaming knob went: a
+setting that cannot do what its name says does not sit on the Graphics page. `git log
+--diff-filter=D -- Core/VCS/VCSDrawDistance.cpp` has the working implementation if it is ever wanted.
+
+**The verdict the four negatives add up to.** Four mechanisms have now been found, decoded, patched
+and measured, and every one of them is inert for the map:
+
+| | ruled out by |
+|---|---|
+| the camera frustum planes at `CCamera + 0xAB0` | a 4.37 degree slit still drew the whole street |
+| `DeleteRwObjectsBehindCamera` | a call counter that stayed at zero through a nine-stop map tour |
+| `CDraw::ms_fFarClipZ` | doubled, and the view was indistinguishable |
+| the LOD distance multiplier | 0.05x to 8x moves 4% of the frame |
+
+**So what VCS draws is what the streamer has loaded, and nothing else decides.** That is not a
+hypothesis any more; it is what is left after four levers. Every future attempt at "render much
+more" is a streaming question, and the standing note that the streamer is never short of memory -
+`DeleteRwObjectsBehindCamera` never fires - says the streamer is not evicting what it has, it is
+never REQUESTING the rest. The request path is the hunt.
+
+**The savestate fixture is the other thing to keep.** Slot 2 (`ULUS10160_1.03_2.ppst`) is a clear
+midday spot on the grass at `150.2, -670.8`, looking across the water at the bridge and the downtown
+skyline - a long sightline, nothing moving, the player standing still. Loaded through PPSSPP's own
+`ID_FILE_SAVESTATE_SLOT_BASE + n` and `ID_FILE_QUICKSAVESTATE` menu commands posted as `WM_COMMAND`,
+it reads **486 draws with a min and max of 486** across twenty samples. Zero variance, and identical
+camera between runs.
+
+That is what finally made these numbers mean anything. This file records three earlier rounds where
+the same question was asked with teleports and the answers came back 1131 / 749 / 436 for one build,
+because a teleport drops the player onto whatever ground is there, the clock keeps moving, and the
+follow camera is still settling. **A savestate is the fixture; a teleport is not.** Take one at the
+spot the question is about, and reload it for every run.
 
 ### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
 
