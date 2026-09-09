@@ -405,6 +405,15 @@ const std::vector<Option> &Options() {
 				ApplyShadowSetting();
 			});
 
+		// The one setting here that changes what the GAME can hold rather than how the
+		// emulator draws it. It only takes effect on the next boot, because the pools are
+		// built about a second into one and never again - the help line says so, because a
+		// setting that appears to do nothing is worse than one that is not offered.
+		addFloat(OptionPage::Graphics, "WorldMemory", "World memory",
+			"How much of the city stays loaded at once. Higher means you see further and "
+			"more of it casts shadows. Takes effect after a restart.",
+			&GameSettings().worldMemory, 1.0f, kVCSWorldMemoryMax, "%.1fx");
+
 		addBool(OptionPage::Graphics, "ShowFps", "Show FPS",
 			"Draw the frame rate in the corner of the screen.",
 			&GameSettings().showFps);

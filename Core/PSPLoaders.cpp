@@ -175,6 +175,23 @@ void InitMemorySizeForGame() {
 		g_DoubleTextureCoordinates = entry.doubleTextureCoordinates;
 		break;
 	}
+	// GTA: Vice City Stories sizes its streaming heap from whatever the kernel says is FREE at
+	// boot - `size = sceKernelTotalFreeMemSize() - 0x67000` at 0x0887f170 - and then keeps the
+	// whole world in it. On the retail 32MB partition that leaves it 4.75MB, running about 95%
+	// full, which is the real reason the view is what it is: four separate distance mechanisms
+	// in this game were patched and measured and NONE of them decides anything, so what is
+	// drawn is simply what fits. See CLAUDE.md.
+	//
+	// The game asks rather than assumes, so handing it a PSP-2000 partition costs no game patch
+	// at all - the heap it builds for itself grows with the answer. Deliberately NOT an entry in
+	// g_HDRemasters: that sets g_RemasterMode, which also turns on double texture coordinates
+	// and changes video handling, none of which this game wants.
+	if (gameID == "ULUS10160" && !g_RemasterMode && Memory::g_PSPModel != PSP_MODEL_FAT &&
+		Memory::g_MemorySize < Memory::RAM_DOUBLE_SIZE) {
+		Memory::g_MemorySize = Memory::RAM_DOUBLE_SIZE;
+		INFO_LOG(Log::Loader, "VCS: giving the streaming heap a PSP-2000 partition");
+	}
+
 	if (g_RemasterMode) {
 		INFO_LOG(Log::Loader, "HDRemaster found, using increased memory");
 	}

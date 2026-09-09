@@ -59,6 +59,7 @@
 #include "Core/Debugger/SymbolMap.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceKernelModule.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelMemory.h"
 #include "Core/HLE/sceMpeg.h"
@@ -1854,6 +1855,11 @@ bool __KernelLoadExec(MIPSState *mips, const char *filename, u32 paramPtr, std::
 		option.priority = module->nm.module_start_thread_priority;
 	if (module->nm.module_start_thread_stacksize != 0)
 		option.stacksize = module->nm.module_start_thread_stacksize;
+
+	// The one place a VCS boot-time code patch can land: the module is in memory and has not
+	// executed, so the pool sizes it computes a second from now are still ours to change. No-op
+	// for every other game, and for this one unless the player asked for it.
+	VCS::PatchLoadedModule();
 
 	INFO_LOG(Log::System, "Starting modules...");
 	if (paramPtr)

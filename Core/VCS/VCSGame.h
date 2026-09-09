@@ -42,6 +42,11 @@ namespace VCS {
 // compat flag is on; if either is false, everything else in this module stays dormant.
 void Init();
 
+// Patches the loaded module BEFORE it starts. The pool sizes are decided about a second into
+// boot, long before the first vblank and long before the debugger is reachable, so a per-tick
+// installer of the kind everything else here uses is far too late.
+void PatchLoadedModule();
+
 // Called from __KernelShutdown. Safe to call when Init decided not to activate.
 void Shutdown();
 
@@ -128,6 +133,12 @@ struct VCSGameSettings {
 	// a choice, which meant a mode row that greyed out and a saved mode that went on
 	// existing while the feature was off.
 	int shadows = kVCSShadowsEntities;
+
+	// How many times the retail 4.75MB of resident world to keep. This is the whole of how
+	// far VCS can see - four distance mechanisms were patched and measured and none of them
+	// decides anything, so what is drawn is what fits. Needs the larger partition, which
+	// InitMemorySizeForGame hands this disc. 1 leaves the game's own code untouched.
+	float worldMemory = 1.0f;
 
 	bool subtitles = true;
 

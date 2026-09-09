@@ -4495,10 +4495,10 @@ and measured, and every one of them is inert for the map:
 | the LOD distance multiplier | 0.05x to 8x moves 4% of the frame |
 
 **So what VCS draws is what the streamer has loaded, and nothing else decides.** That is not a
-hypothesis any more; it is what is left after four levers. Every future attempt at "render much
-more" is a streaming question, and the standing note that the streamer is never short of memory -
-`DeleteRwObjectsBehindCamera` never fires - says the streamer is not evicting what it has, it is
-never REQUESTING the rest. The request path is the hunt.
+hypothesis any more; it is what is left after four levers - and the section below found what
+does decide: the streaming heap is 4.75MB and runs 95% full. The note that
+`DeleteRwObjectsBehindCamera` never fires reads differently in that light - the streamer is not
+evicting because it never gets far enough to have to.
 
 **The savestate fixture is the other thing to keep.** Slot 2 (`ULUS10160_1.03_2.ppst`) is a clear
 midday spot on the grass at `150.2, -670.8`, looking across the water at the bridge and the downtown
@@ -4512,6 +4512,86 @@ the same question was asked with teleports and the answers came back 1131 / 749 
 because a teleport drops the player onto whatever ground is there, the clock keeps moving, and the
 follow camera is still settling. **A savestate is the fixture; a teleport is not.** Take one at the
 spot the question is about, and reload it for every run.
+
+### The world is 4.75MB, and that is the only thing that decides how far you can see
+
+**Status: found, patched, measured, shipped as `World memory` on the Graphics page.** After four
+distance mechanisms that turned out to decide nothing, this is the one that does - and it is not a
+distance at all, it is a memory pool.
+
+**What the game does at boot**, read out of PPSSPP's own kernel log rather than inferred, because
+`sceKernelCreateFpl` prints the name and size of every pool:
+
+```
+03148700 = sceKernelMaxFreeMemSize()
+     330 = sceKernelCreateFpl(MainMemoryManager, size 02c18700)   ; 44 MB
+                     ... 95 seconds of boot later ...
+  528000 = sceKernelMaxFreeMemSize()
+     360 = sceKernelCreateFpl(StreamingHeap,     size 004c1000)   ; 4.75 MB
+```
+
+Two pools, and the second lives on the first one's leftovers:
+
+```
+08abfeac  jal   sceKernelMaxFreeMemSize
+08abfeb4  lui   $a0, 0x53          ; 0x00530000 - the RESERVE it does not take
+08abfeb8  subu  $a0, $v0, $a0      ; MainMemoryManager = everything else
+...
+0887f170  jal   sceKernelMaxFreeMemSize
+0887f180  subu  $a0, $v0, 0x67000  ; StreamingHeap = what is left, less 0x67000
+```
+
+So **one 16-bit immediate decides the size of the resident world.** And the retail heap is
+**saturated**: measured on an ordinary street it reads 4.52 MB of 4.75 MB, 95% full. It is not a
+budget the game fits comfortably inside, it is a ceiling it is pressed against.
+
+Each pool also has a DEAD branch above it, taken when the mode byte at `gp-0x72c` is non-zero -
+`0x00C17800` for MainMemoryManager and `0x004C9000` for the StreamingHeap. That byte reads 0, so
+neither runs, but they are the best evidence in the binary of what the game actually needs:
+MainMemoryManager wants 12.65 MB and no more.
+
+**The fix is two changes, neither of which touches the game's logic.**
+
+`InitMemorySizeForGame` hands this disc a PSP-2000 partition, which is a one-line seam in
+`Core/PSPLoaders.cpp` and needs no game patch at all - VCS asks the kernel how much memory there is
+rather than assuming, so `sceKernelMaxFreeMemSize` simply answers 49 MB instead of 17. Deliberately
+NOT an entry in `g_HDRemasters`: that sets `g_RemasterMode`, which also turns on double texture
+coordinates and changes video handling, none of which this game wants.
+
+On its own that does nothing, and the reason is the whole shape of the problem: **MainMemoryManager
+is sized as everything-minus-the-reserve, so it absorbs every byte you add.** Handing the game 32 MB
+more took its main pool from 12 MB to 44 MB and left the streaming heap at exactly 4.75 MB.
+
+So `VCS::PatchLoadedModule` raises the reserve to match, and the rule it follows is what makes it
+safe without measuring anything: **only ever hand the streaming heap memory a real PSP-1000 never
+had.** The ceiling is `retail reserve + (g_MemorySize - RAM_NORMAL_SIZE)`, so MainMemoryManager
+keeps exactly the bytes it had at retail and the extra partition goes to the world. On a FAT model
+there is no headroom and the patch does nothing, which is correct rather than a limitation.
+
+**Measured at 7x:**
+
+| | streaming heap | in use |
+|---|---|---|
+| retail | 4.75 MB | 4.52 MB - 95% full |
+| 7x | 35.88 MB | 7.51 MB |
+
+The streamer immediately took 7.51 MB - **66% more world than retail can physically hold** - which
+is the number that says the ceiling was real and was binding.
+
+**Where the patch has to happen, and why nothing else works.** The pools are built about a second
+into boot: long before the first vblank, and long before the WebSocket debugger is even reachable.
+A per-tick installer of the kind every other patch in this fork uses is roughly ninety seconds too
+late, and a `memory.write` from outside arrives after the fact - both were tried. The seam is
+`__KernelLoadExec`, immediately before `__KernelStartModule`: the module is in memory, nothing has
+executed, and the raw instruction is still the game's own with no JIT block over it.
+
+**What is NOT yet known.** Whether it looks better. The draw count at a teleported spot came back
+the same at 1x and 7x, and that measurement is worth nothing - the teleport landed in two different
+streets at two different times of day, which is the trap this file has now recorded four times. The
+right instrument is a savestate taken at a building that actually comes apart, reloaded for each
+run; slot 2 is one such fixture for a long sightline and reads 486 draws with a min and max of 486.
+More resident world is necessary for a wider view and may not be sufficient, and the honest next
+question is which specific geometry is still missing once the ceiling is gone.
 
 ### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
 

@@ -25,6 +25,7 @@
 #include "Core/Config.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/sceCtrl.h"
+#include "Core/MemMap.h"
 #include "Core/System.h"
 #include "Core/Util/PathUtil.h"
 #include "Core/VCS/VCSCamera.h"
@@ -162,6 +163,45 @@ static void ApplyGamePrefs() {
 	ApplyPref(VCSAddr::SfxVolumePref, settings.sfxVolume);
 	ApplyPref(VCSAddr::RadioVolume, settings.radioVolume);
 	ApplyPref(VCSAddr::RadioVolumePref, settings.radioVolume);
+}
+
+void PatchLoadedModule() {
+	if (!IsActive()) {
+		return;
+	}
+	const float wanted = GameSettings().worldMemory;
+	if (!(wanted > 1.0f) || !Memory::IsValid4AlignedAddress(kVCSMainPoolReserve)) {
+		return;
+	}
+	// Nothing has run yet, so this is the raw instruction rather than anything the JIT has
+	// had an opinion about - which is the whole reason the patch happens here.
+	if (Memory::ReadUnchecked_U32(kVCSMainPoolReserve) != kVCSMainPoolReserveOp) {
+		WARN_LOG(Log::System, "VCS: %08x does not hold the pool reserve on this build - "
+			"leaving the world memory alone", kVCSMainPoolReserve);
+		return;
+	}
+
+	// Only ever hand the streaming heap memory a real PSP-1000 never had. That is what makes
+	// this safe without measuring anything: MainMemoryManager keeps exactly the bytes it had
+	// at retail, and the extra partition - which it would otherwise absorb, since it sizes
+	// itself as everything-minus-the-reserve - goes to the world instead.
+	const u32 extra = Memory::g_MemorySize > Memory::RAM_NORMAL_SIZE
+		? Memory::g_MemorySize - Memory::RAM_NORMAL_SIZE : 0;
+	const u32 ceiling = kVCSMainPoolReserveStock + extra;
+	u64 want = (u64)((double)kVCSMainPoolReserveStock * wanted);
+	if (want > ceiling) {
+		want = ceiling;
+	}
+	// A lui immediate, so the reserve is a multiple of 64K by construction.
+	const u32 reserve = (u32)want & 0xFFFF0000u;
+	if (reserve <= kVCSMainPoolReserveStock) {
+		return;
+	}
+	Memory::WriteUnchecked_U32(0x3C040000u | (reserve >> 16), kVCSMainPoolReserve);
+	INFO_LOG(Log::System, "VCS: holding %.1f MB back for the world (retail is %.1f MB), "
+		"so the streaming heap gets about %.1f MB instead of 4.8",
+		reserve / 1048576.0f, kVCSMainPoolReserveStock / 1048576.0f,
+		(reserve - 0x67000) / 1048576.0f);
 }
 
 void Init() {

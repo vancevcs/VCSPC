@@ -171,6 +171,39 @@ inline constexpr u32 kVCSPedClimbSplashOp = 0x0E2817E0;  // jal 0x08a05f80
 // could refuse to climb a moving vehicle.
 inline constexpr u32 kVCSProcessVerticalLine = 0x08891DD4;
 
+// How much world fits in memory, which on this game is the only thing that decides how far
+// you can see.
+//
+// VCS builds two pools at boot, in this order, and the second one lives on the first one's
+// leftovers:
+//
+//     08abfeac  jal   sceKernelMaxFreeMemSize
+//     08abfeb4  lui   $a0, 0x53             ; 0x00530000 - the RESERVE it does not take
+//     08abfeb8  subu  $a0, $v0, $a0
+//     08abfed8  jal   sceKernelCreateFpl    ; "MainMemoryManager"
+//     ...
+//     0887f170  jal   sceKernelMaxFreeMemSize
+//     0887f180  subu  $a0, $v0, 0x67000     ; "StreamingHeap" takes what is left
+//
+// So one 16-bit immediate decides the size of the resident world. Retail: MainMemoryManager
+// 12.6MB, StreamingHeap 4.75MB, and the heap runs 70-95% full in ordinary play. Read out of
+// the kernel log rather than inferred - sceKernelCreateFpl prints its name and size.
+//
+// The dead branch above each of them (0x00C17800 and 0x004C9000) is what those two pools are
+// worth on a machine that cannot measure, and it is the best evidence of what the game really
+// needs: MainMemoryManager wants 12.65MB and no more, so on a PSP-2000 partition everything
+// past that is slack it absorbs unless this reserve grows to match.
+inline constexpr u32 kVCSMainPoolReserve = 0x08ABFEB4;      // lui $a0, 0x53
+inline constexpr u32 kVCSMainPoolReserveOp = 0x3C040053;
+inline constexpr u32 kVCSMainPoolReserveStock = 0x00530000;
+inline constexpr u32 kVCSMainPoolNeeds = 0x00C17800;        // the dead branch's own number
+inline constexpr u32 kVCSStreamHeapObject = 0x08BC7CF0;     // +0x00 size, +0x14 in use
+
+// 7x is what the extra 32MB of a PSP-2000 partition is worth against a 5.44MB retail reserve,
+// with MainMemoryManager left exactly what it had. Asking for more is clamped rather than
+// refused, because the ceiling depends on the emulated model.
+inline constexpr float kVCSWorldMemoryMax = 7.0f;
+
 // CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70.
 inline constexpr u32 kVCSCam0 = 0x08BC7EA0;
 
