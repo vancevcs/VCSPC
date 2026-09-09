@@ -4309,7 +4309,11 @@ finishing streaming as the patch making things worse - a 42% "drop" that was the
 Any measurement here has to settle first, keep the originals rather than re-reading them after an
 earlier experiment has already written over them, and sweep the factor both ways in one session.
 
-### Nothing reads the model draw distances while the game runs
+### Nothing reads the model draw distances DURING PLAY - they are read at stream-in
+
+**Superseded in part by the section below**, which caught the read and named the lever.
+What follows is still correct about what does NOT happen while the game runs, and about
+why the earlier draw-count measurements said nothing.
 
 The section above ruled the per-model draw distances out by measuring draw counts, and that
 measurement was weak - the scene's own drift was larger than the signal, and two of the runs turned
@@ -4350,6 +4354,74 @@ when the read had succeeded and merely returned a null pointer, and screenshots 
 wrong window because `Process.MainWindowHandle` does not name this game's window - enumerate the
 process's top-level windows and take the visible one whose title matches. Before trusting any
 measurement here, check that the emulator was actually running while it was taken.
+
+### The draw distance is one global float, and here is where it lives
+
+Breaking on a read of a model's draw distance **while an area streams in** - the one condition under
+which the read has to happen - caught it on the first hop. Four hundred models were watched at once,
+because there is no way to know which ones a new area will need; forty was not enough and found
+nothing, which is worth knowing before repeating this.
+
+**The reader is `0x08aae0ec`**, and it is small enough to quote whole:
+
+```
+08aae0ec  lhu   $a2, 0x3a($a0)      ; the model info's flags
+08aae0f0  lui   $a3, 0x8BC
+08aae0f4  addiu $a3, $a3, 0x7E30    ; CCamera
+08aae0f8  andi  $a1, $a2, 0x3
+08aae0fc  beq   $a1, $zero, +0x10
+08aae100  lwc1  $f12, 0x7A8($a3)    ; <- the global scale
+08aae104  andi  $a2, $a2, 0x8
+08aae108  beq   $a2, $zero, 0x8AAE128
+08aae110  lbu   $a1, 0x38($a0)      ; which of the model's distances to use
+08aae114  sll   $a1, $a1, 2
+08aae118  addu  $a0, $a0, $a1
+08aae11c  lwc1  $f0, 0x28($a0)      ; distance = info[0x28 + idx * 4]
+08aae124  mul.s $f0, $f0, $f12      ; ... times the global scale
+```
+
+Two things fall out of it. The distances are not "the three floats at +0x2c/+0x30/+0x34" - they are
+`info + 0x28 + info[0x38] * 4`, an array with a per-model index, which is why the earlier watch on
++0x2c alone caught some models and not others. And every one of them is multiplied by **one float,
+`CCamera + 0x7a8`**, which reads exactly **1.0** in ordinary play.
+
+**That float is the draw distance knob for the entire game.** It is rebuilt every frame: computed at
+`0x08a240a0` (`cam[0x7a8] = f30 * f12`), clamped DOWN to a stack local at `0x08a24104`, copied to
+`CCamera + 0x7a0` at `0x08a2412c` - which is the value the haze setter at `0x089c73d8` multiplies by
+40 and 60 - and multiplied once more at `0x08a2413c`. Writing it from outside therefore does not
+hold: hammered from the debugger it reads back 1.0000 every time.
+
+**And the call stack says WHEN it is read**, which is the other half of why every earlier attempt
+failed:
+
+```
+08aae11c  <- the reader
+08a7d7d8 / 08a7f170 / 08a7def4 / 08a7e754 / 08a79dec / 08805480 / 08805334
+```
+
+The frames are the world-add path, not the renderer. The distance is consumed **when an entity is
+brought into the world**, so editing the model table afterwards reaches nothing that already exists -
+and a measurement taken without rebuilding the area is measuring the old numbers.
+
+**The lever, then, is `CCamera + 0x7a8`, and it needs a code patch** because the game rewrites it
+every frame. The two candidate sites are the final store at `0x08a24140` and the multiply feeding it
+at `0x08a2413c`; the reader's own `lwc1` at `0x08aae100` is a third, if a scratch float can be found
+inside CCamera's +/-32KB reach that the game does not also write.
+
+**What could NOT be established, and why - so nobody repeats it.** Whether raising it actually helps
+is unmeasured, because nothing in this environment holds still long enough to compare two runs:
+
+- The draw count at one teleported spot read **1131, 749 and 436** across three runs of the same
+  build. The signal being looked for is smaller than that.
+- The away-and-back trip that rebuilds an area costs **14% of the draw count on its own**, with no
+  patch applied at all - the control that shows the -46% and -66% readings from patched runs were
+  mostly the trip.
+- Two screenshots of "the same spot" came back as a golf course at 07:43 and a hotel street at
+  10:52: a teleport to fixed coordinates does not reproduce, because the player falls to whatever
+  ground is there and the clock keeps moving.
+
+So the next step is to patch the scale and judge it by eye in play, which takes a person about five
+seconds and this instrumentation cannot do at all.
 
 ### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
 
