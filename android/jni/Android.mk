@@ -710,6 +710,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/HLE/sceCtrl.cpp.arm \
   $(SRC)/Core/VCS/VCSCamera.cpp.arm \
   $(SRC)/Core/VCS/VCSCheats.cpp.arm \
+  $(SRC)/Core/VCS/VCSDrawDistance.cpp.arm \
   $(SRC)/Core/VCS/VCSFrontEnd.cpp.arm \
   $(SRC)/Core/VCS/VCSRoute.cpp.arm \
   $(SRC)/Core/VCS/VCSSaves.cpp.arm \

@@ -129,6 +129,11 @@ struct VCSGameSettings {
 	// existing while the feature was off.
 	int shadows = kVCSShadowsEntities;
 
+	// How much further than the game intends its map objects survive, as a multiplier on
+	// the one global the whole map's draw distance goes through. 1 is the game as shipped
+	// and leaves its code untouched. See VCSDrawDistance.h.
+	float drawDistance = 1.0f;
+
 	bool subtitles = true;
 
 	// The health, armour, money, weapon and clock panel. NOT the radar, which the game keeps on a

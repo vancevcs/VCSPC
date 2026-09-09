@@ -184,6 +184,7 @@
     <ClInclude Include="..\..\Core\HLE\sceCtrl.h" />
     <ClInclude Include="..\..\Core\VCS\VCSCamera.h" />
     <ClInclude Include="..\..\Core\VCS\VCSCheats.h" />
+    <ClInclude Include="..\..\Core\VCS\VCSDrawDistance.h" />
     <ClInclude Include="..\..\Core\VCS\VCSFireHook.h" />
     <ClInclude Include="..\..\Core\VCS\VCSAddresses.h" />
     <ClInclude Include="..\..\Core\VCS\VCSFrontEnd.h" />
@@ -473,6 +474,7 @@
     <ClCompile Include="..\..\Core\HLE\sceCtrl.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSCamera.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSCheats.cpp" />
+    <ClCompile Include="..\..\Core\VCS\VCSDrawDistance.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSFireHook.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSGame.cpp" />
     <ClCompile Include="..\..\Core\VCS\VCSFrontEnd.cpp" />

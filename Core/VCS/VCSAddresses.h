@@ -171,6 +171,30 @@ inline constexpr u32 kVCSPedClimbSplashOp = 0x0E2817E0;  // jal 0x08a05f80
 // could refuse to climb a moving vehicle.
 inline constexpr u32 kVCSProcessVerticalLine = 0x08891DD4;
 
+// The draw distance of every map object in the game, in one float.
+//
+// `0x08aae0ec` returns a model's draw distance, and the last thing it does is multiply it by
+// `CCamera + 0x7a8`:
+//
+//     08aae100  lwc1  $f12, 0x7A8($a3)    ; a3 = CCamera - the global scale
+//     08aae110  lbu   $a1, 0x38($a0)      ; which of the model's distances to use
+//     08aae11c  lwc1  $f0, 0x28($a0)      ; distance = info[0x28 + idx * 4]
+//     08aae124  mul.s $f0, $f0, $f12
+//
+// The scale reads exactly 1.0 in ordinary play, and the game rebuilds it every frame -
+// assigned at 0x08a240a0, clamped down at 0x08a24104, copied to +0x7a0 for the haze, and
+// multiplied once more at 0x08a2413c - so it cannot be held by writing it from outside. The
+// hook is on the reader instead, which runs two instructions before the load.
+//
+// Found by breaking on a READ of a model's distance while an area streamed in, with four
+// hundred models watched at once; forty found nothing. The call stack there is the world-add
+// path rather than the renderer, which is why editing the model table after the fact had
+// never changed anything.
+inline constexpr u32 kVCSLodDistanceFn = 0x08AAE0EC;
+inline constexpr u32 kVCSLodDistanceFnOp = 0x9486003A;  // lhu $a2, 0x3a($a0)
+inline constexpr u32 kVCSCamLodScale = 0x08BC85D8;      // CCamera + 0x7a8
+inline constexpr float kVCSDrawDistanceMax = 12.0f;
+
 // CCam m_asCams[0] - CCamera (0x08bc7e30) + 0x70.
 inline constexpr u32 kVCSCam0 = 0x08BC7EA0;
 

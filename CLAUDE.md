@@ -4420,8 +4420,66 @@ is unmeasured, because nothing in this environment holds still long enough to co
   10:52: a teleport to fixed coordinates does not reproduce, because the player falls to whatever
   ground is there and the clock keeps moving.
 
-So the next step is to patch the scale and judge it by eye in play, which takes a person about five
-seconds and this instrumentation cannot do at all.
+So the scale was patched, and what that bought is measured in the section below - which also
+records the sampling recipe that finally made these numbers readable.
+
+### The scale is patched now, and eight times the draw distance buys seven per cent
+
+`Core/VCS/VCSDrawDistance.{h,cpp}`, the `Draw distance` row on the Graphics page, and a slider on
+the debugger's Shadows tab. The setting is a plain multiplier on `CCamera + 0x7a8`, because that one
+float is what the whole map's draw distance goes through - see the section above for how it was
+found and why nothing else works.
+
+**The hook is on the READER, not on any of the three sites that write the float.** `0x08aae0ec`
+loads `CCamera + 0x7a8` two instructions after its own entry, so a `REPFLAG_HOOKENTER` replacement
+there writes the scaled value and returns, and the game's own function then reads what we left. That
+cannot be raced by the frame that rebuilds the float, which every write-side patch would have been.
+It also leaves the haze alone by construction: the horizon fog is copied from this value *before*
+the final multiply, so the geometry reaches past the fog rather than dragging it along.
+
+Two pieces of bookkeeping earn their place. `s_stock` and `s_written` are what stop the scale
+compounding - the hook runs many times a frame, and multiplying the live value each time takes the
+draw distance to infinity in about a second; a live value that is not the one we left is the game's
+own, freshly rebuilt, and that is the number to scale. And `RemoveDrawDistanceHook` hands the game's
+own float back as well as its instruction, or a savestate taken right afterwards carries a scaled
+value with nothing left to explain it.
+
+**Measured, and the number is the finding.** Two fresh boots of the same build, the same teleport to
+the same sector, the same settle, the player standing still on foot:
+
+| | draws | vertices | fps |
+|---|---|---|---|
+| 1.0x | 648 (603-685) | 78,103 | 30.0 |
+| 8.0x | 692 (669-707) | 84,594 | 30.0 |
+
+So it is real - the two distributions barely overlap - and it is **+6.8% of draws for eight times the
+distance**, at no cost in frame rate at all. That is not what "load everything" looks like.
+
+**What the small number says: the binding constraint is streaming, not draw distance.** An entity
+only draws if its model is in memory, and the streamer decides that on its own terms. Raising what
+an entity is *willing* to draw at cannot conjure geometry the streamer never loaded, which is
+exactly the shape of a 7% gain from an 8x lever. The far clip is a second ceiling on top of that and
+is deliberately untouched: it still reads ~1979, so the 300-unit class of models, now asking for
+2400, is clipped by the projection anyway.
+
+So the next lever is the streaming radius, and the streamer section above is where that hunt starts -
+with the standing caveat that `CStreaming::Update`'s four calls were already read once and none of
+them walks the sector grid, so the zone streamer at `0x08ad78dc` is the first thing to read rather
+than the last.
+
+**The measurement method is the part worth copying, because three earlier rounds of it were
+worthless.** Draw counts at a teleported spot swung 1131 / 749 / 436 in this file's own record, and
+the reason turned out to be nothing to do with the patch: those samples were taken while the player
+was still moving, or on a bike, or with the camera still swinging after the teleport. **A settled
+scene with the player standing still reads to within +/-6%** - 603 to 685 across twenty samples -
+which is tight enough to see a 7% effect. The recipe is: fresh boot, teleport, wait, sample twenty
+times over ten seconds, take the median, and change exactly one thing between runs.
+
+What still cannot be done here is the visual judgement, and this time it is not for want of trying:
+two "same spot" screenshots came back facing different directions at different times of day, because
+the player falls to whatever ground is under the teleport and the clock keeps moving. The slider on
+the Shadows tab exists so that the next person to look at this can sweep the factor without a
+relaunch per value, which is what made the first round so expensive.
 
 ### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
 

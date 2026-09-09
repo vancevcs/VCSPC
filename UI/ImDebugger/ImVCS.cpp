@@ -30,6 +30,7 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSDrawDistance.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
@@ -2353,6 +2354,22 @@ void ImVCSWindow::DrawShadows() {
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Which view-space axis points into the scene. If the camera/player distance above is sane but the centre sits behind you, this is the wrong way round.");
 	}
+
+	// How far the world reaches, which is the other half of whether a shadow can exist at all:
+	// geometry the game never draws is geometry the capture never sees. Live here rather than
+	// only on the menu because comparing two factors otherwise costs a relaunch each - which is
+	// what made the first round of measuring this so expensive.
+	ImGui::Separator();
+	ImGui::SliderFloat("Draw distance", &VCS::GameSettings().drawDistance, 1.0f,
+		VCS::kVCSDrawDistanceMax, "%.1fx");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Scales the one global every map object's draw distance goes through. Costs frames in the GAME, and the shadow pass pays for it twice.");
+	}
+	ImGui::Text("hook %s  the game asks %.3f, the world reads %.3f",
+		VCS::DrawDistanceInstalled() ? "in" : "not installed",
+		VCS::DrawDistanceStock(), VCS::DrawDistanceApplied());
+	ImGui::TextDisabled("Not installed with the slider at 1.0x is correct - the patch stays"
+		" out of the game entirely until somebody asks for more than it ships with.");
 
 	if (Draw::Framebuffer *shadowFbo = VCSShadow::ShadowMap()) {
 		ImGui::Separator();
