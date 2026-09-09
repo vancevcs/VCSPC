@@ -4309,6 +4309,48 @@ finishing streaming as the patch making things worse - a 42% "drop" that was the
 Any measurement here has to settle first, keep the originals rather than re-reading them after an
 earlier experiment has already written over them, and sweep the factor both ways in one session.
 
+### Nothing reads the model draw distances while the game runs
+
+The section above ruled the per-model draw distances out by measuring draw counts, and that
+measurement was weak - the scene's own drift was larger than the signal, and two of the runs turned
+out to be confounded by the player falling after a teleport. So it was done again from the other
+end, and the answer is much sharper than "no effect".
+
+**The values are real, and they stay written.** Twenty models were set to eight times their draw
+distance and read back: **20 of 20 still held the written value after five seconds.** So the game is
+not putting them back, and any measurement of "we changed it and nothing happened" is a measurement
+of the value we intended.
+
+**And nothing reads them.** A memory READ breakpoint was put on `+0x2c` of three named big buildings
+- models whose distances are 700, 900 and 2000, so certainly on screen - for sixteen seconds of live
+play each. **None of them was ever read.** The control that makes that silence evidence: a wider
+breakpoint on the same structs trips immediately on `+0x3a`, a flags halfword read by the code at
+`0x0895bc54` that walks the same `[gp + 24]` table. The structs are in active use; the three floats
+in them are not touched.
+
+**Entities do not carry a copy either.** Walking the player's sector through the six lists at
+`+0x00, +0x04, +0x0c, +0x10, +0x30, +0x34` gives real entities; each one's model id at `+0x56`
+resolves back through the table to its model info. Searching 2 KB of each entity for its own model's
+distance found nothing in three of four, and the fourth's match repeated on a 0x220 stride, which is
+a neighbouring object of the same kind rather than a cached LOD.
+
+**So the numbers are consumed once, somewhere else** - at model load or instantiation, folded into
+whatever the renderer really tests - and editing the table afterwards can never reach anything that
+already exists. That is where the next attempt starts: find what is written at load time FROM these
+floats, by breaking on a read of `+0x2c` while a new area streams in rather than while standing
+still, which is the one condition under which the read must happen.
+
+**A tooling finding that cost most of the session and is not about the game.** The WebSocket
+debugger's memory reads are serviced on the CPU thread, so anything that stops the emulator leaves
+every read *unanswered* rather than answered late - and the scripts then hang with a traceback
+pointing at the read. It happened repeatedly, and the correlation was with the game window being in
+the BACKGROUND while a measurement ran; fronting it usually revived the connection, and sometimes
+only a restart did. Two more shapes of the same trap: a probe that reported "the CPU is stopped"
+when the read had succeeded and merely returned a null pointer, and screenshots that captured the
+wrong window because `Process.MainWindowHandle` does not name this game's window - enumerate the
+process's top-level windows and take the visible one whose title matches. Before trusting any
+measurement here, check that the emulator was actually running while it was taken.
+
 ### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
 
 "Average fps" is useless for this. A run that freezes for a third of a second once a second still
