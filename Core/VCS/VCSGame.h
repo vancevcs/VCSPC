@@ -109,16 +109,26 @@ bool IsGameBuild();
 // the UI thread and PSP memory may only be touched from the emu thread. ApplyDisplayPrefs pushes
 // them across once a tick; see the note there for why that is a write-when-different rather than
 // a write-every-frame.
+// The three positions of the Shadows row, in the order they appear.
+inline constexpr int kVCSShadowsOff = 0;
+inline constexpr int kVCSShadowsEntities = 1;
+inline constexpr int kVCSShadowsEverything = 2;
+
 struct VCSGameSettings {
 	bool showFps = false;
 
-	// Dynamic sun shadows. Ours rather than the game's - see GPU/Common/VCSShadow.cpp - and the
-	// only setting on this struct that reaches the renderer rather than PSP memory, which is why
-	// it is pushed by an onChange in the option table instead of by ApplyGamePrefs.
-	bool dynamicShadows = true;
+	// Dynamic sun shadows: off, people and vehicles, or everything. Ours rather than the game's
+	// - see GPU/Common/VCSShadow.cpp - and the only setting on this struct that reaches the
+	// renderer rather than PSP memory, which is why it is pushed by an onChange in the option
+	// table instead of by ApplyGamePrefs.
+	//
+	// One setting rather than a switch and a separate mode, because "off" and "only the
+	// things that move" are points on one scale: each step costs frames and adds shadows,
+	// and a player choosing between them is making a single decision. It was a bool plus
+	// a choice, which meant a mode row that greyed out and a saved mode that went on
+	// existing while the feature was off.
+	int shadows = kVCSShadowsEntities;
 
-	// Both default to what the game ships with, so a player who never opens the page gets the
-	// retail behaviour rather than this fork's opinion of it.
 	bool subtitles = true;
 
 	// The health, armour, money, weapon and clock panel. NOT the radar, which the game keeps on a

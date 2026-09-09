@@ -59,8 +59,12 @@ static Settings s_settings = {
 	          // close in a car: shadows arrived a second before you reached them.
 	40.0f,    // centreDistance ahead of the camera - the faster you travel, the further ahead
 	          // the shadows have to already exist
+	18.0f,    // nearCascadeRadius - the sharp half, about 0.9cm a texel at 4096. 0 disables
+	          // the split and halves the atlas back to one tile
 	300.0f,   // casterReach - how far up-sun a caster can be and still reach the cascade
-	2048,     // mapSize. 70 units across 2048 texels is about 7cm a texel.
+	4096,     // mapSize. 70 units across 4096 texels is about 3.4cm a texel - and it is a
+	          // depth-only pass over geometry that is already in a buffer, so the cost of
+	          // doubling it is rasterisation nobody was short of rather than memory.
 	true,     // forwardIsNegativeZ
 	1.0f,     // maskScale - the game's own render resolution
 	0.0008f,  // depthBias - small, because the back-face rule does the work a bias used to
@@ -80,6 +84,7 @@ static Settings s_settings = {
 	true,     // hideBlobShadows
 	2.0f,     // nearCameraCutoff
 	400.0f,   // maxCasterSpan
+	false,    // entityCastersOnly - everything casts, which is what a PC port is for
 	false,    // flipShadowV
 	0,        // debugView
 	false,    // showMask
@@ -420,7 +425,54 @@ static void ComputeShadowView(const FrameStats &stats) {
 	s_view.centre[1] = centre[1];
 	s_view.centre[2] = centre[2];
 
+	// The near cascade: the same construction at a smaller radius, anchored on the camera
+	// rather than well ahead of it, because what it is for is the ground under your feet and
+	// the car you are standing next to. Snapped on its OWN texel size - sharing the far
+	// cascade's would leave it crawling, which is the artefact snapping exists to remove.
+	s_view.nearRadius = s_settings.nearCascadeRadius > 1.0f ? s_settings.nearCascadeRadius : 0.0f;
+	if (s_view.nearRadius > 0.0f && s_view.nearRadius < s_view.radius) {
+		s_view.nearTexelWorldSize = (2.0f * s_view.nearRadius) / (float)s_settings.mapSize;
+		float nearCentre[3] = {
+			s_view.cameraPos[0] + s_view.cameraForward[0] * s_view.nearRadius * 0.35f,
+			s_view.cameraPos[1] + s_view.cameraForward[1] * s_view.nearRadius * 0.35f,
+			s_view.cameraPos[2] + s_view.cameraForward[2] * s_view.nearRadius * 0.35f,
+		};
+		const float nearTexel = s_view.nearTexelWorldSize;
+		if (nearTexel > 0.0f) {
+			const float nx = floorf(Dot(nearCentre, s_view.lightRight) / nearTexel) * nearTexel;
+			const float ny = floorf(Dot(nearCentre, s_view.lightUp) / nearTexel) * nearTexel;
+			const float nz = Dot(nearCentre, s_view.lightDir);
+			for (int i = 0; i < 3; i++) {
+				nearCentre[i] = s_view.lightRight[i] * nx + s_view.lightUp[i] * ny +
+					s_view.lightDir[i] * nz;
+			}
+		}
+		for (int i = 0; i < 3; i++) {
+			s_view.nearCentre[i] = nearCentre[i];
+		}
+	} else {
+		s_view.nearRadius = 0.0f;
+		s_view.nearTexelWorldSize = 0.0f;
+	}
+
 	BuildLightViewProj(&s_view);
+	if (s_view.nearRadius > 0.0f) {
+		// Same builder, near numbers. Swapped in and out rather than copied into a second
+		// function, so the two cascades cannot drift apart in how their box is constructed.
+		const float farRadius = s_view.radius;
+		float farCentre[3] = { s_view.centre[0], s_view.centre[1], s_view.centre[2] };
+		s_view.radius = s_view.nearRadius;
+		for (int i = 0; i < 3; i++) {
+			s_view.centre[i] = s_view.nearCentre[i];
+		}
+		BuildLightViewProj(&s_view);
+		memcpy(s_view.nearLightViewProj, s_view.lightViewProj, sizeof(s_view.lightViewProj));
+		s_view.radius = farRadius;
+		for (int i = 0; i < 3; i++) {
+			s_view.centre[i] = farCentre[i];
+		}
+		BuildLightViewProj(&s_view);
+	}
 
 	// World to the pixel the game drew. The 4x3 view matrix widens to 4x4 with the translation
 	// staying in the last row, exactly as ConvertMatrix4x3To4x4 does it, then the projection, then
@@ -858,13 +910,26 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 	// Receivers, always. Casters, only if this draw is small enough to be a thing in the world
 	// rather than the world itself - a sky or a map-spanning quad covers the whole cascade, and
 	// one surface across the whole shadow map puts the entire city in its own shadow.
-	const bool casts = spanX <= s_settings.maxCasterSpan && spanY <= s_settings.maxCasterSpan;
+	//
+	// In entity mode the same decision also asks whether this draw is a thing that moves, which
+	// this game answers with vertex normals - see the setting for why that is a fact rather than
+	// a guess. Receivers are untouched either way: the road still has to darken under the car.
+	const bool isEntity = (gstate.vertType & GE_VTYPE_NRM_MASK) != GE_VTYPE_NRM_NONE;
+	const bool casts = spanX <= s_settings.maxCasterSpan && spanY <= s_settings.maxCasterSpan &&
+		(!s_settings.entityCastersOnly || isEntity);
 	if (!casts) {
 		s_capture.receiverOnlyDraws++;
 	}
 
-	// Object-sized casters are what a flat quad has to be lying under to be a blob shadow.
-	if (s_settings.hideBlobShadows && casts && spanX <= 20.0f && spanY <= 20.0f) {
+	// Object-sized draws are what a flat quad has to be lying under to be a blob shadow.
+	//
+	// Deliberately NOT gated on `casts`. This list exists only for the blob learner, and
+	// in people-and-vehicles mode `casts` is false for all the scenery - so the list lost
+	// everything a blob actually sits on and the learner stopped matching entirely:
+	// measured at 400 ground quads, 96 of them flat and small, and 0 over an object. The
+	// vanilla blob then stayed under every ped and car in the one mode whose whole point
+	// is that those things have real shadows instead.
+	if (s_settings.hideBlobShadows && spanX <= 20.0f && spanY <= 20.0f) {
 		ObjectBounds b;
 		for (int c = 0; c < 3; c++) {
 			b.min[c] = drawMin[c];
@@ -873,14 +938,20 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		s_objectBounds.push_back(b);
 	}
 
+	if (casts && (gstate.vertType & GE_VTYPE_WEIGHT_MASK) != GE_VTYPE_WEIGHT_NONE) {
+		s_capture.casterSkinnedDraws++;
+	}
+
 	AppendGeometry(s_drawPos.data(), numDecodedVerts,
 		casts ? s_drawCastIdx.data() : nullptr, casts ? (int)s_drawCastIdx.size() : 0,
 		s_drawIdx.data(), (int)s_drawIdx.size());
 	s_capture.draws++;
 
 	// Skinned meshes are peds and never remembered: their vertices arrive already in pose, so a
-	// remembered copy is a person frozen mid-stride.
-	if (casts && (gstate.vertType & GE_VTYPE_WEIGHT_MASK) == GE_VTYPE_WEIGHT_NONE) {
+	// remembered copy is a person frozen mid-stride. In entity mode nothing is remembered at all,
+	// for the same reason one step further: everything that casts there is something that moves.
+	if (casts && !s_settings.entityCastersOnly &&
+		(gstate.vertType & GE_VTYPE_WEIGHT_MASK) == GE_VTYPE_WEIGHT_NONE) {
 		RememberCaster(drawMin, drawMax, numDecodedVerts);
 	}
 }
@@ -1049,7 +1120,10 @@ static bool EnsureResources(Draw::DrawContext *draw) {
 
 	// thin3d always gives a colour attachment alongside the depth one. We never write to it -
 	// the blend state masks every channel off - so it costs memory and nothing else.
-	s_fbo = draw->CreateFramebuffer({ size, size, 1, 1, 0, true, "vcs_shadow" });
+	// Two tiles side by side: the near cascade on the left, the far one on the right. One
+	// texture rather than two keeps the mask to a single sampler, which is what makes the
+	// split a change to the shader rather than to the pipeline's descriptor layout.
+	s_fbo = draw->CreateFramebuffer({ size * 2, size, 1, 1, 0, true, "vcs_shadow" });
 	if (!s_fbo) {
 		return false;
 	}
@@ -1154,9 +1228,6 @@ static void RenderCascade(Draw::DrawContext *draw) {
 		"vcs_shadow");
 
 	const float size = (float)s_fboSize;
-	Viewport viewport{ 0.0f, 0.0f, size, size, 0.0f, 1.0f };
-	draw->SetViewport(viewport);
-	draw->SetScissorRect(0, 0, s_fboSize, s_fboSize);
 	draw->BindPipeline(s_pipeline);
 
 	// Count what actually falls in the box, before handing the same matrix to the GPU.
@@ -1177,16 +1248,30 @@ static void RenderCascade(Draw::DrawContext *draw) {
 		s_capture.verticesInCascade = inside;
 	}
 
-	ShadowUB ub;
-	Transpose4x4(s_view.lightViewProj, ub.lightViewProj);
-	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
-
-	for (const Batch &batch : s_batches) {
-		if (batch.casterIndexCount < 3) {
+	// Tile 0 is the near cascade and tile 1 the far one, drawn in that order so the far one
+	// - the one that always exists - is what a machine that somehow fails mid-pass is left
+	// showing. With the split off, only tile 1 is drawn and the mask never looks at tile 0.
+	for (int tile = 0; tile < 2; tile++) {
+		const bool isNear = tile == 0;
+		if (isNear && s_view.nearRadius <= 0.0f) {
 			continue;
 		}
-		draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3, batch.vertexCount,
-			s_casterIndices.data() + batch.firstCasterIndex, batch.casterIndexCount);
+		Viewport viewport{ isNear ? 0.0f : size, 0.0f, size, size, 0.0f, 1.0f };
+		draw->SetViewport(viewport);
+		draw->SetScissorRect(isNear ? 0 : s_fboSize, 0, s_fboSize, s_fboSize);
+
+		ShadowUB ub;
+		Transpose4x4(isNear ? s_view.nearLightViewProj : s_view.lightViewProj,
+			ub.lightViewProj);
+		draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+
+		for (const Batch &batch : s_batches) {
+			if (batch.casterIndexCount < 3) {
+				continue;
+			}
+			draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3, batch.vertexCount,
+				s_casterIndices.data() + batch.firstCasterIndex, batch.casterIndexCount);
+		}
 	}
 	s_capture.rendered = true;
 }
@@ -1211,15 +1296,19 @@ Draw::Framebuffer *ShadowMap() {
 struct MaskUB {
 	float cameraViewProj[16];
 	float lightViewProj[16];
+	float nearLightViewProj[16];
 	float params[4];    // depthBias, flipV, debugView, slopeBias
-	float params2[4];   // shadow texel size, pcf radius, edge fade, unused
+	float params2[4];   // shadow texel size, pcf radius, edge fade, shadow map size
+	float params3[4];   // near cascade on/off, unused x3
 };
 
 static const UniformBufferDesc s_maskUBDesc{ sizeof(MaskUB), {
 	{ "u_cameraViewProj", 0, -1, UniformType::MATRIX4X4, 0 },
 	{ "u_lightViewProj", 1, 0, UniformType::MATRIX4X4, 64 },
-	{ "u_shadowParams", 2, 1, UniformType::FLOAT4, 128 },
-	{ "u_shadowParams2", 3, 2, UniformType::FLOAT4, 144 },
+	{ "u_nearLightViewProj", 2, 1, UniformType::MATRIX4X4, 128 },
+	{ "u_shadowParams", 3, 2, UniformType::FLOAT4, 192 },
+	{ "u_shadowParams2", 4, 3, UniformType::FLOAT4, 208 },
+	{ "u_shadowParams3", 5, 4, UniformType::FLOAT4, 224 },
 } };
 
 static Draw::Framebuffer *s_maskFbo;
@@ -1295,6 +1384,7 @@ static bool EnsureMaskResources(Draw::DrawContext *draw, int width, int height) 
 	// affine, so interpolating its output linearly is exact.
 	static const VaryingDef varyings[] = {
 		{ "vec3", "v_lightClip", Draw::SEM_TEXCOORD0, 0, "highp" },
+	{ "vec3", "v_nearClip", Draw::SEM_TEXCOORD1, 1, "highp" },
 	};
 
 	// Every uniform is declared in both stages, even though each stage only reads some of them.
@@ -1304,8 +1394,10 @@ static bool EnsureMaskResources(Draw::DrawContext *draw, int width, int height) 
 	static const UniformDef uniforms[] = {
 		{ "mat4", "u_cameraViewProj", 0 },
 		{ "mat4", "u_lightViewProj", 1 },
-		{ "vec4", "u_shadowParams", 2 },
-		{ "vec4", "u_shadowParams2", 3 },
+		{ "mat4", "u_nearLightViewProj", 2 },
+		{ "vec4", "u_shadowParams", 3 },
+		{ "vec4", "u_shadowParams2", 4 },
+		{ "vec4", "u_shadowParams3", 5 },
 	};
 
 	const size_t kShaderBufferSize = 8192;
@@ -1315,6 +1407,7 @@ static bool EnsureMaskResources(Draw::DrawContext *draw, int width, int height) 
 		static const InputDef inputs[] = { { "vec3", "a_position", Draw::SEM_POSITION } };
 		writer.BeginVSMain(inputs, uniforms, varyings);
 		writer.C("  v_lightClip = mul(vec4(a_position, 1.0), u_lightViewProj).xyz;\n");
+		writer.C("  v_nearClip = mul(vec4(a_position, 1.0), u_nearLightViewProj).xyz;\n");
 		writer.C("  gl_Position = mul(vec4(a_position, 1.0), u_cameraViewProj);\n");
 		writer.EndVSMain(varyings);
 	}
@@ -1331,36 +1424,75 @@ static bool EnsureMaskResources(Draw::DrawContext *draw, int width, int height) 
 		writer.HighPrecisionFloat();
 		writer.DeclareSamplers(samplers);
 		writer.BeginFSMain(uniforms, varyings);
-		writer.C("  vec2 shadowUV = v_lightClip.xy * 0.5 + 0.5;\n");
+		// Pick the cascade first, then everything below is written against one of them.
+		//
+		// The near tile is used wherever this pixel falls inside it with a margin, and the
+		// margin is what stops the seam being visible: at the very edge of the near box a
+		// PCF tap would reach outside it and read whatever the far cascade left in the
+		// neighbouring texels, so the handover happens a few texels early where both
+		// cascades still agree.
+		writer.C("  vec3 lightClip = v_lightClip;\n");
+		writer.C("  float tile = 1.0;\n");
+		writer.C("  if (u_shadowParams3.x > 0.5) {\n");
+		writer.C("    vec2 nearEdge = abs(v_nearClip.xy);\n");
+		writer.C("    if (max(nearEdge.x, nearEdge.y) < 0.92 && v_nearClip.z > 0.0 && v_nearClip.z < 1.0) {\n");
+		writer.C("      lightClip = v_nearClip;\n");
+		writer.C("      tile = 0.0;\n");
+		writer.C("    }\n");
+		writer.C("  }\n");
+		writer.C("  vec2 shadowUV = lightClip.xy * 0.5 + 0.5;\n");
 		// Which way up the shadow map's V axis runs depends on the backend's clip convention. It
 		// should not need flipping on either of them - a framebuffer's first texel row and clip
 		// -1 are the same end of the image in Vulkan and in GL both, because the two conventions
 		// flip together - but getting it wrong puts the right shapes in the wrong places, which
 		// is worth one checkbox rather than an argument.
 		writer.C("  if (u_shadowParams.y > 0.5) { shadowUV.y = 1.0 - shadowUV.y; }\n");
-		writer.C("  float refZ = v_lightClip.z;\n");
+		writer.C("  float refZ = lightClip.z;\n");
 		// Slope-scaled bias, from the depth derivatives rather than from a normal. Most of this
 		// city arrives with no vertex normals at all - only ~24 draws of 161 carry them, the peds
 		// and the vehicles - so normal-offset bias is not available for the geometry that needs
 		// it most. fwidth is: it is large exactly where the light grazes a surface, which is
 		// where acne is, and near zero on a wall facing the sun.
 		writer.C("  float bias = u_shadowParams.x + u_shadowParams.w * fwidth(refZ);\n");
-		writer.C("  vec2 clampedUV = clamp(shadowUV, 0.0, 1.0);\n");
+		// Tile UV to atlas UV: each tile owns half the width, so u is halved and pushed into
+		// its own half. Everything above works in TILE space, which is what lets the filter
+		// below stay exactly the code that was written for a single map.
+		writer.C("  vec2 clampedUV = vec2((clamp(shadowUV.x, 0.0, 1.0) + tile) * 0.5, clamp(shadowUV.y, 0.0, 1.0));\n");
 		writer.C("  float mapDepth = ").SampleTexture2D("shadowMap", "clampedUV").C(".r;\n");
-		// A fixed 3x3, with the offset scaled by the radius - so radius 0 is nine taps at one
-		// texel and costs the same as one. Nine taps of a 2048 map is what makes the edge read as
-		// a shadow rather than as a cutout, and a loop bound that is not a constant is not worth
-		// what it does to the shader.
-		writer.C("  float texelStep = u_shadowParams2.x * u_shadowParams2.y;\n");
+		// Nine taps, weighted by where the sample point actually falls between them.
+		//
+		// This is the whole of "the shadows are pixelated", and it was the FILTER rather than
+		// the resolution. The old version averaged nine NEAREST samples, so the answer could
+		// only ever be one of ten values and every one of them changed at a texel boundary -
+		// a step every 7cm on the ground at 2048 texels across a 140-unit cascade, which is a
+		// staircase however many taps are averaged. Weighting each tap by its distance from
+		// the sample point makes the result continuous: the same nine fetches, read as a
+		// surface instead of as a grid.
+		//
+		// The taps sit on a grid of whole texels `spacing` apart, so they always land on texel
+		// centres and the weights are the ordinary bilinear ones evaluated in that grid's own
+		// units. pcfRadius therefore still means "softer" - it widens the spacing and the
+		// reconstruction stretches with it - rather than "more values to average".
+		writer.C("  float spacing = 1.0 + u_shadowParams2.y;\n");
+		writer.C("  vec2 gridPos = (shadowUV * u_shadowParams2.w - 0.5) / spacing;\n");
+		writer.C("  vec2 node = floor(gridPos + 0.5);\n");
+		writer.C("  vec2 nodeFrac = gridPos - node;\n");
 		writer.C("  float sum = 0.0;\n");
+		writer.C("  float weightSum = 0.0;\n");
 		writer.C("  for (int iy = -1; iy <= 1; iy++) {\n");
 		writer.C("    for (int ix = -1; ix <= 1; ix++) {\n");
-		writer.C("      vec2 tapUV = clamp(shadowUV + vec2(float(ix), float(iy)) * texelStep, 0.0, 1.0);\n");
+		writer.C("      vec2 tapTexel = (node + vec2(float(ix), float(iy))) * spacing;\n");
+		writer.C("      vec2 tapTile = clamp((tapTexel + 0.5) * u_shadowParams2.x, 0.0, 1.0);\n");
+		writer.C("      vec2 tapUV = vec2((tapTile.x + tile) * 0.5, tapTile.y);\n");
 		writer.C("      float tapDepth = ").SampleTexture2D("shadowMap", "tapUV").C(".r;\n");
-		writer.C("      sum += (refZ - bias > tapDepth) ? 0.0 : 1.0;\n");
+		writer.C("      float tapLit = (refZ - bias > tapDepth) ? 0.0 : 1.0;\n");
+		writer.C("      float wx = clamp(1.0 - abs(float(ix) - nodeFrac.x), 0.0, 1.0);\n");
+		writer.C("      float wy = clamp(1.0 - abs(float(iy) - nodeFrac.y), 0.0, 1.0);\n");
+		writer.C("      sum += tapLit * wx * wy;\n");
+		writer.C("      weightSum += wx * wy;\n");
 		writer.C("    }\n");
 		writer.C("  }\n");
-		writer.C("  float lit = sum * (1.0 / 9.0);\n");
+		writer.C("  float lit = sum / max(weightSum, 0.0001);\n");
 		// The cascade has an edge, and without this it is a straight line ruled across the road.
 		writer.C("  vec2 edge = abs(shadowUV * 2.0 - 1.0);\n");
 		writer.C("  float edgeDist = max(edge.x, edge.y);\n");
@@ -1484,6 +1616,10 @@ static void RenderMask(Draw::DrawContext *draw, int width, int height, int viewW
 	MaskUB ub;
 	Transpose4x4(s_view.cameraViewProj, ub.cameraViewProj);
 	Transpose4x4(s_view.lightViewProj, ub.lightViewProj);
+	// With the split off this is the far matrix again rather than anything undefined: the
+	// varying is still computed and still interpolated, it is simply never chosen.
+	Transpose4x4(s_view.nearRadius > 0.0f ? s_view.nearLightViewProj : s_view.lightViewProj,
+		ub.nearLightViewProj);
 	ub.params[0] = s_settings.depthBias;
 	ub.params[1] = s_settings.flipShadowV ? 1.0f : 0.0f;
 	ub.params[2] = (float)s_settings.debugView;
@@ -1491,7 +1627,16 @@ static void RenderMask(Draw::DrawContext *draw, int width, int height, int viewW
 	ub.params2[0] = s_fboSize > 0 ? 1.0f / (float)s_fboSize : 0.0f;
 	ub.params2[1] = (float)s_settings.pcfRadius;
 	ub.params2[2] = s_settings.edgeFade;
-	ub.params2[3] = 0.0f;
+	// The filter works in texel and tap-grid units, so it needs the size as well as its
+	// reciprocal - and computing one from the other in the shader is a divide per pixel.
+	ub.params2[3] = (float)s_fboSize;
+	// Whether the near tile was drawn at all. The shader tests this rather than trying to
+	// infer it from a matrix, so a disabled split costs one compare and reads the far
+	// cascade exactly as it did before the atlas existed.
+	ub.params3[0] = s_view.nearRadius > 0.0f ? 1.0f : 0.0f;
+	ub.params3[1] = 0.0f;
+	ub.params3[2] = 0.0f;
+	ub.params3[3] = 0.0f;
 	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
 
 	for (const Batch &batch : s_batches) {
@@ -1893,10 +2038,32 @@ void BeginFrame(Draw::DrawContext *draw) {
 	if (!g_active) {
 		return;
 	}
+	// Turning entity mode ON has to throw the cache away rather than let it drain. Everything in
+	// it is scenery, nothing captured from here on will replace any of it, and a held cell casts
+	// for cacheHoldSeconds - so without this the setting appears not to work for the better part
+	// of half a minute, which reads as the filter being broken.
+	static bool s_cachedUnderEntityMode = false;
+	if (s_cachedUnderEntityMode != s_settings.entityCastersOnly) {
+		s_cachedUnderEntityMode = s_settings.entityCastersOnly;
+		s_buckets.clear();
+	}
+
 	// Publish and reset, and nothing else. The passes themselves run inside the frame, at the
 	// seam between the world and the HUD - see OnFlush.
 	s_published = s_current;
 	s_capturePublished = s_capture;
+
+	// Once per boot, for the same reason the cache says so: entity mode rests on a claim about
+	// this game's vertex formats, and a build where that claim stopped holding would show up as
+	// shadows quietly missing rather than as anything an assert could catch. A count near zero
+	// means nothing is being recognised as a person or a vehicle.
+	static bool s_saidEntityMode = false;
+	if (s_settings.entityCastersOnly && !s_saidEntityMode && s_capture.draws > 50) {
+		s_saidEntityMode = true;
+		WARN_LOG(Log::G3D, "VCS: people-and-vehicles shadows: %d of %d captured draws cast, %d of them skinned",
+			s_capture.draws - s_capture.receiverOnlyDraws, s_capture.draws,
+			s_capture.casterSkinnedDraws);
+	}
 
 	memset(&s_capture, 0, sizeof(s_capture));
 	s_positions.clear();
@@ -2375,6 +2542,15 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 			}
 			if (moved > 40.0f * 40.0f) {
 				s_buckets.clear();
+				// And forget which textures were blob shadows, which is the same event
+				// seen from the other side. The learner keys on the texture's ADDRESS,
+				// and a load puts the same artwork somewhere else - so every learned
+				// entry becomes a stale address that matches nothing, while the table
+				// stays full and refuses to learn the new ones. Sixteen slots of rubbish
+				// and the vanilla blob under every ped and car, permanently, which is
+				// exactly how it was reported: fine until you load a save.
+				s_blobTextureCount = 0;
+				s_blobCandidateCount = 0;
 			}
 		}
 		memcpy(s_lastCameraPos, s_frameCameraPos, sizeof(s_lastCameraPos));

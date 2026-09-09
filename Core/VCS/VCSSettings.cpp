@@ -36,12 +36,24 @@
 
 namespace VCS {
 
+// The Shadows row is one number; the shadow pass wants two answers. Deriving both in one
+// place is what stops "off" and "people and vehicles" ever being live at the same time.
+static void ApplyShadowSetting() {
+	const int mode = GameSettings().shadows;
+	VCSShadow::GetSettings().entityCastersOnly = mode == kVCSShadowsEntities;
+	VCSShadow::SetEnabled(mode != kVCSShadowsOff);
+}
+
 // Labels for the Choice options. These mirror PPSSPP's own settings screen so the two never
 // disagree about what a given index means.
 static const char *const kResolutionLabels[] = {
 	"Auto", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x", "10x",
 };
 static const char *const kAnisoLabels[] = { "Off", "2x", "4x", "8x", "16x" };
+
+// Not "all" and "entities". A player knows what a person and a car are, and has never heard of an
+// entity - and "everything" says the thing the other choice is measured against.
+static const char *const kShadowLabels[] = { "Off", "People and vehicles", "Everything" };
 
 // "3x (1440x816)". The multiplier is what the setting means; the pixel count is what it does, and
 // a resolution is the one setting a player already has a number for. Computed rather than written
@@ -380,10 +392,17 @@ const std::vector<Option> &Options() {
 		// but whether it runs at all - everything a player would otherwise tune (cascade size,
 		// bias, tint) is in the debugger's Shadows tab, which is where a knob needing a
 		// paragraph of measurement belongs.
-		addBool(OptionPage::Graphics, "DynamicShadows", "Dynamic shadows",
-			"Cast real shadows from the sun. Costs frames; the PSP game has none.",
-			&GameSettings().dynamicShadows, false, false, []() {
-				VCSShadow::SetEnabled(GameSettings().dynamicShadows);
+		// One row, three positions, because it is one decision. What the pass costs is mostly
+		// the geometry it draws a second time, and the city is nearly all of that geometry - so
+		// the middle position is the frame-rate setting as well as a real preference. Shadows
+		// under the player, the traffic and the crowd are the ones a player watches, and the
+		// ones the PSP game itself fakes with a blob under every object.
+		addChoice(OptionPage::Graphics, "Shadows", "Shadows",
+			"Real shadows from the sun, which the PSP game has none of. Each step costs frames; "
+			"the middle one keeps the shadows you actually watch.",
+			&GameSettings().shadows, kShadowLabels,
+			ARRAY_SIZE(kShadowLabels), kVCSShadowsEntities, false, []() {
+				ApplyShadowSetting();
 			});
 
 		addBool(OptionPage::Graphics, "ShowFps", "Show FPS",
@@ -505,7 +524,7 @@ void LoadSettings() {
 	// switched-off feature has to cost a bool test rather than a call into Core. Pushed here as
 	// well as from the row's onChange, so the value in the file is live from the first frame
 	// rather than from the first time somebody opens the page.
-	VCSShadow::SetEnabled(GameSettings().dynamicShadows);
+	ApplyShadowSetting();
 }
 
 void SaveSettings() {

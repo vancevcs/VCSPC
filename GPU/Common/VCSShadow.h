@@ -210,6 +210,13 @@ struct ShadowView {
 
 	float lightViewProj[16];
 
+	// The near cascade, in the left half of the atlas. `nearRadius` is zero when the split
+	// is off, which is what the mask tests rather than carrying a separate flag.
+	float nearRadius;
+	float nearCentre[3];
+	float nearTexelWorldSize;
+	float nearLightViewProj[16];
+
 	// World to the pixel the game drew, for the mask pass. Built from the same captured view
 	// matrix, the projection matrix beside it, AND everything PPSSPP's own vertex shader does
 	// after those two - the PSP viewport transform, the raster offset, the remap into the render
@@ -232,6 +239,18 @@ struct Settings {
 	// map on screen without first having to decompose the game's projection matrix.
 	float cascadeRadius;
 	float centreDistance;
+
+	// The near half of the split. One cascade cannot be both wide enough to cover the road
+	// ahead and fine enough to draw a person's shadow: at 70 units and a 4096 map a texel is
+	// 3.4cm, which is eleven screen pixels at arm's length, and no filter turns eleven pixels
+	// of one value into a sharp edge. So the depth pass renders TWICE into one atlas - this
+	// radius around the camera, and cascadeRadius for everything beyond it - and the mask
+	// picks per pixel. At 18 units that is 0.9cm a texel, about three screen pixels.
+	//
+	// Zero turns the split off and goes back to one cascade, which is the setting to reach
+	// for if the atlas costs too much: the texture is twice as wide, so 4096 tiles are a
+	// 8192x4096 depth buffer.
+	float nearCascadeRadius;
 
 	// How far UP-SUN of the cascade the depth pass still accepts casters.
 	//
@@ -351,6 +370,23 @@ struct Settings {
 	// this span.
 	float maxCasterSpan;
 
+	// Only the things that MOVE cast: the player, other people, and vehicles. The world itself is
+	// captured as a receiver, so the road still darkens under a car - it simply stops throwing
+	// shadows of its own.
+	//
+	// The discriminator is vertex NORMALS, and in this game that is a fact about how the world was
+	// built rather than a heuristic. VCS ships its scenery prelit into vertex colours and carries
+	// no normals for any of it; the models that have to be lit as they move carry them, because
+	// nothing can prelight a car that drives. Measured on an ordinary street: 24 draws of 161, and
+	// 24 is what a street's worth of traffic and pedestrians looks like.
+	//
+	// It also turns the caster cache off, which is not an optimisation but a correctness rule. The
+	// cache remembers PLACES, and a cell keeps what it held until something else is drawn in it -
+	// which is exactly right for scenery that has left the view and exactly wrong for a car, whose
+	// cell has nothing to replace it with once it has driven out of it. Everything this mode
+	// captures is a thing that moves, so there is nothing left worth remembering.
+	bool entityCastersOnly;
+
 	// Which way up the shadow map's V axis runs depends on the backend's clip convention. Wrong,
 	// and the shadows track the right shapes in the wrong places - so it is a toggle to be
 	// settled in one run rather than a guess compiled into the shader.
@@ -389,6 +425,11 @@ struct CaptureStats {
 	int casterIndices;
 	int receiverIndices;
 	int receiverOnlyDraws;
+
+	// Of the draws that DO cast, how many are skinned - which in this game means a person. It is
+	// the check on the entity filter: skinned casters are peds and the player, so a count of zero
+	// beside a healthy caster count would mean the filter is keeping the wrong sixteen draws.
+	int casterSkinnedDraws;
 
 	// Draws thrown out for sitting on top of the camera - see nearCameraCutoff. One or two a
 	// frame is the colour filter and is expected; zero means the filter is not finding it, and

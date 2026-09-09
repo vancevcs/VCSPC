@@ -3680,6 +3680,76 @@ Worth reporting upstream. The fix is one identifier.
 - **an off-screen-target reject** - a render-to-texture pass has its own camera, and mixing its
   geometry into the capture would project one frame's shadows from two of them.
 
+#### Pixelated was the FILTER, not the resolution
+
+Reported as "really low quality, pixelated", and the instinct - a bigger shadow map - would have
+been treating the symptom. The mask took nine NEAREST samples of the depth map and averaged them,
+so the shadow term could only ever be one of ten values, and every one of them changed at a texel
+boundary. At 2048 texels across a 140-unit cascade that is a visible step every 7cm on the ground,
+and averaging more taps only ever makes a bigger staircase.
+
+The filter now weights each of those same nine taps by how far the sample point actually falls from
+it. The taps sit on a grid of whole texels `spacing` apart so they always land on texel centres,
+and the weights are the ordinary bilinear ones evaluated in that grid's units - which makes the
+result continuous rather than quantised, at exactly the cost it had before. `pcfRadius` still means
+"softer": it widens the spacing and the reconstruction stretches with it, instead of meaning "more
+values to average".
+
+The map went to **4096** alongside it, which is worth about 3.4cm a texel. That is the part that
+IS resolution, and it is cheap here for a reason worth remembering: the depth pass is depth-only
+over geometry that is already sitting in a vertex buffer, so doubling the map costs rasterisation
+nobody was short of rather than memory bandwidth on a texture nobody is sampling. The debugger's
+Shadows tab drops it back to 2048 in one click if a machine disagrees.
+
+#### Two cascades in one atlas, because one can never be both wide and sharp
+
+Reported after the filter fix as "still quite pixelated", and the arithmetic says why a third round
+of filtering would not have helped either. A single cascade 70 units across a 4096 map is 3.4cm a
+texel; at arm's length that is about **eleven screen pixels** at 1080p, and no reconstruction turns
+eleven pixels of one value into a sharp edge. The far cascade cannot simply be shrunk, because its
+size is what puts shadows on the road before you drive into them.
+
+So the depth pass renders **twice into one texture**: `nearCascadeRadius` (18 units, about 0.9cm a
+texel - three screen pixels) around the camera in the left tile, and `cascadeRadius` for everything
+beyond it in the right. The mask picks per pixel.
+
+**One texture rather than two is the whole reason this is a small change.** A second shadow map
+would mean a second sampler in the mask pipeline, which means a different descriptor layout and a
+different pipeline; an atlas means the fragment shader halves a `u` and adds a tile offset, and
+every other line of the pass is untouched. The filter above still works entirely in TILE texels and
+only converts at the moment it samples, which is what let a fairly delicate PCF survive the change
+without being re-derived.
+
+Four things in it are worth knowing before touching it:
+
+- **Each cascade snaps to its OWN texel size.** Sharing the far one's would leave the near cascade
+  crawling as the camera moves, which is the exact artefact snapping exists to remove - and it
+  would be four times more visible in the tile that is four times finer.
+- **The near cascade is anchored on the camera, not ahead of it.** `centreDistance` exists because
+  a car outruns its shadows; the near tile is for the ground under your feet and the vehicle beside
+  you, so it sits a third of its own radius ahead and no further.
+- **The handover happens at 0.92 of the near box, not at its edge.** A PCF tap at the very boundary
+  would reach outside the tile and read whatever the far cascade left in the neighbouring texels -
+  the two tiles are adjacent in one image, so "outside" is not empty, it is the other cascade. A few
+  texels of margin puts the seam where both still agree.
+- **`BuildLightViewProj` is called three times rather than copied.** The near matrix is built by
+  swapping the near radius and centre into `ShadowView`, calling the same builder, taking a copy,
+  and swapping back. Two cascades that construct their box by different code are two cascades that
+  will eventually disagree about the near plane.
+
+**Measured: 29.91 fps, which is full speed, with 4096-texel tiles - an 8192x4096 depth buffer.**
+The depth pass draws the same geometry twice, and it was never the expensive half: it is depth-only
+over vertices already sitting in a buffer. Setting `Near cascade radius` to 0 in the debugger turns
+the split off and halves the atlas, which is the first thing to try if a machine disagrees.
+
+**And a note on how this was checked, because the first screenshot said "broken".** A shot taken
+under the pier came back with a huge blue slab across the frame and read as a serious bug; the same
+build on an open street came back with crisp building and palm shadows and the player's own shadow
+correct. The slab was a real shadow - the structure overhead - and the two pictures differed by
+where the player stood and an hour of game time. **One screenshot of a shadow feature is not
+evidence**; this file already records two rounds lost to exactly that, and the working practice is a
+control shot from the same spot with the feature off.
+
 #### Bias, and why it is not the usual bias
 
 Only ~24 draws in 161 carry vertex normals - the peds and the vehicles. The world is prelit into
@@ -3917,15 +3987,107 @@ bug. What ended it was two pictures - the depth map on screen, and the frame wit
 disabled - neither of which is an argument about mechanism. Both took one build each. The reasoning
 took several.
 
+#### One row, three positions: off, people and vehicles, everything
+
+`Shadows` on the Graphics page, **defaulting to the middle** since 2026-09-09. It was a `Dynamic
+shadows` switch with a separate `Shadows from` mode under it, and fusing them is not tidying: the
+two were one decision wearing two controls, so the mode row had to grey itself out when the switch
+was off, and a saved mode went on existing for a feature that was not running. One `Choice`, one
+ini key, and `ApplyShadowSetting` as the single place that turns the number into the two answers
+the renderer wants - which is what stops "off" and "people and vehicles" ever being live together.
+
+The middle position is the frame-rate lever for this whole feature - what the shadow pass costs is mostly the geometry it
+draws a second time, and the city is nearly all of that geometry. It is also a real preference
+rather than a quality ladder: shadows under the player, the traffic and the crowd are the ones a
+player watches, and they are the ones the PSP game itself fakes with a blob under every object.
+
+**The world still RECEIVES.** Only the caster half of the split is filtered - the same mechanism
+`maxCasterSpan` already uses to keep the sky and the map-spanning ground quad out of the depth map -
+so the road goes on darkening under a car. A mode that dropped the world from both halves would put
+the car's shadow nowhere.
+
+**The discriminator is vertex normals, and in this game that is a fact rather than a heuristic.**
+VCS ships its scenery prelit into vertex colours and carries no normals for any of it; the models
+that have to be lit as they move carry them, because nothing can prelight a car that drives. That
+was measured here long before this setting existed, while working out why normal-offset bias was
+not available: 24 draws of 161 on an ordinary street, and 24 is what a street's worth of traffic and
+pedestrians looks like. So the test is one bit of the vertex type, already decoded, costing nothing.
+
+**It turns the caster cache off, and that is correctness rather than an optimisation.** The cache
+remembers PLACES: a 32-unit cell keeps whatever was captured in it until something else is drawn
+there, which is exactly right for scenery that has left the view and exactly wrong for a car, whose
+cell has nothing to replace it with once it has driven out. Everything this mode captures is
+something that moves, so there is nothing left worth remembering - and the cache is skipped rather
+than left running to no purpose.
+
+**Switching the mode ON also throws the cache away rather than letting it drain.** Everything in it
+is scenery, nothing captured afterwards will replace any of it, and a held cell casts for
+`cacheHoldSeconds` - twenty-five of them. Without the clear, the setting appears not to work for the
+better part of half a minute, which reads as the filter being broken rather than as the cache being
+patient.
+
+**Measured, on an ordinary street: 24 of 1154 captured draws cast, and 12 of those 24 are skinned.**
+Two per cent of the frame, and half of what survives is people - which is what "only the things that
+move" is supposed to look like, since the other half is the traffic. The skinned count is the check
+worth keeping: a healthy caster count with zero skinned draws in it would mean the filter is keeping
+the wrong twenty-four, and no screenshot taken at the wrong time of day could tell you that.
+
+It says so once per boot in the log, for the reason the caster cache does: this rests on a claim
+about the game's vertex formats, and a build where the claim stopped holding would show up as
+shadows quietly missing rather than as anything an assert could catch. The Shadows tab carries the
+same two numbers every frame.
+
+The row is `enabledBy` the switch above it, so it greys out with the feature rather than sitting
+there implying shadows are on. The debugger's Shadows tab has the same toggle, next to
+`Max caster span`, for flipping it against a scene without leaving the game.
+
+**A note on testing this at all, which cost more than the feature did.** Judging it by screenshot is
+much harder than it sounds: the sun's own brightness scales the shadow strength, so dusk looks
+identical to the feature being off, and this fork's save loads indoors. Two full rounds of
+screenshots were taken before noticing that `vcs.ini` had `DynamicShadows = False` in it - shadows
+had been off entirely, and the pictures said nothing about the mode. The counter is the instrument;
+the picture is the illustration. Check the setting is actually on before reading a frame.
+
+#### The blob shadows came back in people-and-vehicles mode, and the cause was one word
+
+Reported as "with the shadow set to player + peds, on loading the game the static shadow sprites
+still appear" - the vanilla blob under every ped and car, in the one mode whose entire point is that
+those things have real shadows instead.
+
+**The learner matches a flat quad against the bounds of things drawn near it, and that list was
+gated on `casts`.** In people-and-vehicles mode `casts` is false for all the scenery, so the list
+stopped containing the ground, the kerbs and the props a blob actually lies on, and nothing matched
+any more. Measured with a temporary counter through the funnel: **400 ground quads, 96 of them flat
+and small, and 0 over an object**, against 23 bounds in the frame. With the gate removed: 24 flat
+quads, **24 over an object**, 944 bounds, and textures learning again within seconds of a load.
+
+The list exists only for this test, so it never wanted the caster mode's opinion. `s_objectBounds`
+is now filled for any small draw the caster filter's shape tests accepted, in every mode, which is
+what it was doing before the mode existed.
+
+**A second, independent bug was fixed alongside it, and it is the one the "upon loading" in the
+report is really about.** The learner keys on a texture's ADDRESS, and a load puts the same artwork
+somewhere else - so after loading a save every learned entry is a stale address matching nothing,
+while the table stays full at its sixteen slots and refuses to learn the new ones. The world-reload
+detection that already clears the caster cache - the recovered camera jumping further in one frame
+than any camera can move - now clears the learned blob textures too.
+
+**The method note.** Three explanations were argued for before any of them was tested: a stale
+table, a slow learner, a mode that skipped the call. Two were real bugs and one of those was not
+THIS bug, which is the shape this file has now recorded five times. What ended it was ten lines of
+counter printing where the candidates were being lost - the funnel says "0 over an object" and there
+is nothing left to have an opinion about. **A counter through the stages costs less than one round
+of reasoning about which stage it is.**
+
 #### Known, and deliberately left
 
 **Geometry you have never looked at cannot cast.** The capture only ever sees what the game
 draws, and the cache only remembers places that have been on screen. Walk into a street facing away
-from a building and it casts nothing until you have seen it once. Fixing that properly means
-widening the game's OWN frustum culling - hooking whatever `CRenderer::ScanWorld` uses to decide
-visibility so it draws more than the camera can see - which is an address hunt of the kind the
-fire hook and the climb calls went through, and it costs frame time in the game's own rendering
-rather than in ours.
+from a building and it casts nothing until you have seen it once. Three mechanisms have now been found,
+decoded and measured - the camera frustum, the streamer's delete-behind pass, and the per-model
+draw distances - and none of the three decides anything. The three sections below are what is ruled
+out; what remains is entity construction, because an entity appears to cache what it needs from its
+model info at the moment it is made.
 
 **Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which
 needs UVs in the capture and a draw call per texture rather than one for the whole cascade. The
@@ -3935,6 +4097,256 @@ makes the pass Vulkan-specific and it is not free.
 
 **The moon is the sun's light mirrored, not a real lunar position.** It puts night shadows
 somewhere plausible rather than somewhere correct.
+
+### The hunt for the visibility function, and the frustum that decides nothing
+
+**Status: the lever was found, verified, measured, and removed. The question is still open.** What
+follows is the whole of it, because the next attempt should start from the two things that are
+ruled out rather than rediscover them.
+
+VCS culls hard to the camera, which is how a PSP ran it, and the shadow pass can only ever see what
+reaches the GPU. So the standing request - *"trick the game that I am always looking 360 degrees"* -
+is a request to widen whatever the game tests against before it draws.
+
+**What was found.** A memory WRITE breakpoint on `CCamera + 0xAB0` (`0x08BC88E0`) breaks inside
+`0x08a1db40`, which is called once a frame from exactly one place, `0x08a23e84`. It reads a culling
+FOV out of `gp - 0x4250` (`0x08BADB10`, reads 70.0), converts to radians, **halves it with a
+`lui $a0, 0x3F00` at `0x08a1dbac`** - the float 0.5, whose low sixteen bits are implicitly zero -
+and builds four camera-space plane normals from the sine and cosine of the result:
+
+```
++0xAB0  ( cos t, -sin t, 0)     t = 35.00 deg horizontally
++0xAC0  (-cos t, -sin t, 0)
++0xAD0  (0, -sin u,  cos u)     u = 21.87 deg, the same angle narrowed by the aspect
++0xAE0  (0, -sin u, -cos u)
+```
+
+**The patch works, and it is one 16-bit field.** Scaling that one immediate scales the half-angle,
+and the vertical pair is derived from the same register afterwards, so both axes move together.
+Verified in both directions against the planes themselves: 1.8x gave 62.89 deg horizontally and
+39.31 deg vertically, and 0.125x gave 4.37 deg. The projection matrix is built elsewhere, so
+nothing about the picture changes either way.
+
+**And it decides nothing.** Two measurements, and the second is the one that ends the argument:
+
+- Booted twice into the SAME savestate, so the scene is identical rather than merely similar:
+  **1445 draws / 166,762 vertices at 35 deg against 1469 / 168,743 at 62.89 deg**, twenty samples
+  each, medians. The two sequences interleave - 1415, 1444, 1445, 1469, 1481, 1518 appear in both -
+  which is what a scene playing out identically looks like.
+- Narrowed to **4.37 deg** - a slit - and the screen still draws the whole street: buildings, palms,
+  traffic, out to both edges. Done on the INTERPRETER, because a raw `memory.write` of an
+  instruction is only live there; under the JIT the compiled block holds a stale copy of the
+  constant and the write appears to do nothing.
+
+**Nothing reads those planes either.** A read breakpoint on `0x08BC88E0` sat silent through 16
+seconds of ordinary play, while the same kind of breakpoint on `TimeStep` fired instantly - the
+control that makes the silence evidence rather than a broken tool. So the function computes a
+frustum every frame and stores it, and the renderer consults something else.
+
+**Two things that had to be checked before believing any of that.** The FOV global really is the
+input and the function really does run: writing 20.0 into `0x08BADB10` changes plane 0 within one
+frame, and the game puts 70.0 back inside 100ms. And the emulator being measured has to be the one
+that was built - three runs went into a `PPSSPPWindows64.exe` at the repo root that was a week old,
+reporting a patch that had never been compiled into it. **The Release build this fork runs is
+`GTA Vice City Stories.exe`**, and `PPSSPPDebug64.exe` beside it; check the timestamp against the
+source before trusting a measurement.
+
+**The second candidate, also ruled out.** The retail build kept its own debug command names, in
+pairs of (name pointer, handler pointer) - the registry around `0x08b7d3c8` is how to find any of
+them, and it is worth remembering as a general tool. `IsSphereOnScreen` (`0x08b7d34c`) resolves to
+handler `0x08932a80`, which walks a list and calls **`0x08824354`** - a real sphere-versus-frustum
+test that uses `CDraw::ms_fFarClipZ` (`gp + 0x1e74`) as its default range and culls against
+`camera + 0xd0 / +0xd4` horizontally and `+0xd8 / +0xdc` vertically, the same `(cos, -sin)` shape.
+**That function is not called during rendering either**: an execution breakpoint on it never fired
+in twelve seconds on the interpreter, while the same breakpoint on `0x08a1db40` fired at once.
+
+**Where to look next, in the order they are worth trying.**
+
+- **`CCamera + 0x7bc` holds the render camera.** At `0x08a23ea0` the caller fetches it and copies
+  the camera's position (`+0x30..0x38`) and basis (`+0x10..0x28`) into it. That object is what the
+  renderer actually draws through, and whatever it culls with is reachable from there.
+- **Find the visible-entity list rather than the test.** In this engine lineage the scan fills a
+  large array of entity pointers each frame. An array of many consecutive pointers into the entity
+  heap that changes as the camera turns is findable with `memory.search`, and a write breakpoint on
+  it lands inside the scan - the same move that found the frustum function, aimed at the right
+  structure this time.
+- **Consider that there may be no per-entity frustum cull at all.** A 4.37 degree frustum drawing a
+  complete street is at least consistent with VCS drawing everything the streamer has loaded,
+  regardless of facing, and limiting itself by distance alone. If that is what it does, the shadow
+  complaint has a different cause than the one everybody has assumed, and the test is one honest
+  measurement: the draw count with the camera pointed two opposite ways from one spot. **Turning the
+  camera for that test is itself the hard part** - writing `CameraYaw` from the debugger moved the
+  look vector by 0.0 degrees across 361 writes, because on foot mode 15 rebuilds it from the
+  player's heading every frame, and `input.analog.send` goes straight to `__CtrlSetAnalogXY` and so
+  never reaches this fork's own look path.
+
+**One trap worth fixing wherever else it applies.** The first version of the patch wrote the
+instruction whenever the setting moved and then trusted its own bookkeeping. Loading a savestate
+replaces PSP RAM wholesale, so the patch goes with it while every variable still says it is
+installed - the frustum silently reverted and nothing said so. The fix is to compare against what is
+AT the address rather than against what was last written, which costs one instruction read a tick.
+**The fire hook, the climb-splash hook and the map cursor all have the same exposure** and none of
+them has been checked against a savestate load.
+
+### The streaming grid, and the second lever that turned out to be inert
+
+**Status: decoded, instrumented, measured, and the knob removed. What limits the world is still
+open, but two more mechanisms are now ruled out with numbers rather than argument.**
+
+**The grid.** VCS divides the map into **50 x 50 sectors of 80 world units**, and turns a position
+into a sector index as `(int)(x / 80 + 30)` and `(int)(y / 80 + 25)`, clamped to 0..49 - so the
+world runs -2400..1600 in x and -2000..2000 in y. The sector array is `[gp - 0x6398]`, 56 bytes a
+sector, row stride 0xaf0, and each sector carries six entity lists at `+0x00, +0x04, +0x0c, +0x10,
++0x30, +0x34`. Those three constants (80.0, 30.0, 25.0) are the signature to search for when
+looking for anything that walks this grid; 58 functions carry at least two of them.
+
+**The streamer's public API is 51 thin wrappers** that load the manager from `[gp - 0x298]` and
+tail-call a method - a gp-relative scan finds all of them at once, and that list IS the surface.
+`CStreaming::Update` is `0x08ad3e60`, reached once a frame through the wrapper at `0x08ad35d0`, and
+it does four things: `0x08ad6158`, `0x08ad62dc` (special models, then the zone streamer at
+`0x08ad78dc`), `0x08ad63bc` (the level/interior models, through `0x08809600`), and `0x08ad49ac`,
+the loading channel. **None of those four walks the sector grid**, which is the surprise: buildings
+are not streamed by a sector scan each frame.
+
+**`0x08ad867c` is `CStreaming::DeleteRwObjectsBehindCamera`,** and it is the only thing in the
+streamer that reads the camera's direction. It takes `|forward.x|` against `|forward.y|` from the
+camera matrix at `CCamera + 0x00` to pick a dominant axis, then frees every sector from **2 to 10
+behind** the camera, across a band 10 sectors wide either side. Two sectors is 160 units, about a
+street. It is reached from `CStreaming::Update` through `0x08ad4040` -> `0x08ad6070`, which asks
+the allocator at `0x08bc7cf0` for free space and only calls it when there is not enough.
+
+Get the branch polarity right if this is ever revisited: at `0x08ad87d0` the test is
+`forward.x <= 0`, and the FALL-THROUGH (facing +x) scans `sectorX - 10 .. sectorX - 2`. Behind, not
+ahead. The first reading of this had it backwards and turned a memory-reclaim pass into an
+imagined "load ahead" wedge; the whole interpretation followed from one `bc1t`.
+
+**The lever was four 16-bit immediates**, at `0x08ad87f8`, `0x08ad8818`, `0x08ad8c04` and
+`0x08ad8c28` - the `+/-2` near edge, one per branch of the two axis-major cases. Raising the
+magnitude to N keeps N sectors of world behind the camera; at 10 the near edge meets the far edge,
+the loop that walks the band never runs, and nothing behind is freed this way at all. Only the
+magnitude is ours to move: the sign says which way "behind" runs on that branch.
+
+**And it never runs.** A `REPFLAG_HOOKENTER` hook was installed on the function purely to count
+calls, and it stayed at zero through a full tour of the map - nine teleports across Vice City,
+each forcing a fresh area to stream in, with draw counts visibly collapsing and rebuilding at every
+stop. The controls that make that silence evidence: the hook really was installed (the disassembler
+shows `* replacement:` at the entry while the game runs), and the log channel really does carry the
+message (it was moved to ERROR after WARN turned out to be filtered - `SystemLevel = 2` in
+`ppsspp.ini` is ERROR-only, which this file has now recorded three times). So the streamer is never
+short enough of memory to reach for this, and a setting that moves its threshold is a setting for
+something that does not happen. Removed, for the same reason the draw-distance rows and the culling
+slider were.
+
+**What that leaves.** Nothing culls the world by view direction (the frustum section above) and
+nothing frees it behind you (this one), so what is drawn is bounded by distance alone - which
+points at the **per-model draw distances** at model-info `+0x2c`, `+0x30` and `+0x34`, the one lever
+from the draw-distance port that was never actually pulled. That is where to go next for "render
+much more", and the far clip is NOT it: raising that alone was measured to change nothing, because
+it only governs how far the game is willing to draw rather than what exists to be drawn.
+
+**Method note, because it is the third time.** Two mechanisms in two sessions were found, decoded
+correctly, and turned out inert - and in both cases the thing that settled it was an instrument
+rather than an argument: a slit frustum that still drew the whole street, and a call counter that
+stayed at zero. Building the counter cost less than the reasoning it replaced. When the question is
+"does this code path matter", the cheapest honest answer is usually to make the game say so.
+
+**Two tooling limits worth knowing before planning any measurement here.** The camera cannot be
+turned from outside: writing `CameraYaw` moved the look vector by 0.0 degrees across 361 writes
+because mode 15 rebuilds it from the player's heading every frame, writing `PedHeading` turns the
+player without the camera following while they stand still, `input.analog.send` goes straight to
+`__CtrlSetAnalogXY` and never reaches this fork's own look path, and holding the stick long enough
+to swing the view runs the player two hundred metres down the road. Any "does facing matter"
+measurement therefore has to be made by somebody at the keyboard. And walking does not cross a
+sector - a sector is 80 units and the player covers about two a second on foot - so a streaming
+test needs a teleport, not a walk.
+
+### The per-model draw distances are real, and moving them changes nothing
+
+**Status: measured and ruled out.** This was the one lever the draw-distance port never actually
+pulled, flagged in that section as where to start if the question came back. It came back - a
+building is assembled from parts, its parts stop drawing at different distances, so its shadow comes
+apart before the building does - and the lever is dead.
+
+**The table is exactly where the port said.** `[gp + 24]` is the model-info pointer array and
+`[gp + 7656]` its length: 7941 slots, 4577 filled on an ordinary street. Each info carries a type at
+`+0x10` and three floats at `+0x2c`, `+0x30`, `+0x34`, and reading them back confirms they are
+distances rather than anything else - **the histogram of the first one is 50, 100, 150, 300, and a
+handful at 2000**, which is a draw-distance ladder and could hardly be anything else. 4255 entries
+are type 1 or 3, the two map-object types.
+
+**And scaling them does nothing.** Every one of those 4255 objects had its three distances
+multiplied, live over the debugger, and the draw count was sampled from one settled scene at each
+factor:
+
+| factor | draws | vertices |
+|---|---|---|
+| 1.0 | 996 | 127,837 |
+| 0.2 | 1062 | 118,065 |
+| 1.0 | 726 | 98,361 |
+| 6.0 | 767 | 99,764 |
+| 20.0 | 808 | 103,469 |
+
+A hundredfold range, and the two readings of the SAME factor differ by more than any pair of
+different ones - the scene's own drift, as traffic and streaming move underneath, is larger than the
+signal. Shrinking to a fifth does not gut the world either, which is the control that matters: if
+these governed what is drawn, a fifth of the distance would empty the street.
+
+**The likeliest explanation, and where to go next.** An entity almost certainly caches what it needs
+from its model info when it is CREATED, so editing the info afterwards reaches nothing that already
+exists - which is consistent with everything above and would mean the lever has to act at streaming
+time rather than as a pass over the table. That is a hook on entity construction, not a memory write.
+
+**One address in the old port is mislabelled and cost an hour.** `kVCSEntityLodStore`, at
+`0x08a2412c`, is described as an entity LOD field. It is not: `$s0` there is `CCamera`, the
+instruction is `swc1 $f12, 0x7a0($s0)`, and the surrounding code takes that value straight to
+`CDraw::SetFarClipZ` at `0x08a1ad6c`. A read breakpoint on `CCamera + 0x7a0` lands in `0x089c73d8`,
+which multiplies it by 40 and by 60 and hands the results to what is plainly a fog or haze setter.
+So it is the camera's own draw distance feeding the horizon, and nothing to do with per-entity LOD.
+
+**A first attempt at this measurement was wrong and looked convincing**, which is the method note.
+It compared a sample taken seconds after a teleport against one taken later and read the world
+finishing streaming as the patch making things worse - a 42% "drop" that was the scene loading in.
+Any measurement here has to settle first, keep the originals rather than re-reading them after an
+earlier experiment has already written over them, and sweep the factor both ways in one session.
+
+### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
+
+"Average fps" is useless for this. A run that freezes for a third of a second once a second still
+averages close to thirty, and thirty is what every earlier measurement in this file reported while
+the player was describing a stutter. What a player feels is the LONGEST gap, so the instrument is
+the distribution of intervals between increments of the game's own frame counter, sampled as fast
+as the debugger will answer, while the player is dragged across the map to force streaming.
+
+Same four-stop tour, same build, one boot each:
+
+| | cache off | cache on |
+|---|---|---|
+| median frame | 33.3 ms | 33.4 ms |
+| 90th percentile | 35.7 ms | 34.8 ms |
+| **99th percentile** | **107.0 ms** | **51.9 ms** |
+| **worst single frame** | **417.6 ms** | **251.9 ms** |
+| **frames over 100 ms** | **1.0%** | **0.3%** |
+| frames completed in the same wall time | 583 | 707 |
+
+So it is a real fix for a real part of the problem: **three times fewer hitches and half the
+99th-percentile frame time**, and a fifth more frames completed in the same wall clock, which is the
+stalled time coming back. It does not cure it - a quarter-second freeze still happens - so whatever
+else is behind the remaining spikes is not disc latency.
+
+It costs a slower boot and 1.6 GB of memory: the ISO is read whole at startup, which took **101
+seconds against about 25**, and the process sits at 2.6 GB rather than 1.0. On a machine with the
+room that is a good trade for a game that streams constantly; on one without it, it is the first
+thing to turn off. `IOTimingMethod` is already Fast and is not the lever.
+
+**A tooling note that cost several rounds, and is not about the game at all.** The debugger's memory
+reads are serviced on the CPU thread, so anything that stops the emulator - this fork's own pause
+menu is a `UIScreen`, and a `UIScreen` pauses emulation - leaves every read unanswered rather than
+answered late. A measurement script that treats a read as reliable will hang, and its traceback will
+point at the read rather than at the menu. Two further shapes of the same trap turned up in one
+session: a probe that reported "the CPU is stopped" when the read had actually succeeded and merely
+returned a null player pointer, and a screenshot helper that captured the wrong window because
+`Process.MainWindowHandle` did not name the game's - enumerating top-level windows by process id and
+picking the visible one is what works. Guard every read, and say which of the two things went wrong.
 
 ### Two traps in patching this emulator's code
 

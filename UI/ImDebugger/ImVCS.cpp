@@ -2182,9 +2182,15 @@ void ImVCSWindow::DrawShadows() {
 		// healthy with the composite never running - a mask nobody multiplies in is invisible.
 		ImGui::TextColored(cap.composited ? kGoodColor : kBadColor,
 			"composite: %s", cap.composited ? "multiplied into the frame" : "did NOT reach the frame");
-		ImGui::Text("indices: %d casting, %d receiving; %d draw%s too large to cast",
+		ImGui::Text("indices: %d casting, %d receiving; %d draw%s receive only (%s)",
 			cap.casterIndices, cap.receiverIndices, cap.receiverOnlyDraws,
-			cap.receiverOnlyDraws == 1 ? "" : "s");
+			cap.receiverOnlyDraws == 1 ? "" : "s",
+			set.entityCastersOnly ? "too large, or not a person or vehicle" : "too large to cast");
+		// The check on the entity filter: skinned casters are people, so half of a healthy count
+		// here being skinned is what "only the things that move" actually looks like. Zero beside
+		// a non-zero caster count means the filter is keeping the wrong draws.
+		ImGui::Text("draws casting: %d, of which %d skinned (people)",
+			cap.draws - cap.receiverOnlyDraws, cap.casterSkinnedDraws);
 		// The game's full-screen overlays, drawn as 3D geometry sitting on the camera. If this
 		// reads zero while the mask is a flat colour, they are getting through and winning every
 		// pixel of it - see nearCameraCutoff.
@@ -2268,6 +2274,12 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::SetTooltip("What a shadow goes towards. Outdoors that is the sky, so blue rather than black.");
 	}
 	ImGui::SliderFloat("Cascade radius", &set.cascadeRadius, 8.0f, 200.0f, "%.0f units");
+	ImGui::SliderFloat("Near cascade radius", &set.nearCascadeRadius, 0.0f, 60.0f,
+		"%.0f units");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("The sharp half of the split, around the camera. Zero turns the "
+			"split off and halves the shadow atlas back to one tile.");
+	}
 	ImGui::SliderFloat("Centre ahead", &set.centreDistance, 0.0f, 100.0f, "%.0f units");
 	ImGui::SliderFloat("Caster reach up-sun", &set.casterReach, 50.0f, 600.0f, "%.0f units");
 	if (ImGui::IsItemHovered()) {
@@ -2314,6 +2326,10 @@ void ImVCSWindow::DrawShadows() {
 	ImGui::SliderFloat("Near camera cutoff", &set.nearCameraCutoff, 0.0f, 6.0f, "%.1f units");
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Geometry entirely within this of the camera is thrown away. It is the game's full-screen colour filter, which is 3D geometry 0.6 units across sitting on the camera and covers every pixel of the mask if it gets through. The camera sits 4.6 units behind the player, so there is room.");
+	}
+	ImGui::Checkbox("Only people and vehicles cast", &set.entityCastersOnly);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("The world still RECEIVES, so the road darkens under a car; it just stops casting. Told apart by vertex normals, which this game only carries on models that have to be lit as they move - the scenery is prelit into vertex colours. Also turns the caster cache off, because a cell has nothing to replace a car with once it has driven out of it.");
 	}
 	ImGui::SliderFloat("Max caster span", &set.maxCasterSpan, 50.0f, 2000.0f, "%.0f units");
 	if (ImGui::IsItemHovered()) {
