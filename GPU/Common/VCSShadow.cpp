@@ -84,6 +84,9 @@ static Settings s_settings = {
 	true,     // hideBlobShadows
 	2.0f,     // nearCameraCutoff
 	400.0f,   // maxCasterSpan
+	6.0f,     // propMaxSpan - a lamp post's footprint, generously. A car is about 4 across
+	          // and is caught by the normals test anyway, so this does not have to exclude it
+	2.0f,     // propMinHeight - taller than any decal, shorter than the shortest lamp post
 	false,    // entityCastersOnly - everything casts, which is what a PC port is for
 	false,    // flipShadowV
 	0,        // debugView
@@ -915,10 +918,20 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 	// this game answers with vertex normals - see the setting for why that is a fact rather than
 	// a guess. Receivers are untouched either way: the road still has to darken under the car.
 	const bool isEntity = (gstate.vertType & GE_VTYPE_NRM_MASK) != GE_VTYPE_NRM_NONE;
+
+	// ... and props, which are scenery by every test the game offers and are still things
+	// rather than the world. Small on the ground, tall against it - see propMaxSpan.
+	const float spanZ = drawMax[2] - drawMin[2];
+	const bool isProp = !isEntity &&
+		spanX <= s_settings.propMaxSpan && spanY <= s_settings.propMaxSpan &&
+		spanZ >= s_settings.propMinHeight;
+
 	const bool casts = spanX <= s_settings.maxCasterSpan && spanY <= s_settings.maxCasterSpan &&
-		(!s_settings.entityCastersOnly || isEntity);
+		(!s_settings.entityCastersOnly || isEntity || isProp);
 	if (!casts) {
 		s_capture.receiverOnlyDraws++;
+	} else if (isProp) {
+		s_capture.casterPropDraws++;
 	}
 
 	// Object-sized draws are what a flat quad has to be lying under to be a blob shadow.
@@ -947,10 +960,17 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		s_drawIdx.data(), (int)s_drawIdx.size());
 	s_capture.draws++;
 
-	// Skinned meshes are peds and never remembered: their vertices arrive already in pose, so a
-	// remembered copy is a person frozen mid-stride. In entity mode nothing is remembered at all,
-	// for the same reason one step further: everything that casts there is something that moves.
-	if (casts && !s_settings.entityCastersOnly &&
+	// What may be REMEMBERED is narrower than what casts, and the rule is one question: can
+	// this thing move? A cell is replayed for cacheHoldSeconds after the thing left the view,
+	// so anything that can drive away would be left standing in the road.
+	//
+	// Skinned meshes are people and are never remembered - their vertices arrive already in
+	// pose, so a remembered copy is somebody frozen mid-stride. A vehicle is not skinned, which
+	// is why people-and-vehicles mode used to remember nothing at all. A PROP is the exception
+	// that makes the cache worth having in that mode: it is the only thing there that cannot
+	// move, so a lamp post keeps casting after you have driven past it.
+	const bool canMove = s_settings.entityCastersOnly ? !isProp : false;
+	if (casts && !canMove &&
 		(gstate.vertType & GE_VTYPE_WEIGHT_MASK) == GE_VTYPE_WEIGHT_NONE) {
 		RememberCaster(drawMin, drawMax, numDecodedVerts);
 	}
@@ -2060,9 +2080,9 @@ void BeginFrame(Draw::DrawContext *draw) {
 	static bool s_saidEntityMode = false;
 	if (s_settings.entityCastersOnly && !s_saidEntityMode && s_capture.draws > 50) {
 		s_saidEntityMode = true;
-		WARN_LOG(Log::G3D, "VCS: people-and-vehicles shadows: %d of %d captured draws cast, %d of them skinned",
+		WARN_LOG(Log::G3D, "VCS: people-and-vehicles shadows: %d of %d captured draws cast, %d of them skinned, %d props",
 			s_capture.draws - s_capture.receiverOnlyDraws, s_capture.draws,
-			s_capture.casterSkinnedDraws);
+			s_capture.casterSkinnedDraws, s_capture.casterPropDraws);
 	}
 
 	memset(&s_capture, 0, sizeof(s_capture));

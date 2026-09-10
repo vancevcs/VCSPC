@@ -4079,6 +4079,43 @@ counter printing where the candidates were being lost - the funnel says "0 over 
 is nothing left to have an opinion about. **A counter through the stages costs less than one round
 of reasoning about which stage it is.**
 
+#### Props cast too, and the test for one is that it stands up
+
+`People, vehicles and props`, which is the same middle position renamed for what it now keeps.
+Lamp posts, bins, hydrants, parking meters, benches, fence posts - the things a player walks
+past, and the ones where a missing shadow is at eye level rather than across the street.
+
+They are scenery by every test the game offers: VCS ships them prelit into vertex colours with no
+normals, exactly like a building, so the normals rule that separates a car from the world throws
+them away with everything else. The rule that keeps them is geometric, and it is two tests:
+
+    isProp = footprint <= propMaxSpan (6 units) && height >= propMinHeight (2 units)
+
+**Both halves earn their place, and the height is the interesting one.** The footprint separates a
+prop from a building. The HEIGHT separates it from the only other two things with a small
+footprint, and both of those are flat by definition: a road decal, and the vanilla blob shadow the
+learner spends its time hunting. A prop is the one small thing that stands up. Reading the same
+fact the other way, `propMinHeight` is what stops this mode putting the blob shadows back by the
+front door after the learner has taken them out of the back.
+
+**It also gives that mode its caster cache back, and that is a correctness change rather than an
+optimisation.** The cache was off in people-and-vehicles mode for a good reason - it remembers
+PLACES, and a cell keeps what it held until something else is drawn there, which is right for
+scenery that has left the view and wrong for a car, whose cell has nothing to replace it with once
+it has driven out. A prop is the exception that repairs the argument: it is the only thing in that
+mode that cannot move. So the rule is now "may this thing move" rather than "which mode is this" -
+skinned meshes never (people, frozen mid-stride), vehicles never in this mode, props always. A lamp
+post keeps casting after you have driven past it.
+
+**Measured on a street: 20 of 274 captured draws cast, 4 skinned, 16 props**, at 31fps - which is
+full speed, and is what "the things you stand next to" should look like against a street's worth of
+traffic. The Shadows tab carries all three numbers and both sliders.
+
+The number to watch if it is ever retuned is `propMaxSpan`. Pushing it past a car's width starts
+catching pieces of BUILDING, and a building that casts in pieces is the exact complaint this whole
+line of work started from - so a prop count that climbs into the hundreds is the signature of a
+span set too wide, not of a street full of bins.
+
 #### Shadow distance is a row now, and turning it up is not simply better
 
 `Shadow distance` on the Graphics page, and the same value on the debugger's Shadows tab. It is

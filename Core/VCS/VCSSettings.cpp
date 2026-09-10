@@ -61,7 +61,7 @@ static const char *const kAnisoLabels[] = { "Off", "2x", "4x", "8x", "16x" };
 
 // Not "all" and "entities". A player knows what a person and a car are, and has never heard of an
 // entity - and "everything" says the thing the other choice is measured against.
-static const char *const kShadowLabels[] = { "Off", "People and vehicles", "Everything" };
+static const char *const kShadowLabels[] = { "Off", "People, vehicles and props", "Everything" };
 
 // "3x (1440x816)". The multiplier is what the setting means; the pixel count is what it does, and
 // a resolution is the one setting a player already has a number for. Computed rather than written

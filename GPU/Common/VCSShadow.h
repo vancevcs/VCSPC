@@ -370,6 +370,18 @@ struct Settings {
 	// this span.
 	float maxCasterSpan;
 
+	// In people-and-vehicles mode, a draw that is small on the ground and tall against it
+	// casts too: a lamp post, a bin, a hydrant, a parking meter, a bench, a fence post. They
+	// are scenery and carry no normals, so the normals test alone throws them away - and
+	// they are the props a player stands next to, which is where a missing shadow shows.
+	//
+	// Both tests earn their place. The footprint separates a prop from a building. The
+	// HEIGHT separates it from the two other things with a small footprint, and both of
+	// those are flat by definition: a road decal, and the vanilla blob shadow the learner
+	// is looking for. A prop is the one small thing that stands up.
+	float propMaxSpan;
+	float propMinHeight;
+
 	// Only the things that MOVE cast: the player, other people, and vehicles. The world itself is
 	// captured as a receiver, so the road still darkens under a car - it simply stops throwing
 	// shadows of its own.
@@ -430,6 +442,10 @@ struct CaptureStats {
 	// the check on the entity filter: skinned casters are peds and the player, so a count of zero
 	// beside a healthy caster count would mean the filter is keeping the wrong sixteen draws.
 	int casterSkinnedDraws;
+	// Props kept by the height test rather than by the normals test. Zero here while the
+	// caster count is healthy means the prop rule is matching nothing and the mode is back
+	// to people and vehicles alone.
+	int casterPropDraws;
 
 	// Draws thrown out for sitting on top of the camera - see nearCameraCutoff. One or two a
 	// frame is the colour filter and is expected; zero means the filter is not finding it, and

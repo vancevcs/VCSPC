@@ -2189,8 +2189,18 @@ void ImVCSWindow::DrawShadows() {
 		// The check on the entity filter: skinned casters are people, so half of a healthy count
 		// here being skinned is what "only the things that move" actually looks like. Zero beside
 		// a non-zero caster count means the filter is keeping the wrong draws.
-		ImGui::Text("draws casting: %d, of which %d skinned (people)",
-			cap.draws - cap.receiverOnlyDraws, cap.casterSkinnedDraws);
+		ImGui::Text("draws casting: %d, of which %d skinned (people) and %d props",
+			cap.draws - cap.receiverOnlyDraws, cap.casterSkinnedDraws, cap.casterPropDraws);
+		if (set.entityCastersOnly) {
+			// Small on the ground and tall against it. Raising the span past a car's width starts
+			// catching pieces of building, which is how a building's shadow comes apart.
+			ImGui::SliderFloat("Prop footprint", &set.propMaxSpan, 1.0f, 20.0f, "%.1f m");
+			ImGui::SliderFloat("Prop min height", &set.propMinHeight, 0.5f, 8.0f, "%.1f m");
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Lowering this towards zero starts catching road decals and the "
+					"vanilla blob shadows, which are flat by definition.");
+			}
+		}
 		// The game's full-screen overlays, drawn as 3D geometry sitting on the camera. If this
 		// reads zero while the mask is a flat colour, they are getting through and winning every
 		// pixel of it - see nearCameraCutoff.
