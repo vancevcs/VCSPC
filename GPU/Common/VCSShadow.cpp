@@ -84,10 +84,18 @@ static Settings s_settings = {
 	true,     // hideBlobShadows
 	2.0f,     // nearCameraCutoff
 	400.0f,   // maxCasterSpan
-	6.0f,     // propMaxSpan - a lamp post's footprint, generously. A car is about 4 across
-	          // and is caught by the normals test anyway, so this does not have to exclude it
+	4.0f,     // propMaxSpan, and this one is TUNED BY EYE rather than measured. Six metres
+	          // put 283 props among 307 casters on one street, which is not bins, it is
+	          // building segments getting through; 2.5 caught nothing at all. The count is
+	          // a poor guide either way because AddCaster sees one FLUSH, not one object,
+	          // so a batch of three lamp posts has a box three lamp posts wide. Drag
+	          // 'Prop footprint' on the Shadows tab and watch the prop count: hundreds
+	          // means buildings, zero means nothing qualifies, a few dozen is a street.
 	2.0f,     // propMinHeight - taller than any decal, shorter than the shortest lamp post
 	false,    // entityCastersOnly - everything casts, which is what a PC port is for
+	false,    // propCasters - only consulted while entityCastersOnly is on
+	true,     // cutoutEntitiesCast - a wheel is a disc, not a card. See TestDraw.
+	0.003f,   // pedReceiverBias - about a metre, which clears a body and not a building
 	false,    // flipShadowV
 	0,        // debugView
 	false,    // showMask
@@ -150,10 +158,16 @@ struct Batch {
 	int casterIndexCount;
 	u32 firstReceiverIndex;
 	int receiverIndexCount;
+	// People are shaded in a second pass with a heavier bias - see pedReceiverBias. They are
+	// a separate index stream rather than a separate vertex buffer, so this costs one more
+	// draw call and not one more copy of the geometry.
+	u32 firstPedReceiverIndex;
+	int pedReceiverIndexCount;
 };
 static const int kMaxBatchVertices = 65535;
 static std::vector<u16> s_casterIndices;
 static std::vector<u16> s_receiverIndices;
+static std::vector<u16> s_pedReceiverIndices;
 static std::vector<Batch> s_batches;
 static CaptureStats s_capture;
 static CaptureStats s_capturePublished;
@@ -504,7 +518,7 @@ static void ComputeShadowView(const FrameStats &stats) {
 // reason it is a function: a remembered caster has to enter the depth pass by exactly the same
 // road a fresh one does.
 static void AppendGeometry(const float *pos, int vertCount, const u16 *castIdx, int castCount,
-	const u16 *recvIdx, int recvCount) {
+	const u16 *recvIdx, int recvCount, bool pedReceiver = false) {
 	if (vertCount <= 0 || (castCount < 3 && recvCount < 3)) {
 		return;
 	}
@@ -523,6 +537,8 @@ static void AppendGeometry(const float *pos, int vertCount, const u16 *castIdx, 
 		fresh.casterIndexCount = 0;
 		fresh.firstReceiverIndex = (u32)s_receiverIndices.size();
 		fresh.receiverIndexCount = 0;
+		fresh.firstPedReceiverIndex = (u32)s_pedReceiverIndices.size();
+		fresh.pedReceiverIndexCount = 0;
 		s_batches.push_back(fresh);
 	}
 	Batch &batch = s_batches.back();
@@ -534,8 +550,9 @@ static void AppendGeometry(const float *pos, int vertCount, const u16 *castIdx, 
 	const u16 base = (u16)batch.vertexCount;
 	s_positions.insert(s_positions.end(), pos, pos + (size_t)vertCount * 3);
 
+	std::vector<u16> &recvStream = pedReceiver ? s_pedReceiverIndices : s_receiverIndices;
 	for (int i = 0; i < recvCount; i++) {
-		s_receiverIndices.push_back((u16)(base + recvIdx[i]));
+		recvStream.push_back((u16)(base + recvIdx[i]));
 	}
 	for (int i = 0; i < castCount; i++) {
 		s_casterIndices.push_back((u16)(base + castIdx[i]));
@@ -544,14 +561,16 @@ static void AppendGeometry(const float *pos, int vertCount, const u16 *castIdx, 
 	batch.vertexCount += vertCount;
 	batch.casterIndexCount = (int)(s_casterIndices.size() - batch.firstCasterIndex);
 	batch.receiverIndexCount = (int)(s_receiverIndices.size() - batch.firstReceiverIndex);
+	batch.pedReceiverIndexCount = (int)(s_pedReceiverIndices.size() - batch.firstPedReceiverIndex);
 
 	s_capture.batches = (int)s_batches.size();
 	s_capture.vertices = (int)(s_positions.size() / 3);
 	s_capture.casterIndices = (int)s_casterIndices.size();
-	s_capture.receiverIndices = (int)s_receiverIndices.size();
+	s_capture.receiverIndices = (int)(s_receiverIndices.size() + s_pedReceiverIndices.size());
 	s_capture.indices = s_capture.receiverIndices;
 	s_capture.bytes = s_positions.size() * sizeof(float)
-		+ (s_casterIndices.size() + s_receiverIndices.size()) * sizeof(u16);
+		+ (s_casterIndices.size() + s_receiverIndices.size()
+			+ s_pedReceiverIndices.size()) * sizeof(u16);
 }
 
 // One triangle of the draw being baked, in the winding the game asked for, split into the two
@@ -922,7 +941,7 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 	// ... and props, which are scenery by every test the game offers and are still things
 	// rather than the world. Small on the ground, tall against it - see propMaxSpan.
 	const float spanZ = drawMax[2] - drawMin[2];
-	const bool isProp = !isEntity &&
+	const bool isProp = !isEntity && s_settings.propCasters &&
 		spanX <= s_settings.propMaxSpan && spanY <= s_settings.propMaxSpan &&
 		spanZ >= s_settings.propMinHeight;
 
@@ -955,9 +974,12 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		s_capture.casterSkinnedDraws++;
 	}
 
+	// Skinned means a person, which is the one receiver that needs the heavier bias.
+	const bool isSkinned = (gstate.vertType & GE_VTYPE_WEIGHT_MASK) != GE_VTYPE_WEIGHT_NONE;
 	AppendGeometry(s_drawPos.data(), numDecodedVerts,
 		casts ? s_drawCastIdx.data() : nullptr, casts ? (int)s_drawCastIdx.size() : 0,
-		s_drawIdx.data(), (int)s_drawIdx.size());
+		s_drawIdx.data(), (int)s_drawIdx.size(),
+		isSkinned && s_settings.pedReceiverBias > 0.0f);
 	s_capture.draws++;
 
 	// What may be REMEMBERED is narrower than what casts, and the rule is one question: can
@@ -1666,6 +1688,23 @@ static void RenderMask(Draw::DrawContext *draw, int width, int height, int viewW
 		draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3, batch.vertexCount,
 			s_receiverIndices.data() + batch.firstReceiverIndex, batch.receiverIndexCount);
 	}
+
+	// The people, with the bias raised so their own arms and legs stop landing on them. Same
+	// pipeline and same vertex buffer - only the uniform and the index stream differ - so this
+	// is one more draw call per batch rather than a second pass over the scene.
+	if (s_settings.pedReceiverBias > 0.0f && !s_pedReceiverIndices.empty()) {
+		ub.params[0] = s_settings.depthBias + s_settings.pedReceiverBias;
+		draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+		for (const Batch &batch : s_batches) {
+			if (batch.pedReceiverIndexCount < 3) {
+				continue;
+			}
+			draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3,
+				batch.vertexCount,
+				s_pedReceiverIndices.data() + batch.firstPedReceiverIndex,
+				batch.pedReceiverIndexCount);
+		}
+	}
 	s_capture.maskRendered = true;
 	s_capture.maskWidth = width;
 	s_capture.maskHeight = height;
@@ -2019,6 +2058,7 @@ void SetEnabled(bool enabled) {
 		s_positions.clear();
 		s_casterIndices.clear();
 		s_receiverIndices.clear();
+		s_pedReceiverIndices.clear();
 		s_batches.clear();
 		s_buckets.clear();
 		s_objectBounds.clear();
@@ -2089,6 +2129,7 @@ void BeginFrame(Draw::DrawContext *draw) {
 	s_positions.clear();
 	s_casterIndices.clear();
 	s_receiverIndices.clear();
+	s_pedReceiverIndices.clear();
 	s_batches.clear();
 	// clear() keeps the storage, and these settle after a few frames - but the first frames of a
 	// scene reallocate a megabyte at a time, which is a hitch exactly when the world is streaming.
@@ -2461,7 +2502,19 @@ static Reject TestDraw(GEPrimitiveType prim, int vertexCount) {
 	// A palm with no shadow reads better than a palm with a crate's.
 	if (gstate.isAlphaTestEnabled() && gstate.getAlphaTestFunction() != GE_COMP_ALWAYS &&
 		!FinalAlphaIsOpaque()) {
-		return Reject::Cutout;
+		// ... with one exception, and it is the reasoning above rather than a hole in it. "It
+		// would write the rectangle" is only damning when the geometry IS a rectangle. A palm
+		// frond is a flat card whose shape lives entirely in the texture; a motorcycle wheel is a
+		// disc of real geometry that happens to cut its spokes out with the alpha test, and its
+		// silhouette is very nearly what the depth pass would write anyway.
+		//
+		// The discriminator is the one this game answers honestly: vertex NORMALS. Scenery ships
+		// prelit and carries none, so palms and chain-link are unaffected; a wheel belongs to a
+		// vehicle and carries them. Same fact the caster mode rests on, used the other way round.
+		if (!s_settings.cutoutEntitiesCast ||
+			(gstate.vertType & GE_VTYPE_NRM_MASK) == GE_VTYPE_NRM_NONE) {
+			return Reject::Cutout;
+		}
 	}
 
 	if (vertexCount < 3) {

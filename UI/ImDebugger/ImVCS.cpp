@@ -2185,13 +2185,16 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::Text("indices: %d casting, %d receiving; %d draw%s receive only (%s)",
 			cap.casterIndices, cap.receiverIndices, cap.receiverOnlyDraws,
 			cap.receiverOnlyDraws == 1 ? "" : "s",
-			set.entityCastersOnly ? "too large, or not a person or vehicle" : "too large to cast");
+			set.entityCastersOnly
+				? (set.propCasters ? "too large, or not a person, vehicle or prop"
+					: "too large, or not a person or vehicle")
+				: "too large to cast");
 		// The check on the entity filter: skinned casters are people, so half of a healthy count
 		// here being skinned is what "only the things that move" actually looks like. Zero beside
 		// a non-zero caster count means the filter is keeping the wrong draws.
 		ImGui::Text("draws casting: %d, of which %d skinned (people) and %d props",
 			cap.draws - cap.receiverOnlyDraws, cap.casterSkinnedDraws, cap.casterPropDraws);
-		if (set.entityCastersOnly) {
+		if (set.entityCastersOnly && set.propCasters) {
 			// Small on the ground and tall against it. Raising the span past a car's width starts
 			// catching pieces of building, which is how a building's shadow comes apart.
 			ImGui::SliderFloat("Prop footprint", &set.propMaxSpan, 1.0f, 20.0f, "%.1f m");
@@ -2338,6 +2341,21 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::SetTooltip("Geometry entirely within this of the camera is thrown away. It is the game's full-screen colour filter, which is 3D geometry 0.6 units across sitting on the camera and covers every pixel of the mask if it gets through. The camera sits 4.6 units behind the player, so there is room.");
 	}
 	ImGui::Checkbox("Only people and vehicles cast", &set.entityCastersOnly);
+	if (set.entityCastersOnly) {
+		// The second half of the middle setting, separate because the two answer different
+		// questions: one is about what moves, the other about what is small enough to be a
+		// thing rather than the world.
+		ImGui::Checkbox("... and props (lamp posts, bins, hydrants)", &set.propCasters);
+	}
+	ImGui::Checkbox("Cut-out parts of vehicles and people cast", &set.cutoutEntitiesCast);
+	// A body is the one caster whose shadow lands on itself. Zero here restores that, which
+	// is correct shadowing and reads as blotches crawling over the model.
+	ImGui::SliderFloat("People self-shadow bias", &set.pedReceiverBias, 0.0f, 0.02f, "%.4f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Motorcycle wheels cut their spokes out with the alpha test, so the "
+			"foliage rule threw them away. Scenery cut-outs - palms, chain-link - are "
+			"unaffected either way.");
+	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("The world still RECEIVES, so the road darkens under a car; it just stops casting. Told apart by vertex normals, which this game only carries on models that have to be lit as they move - the scenery is prelit into vertex colours. Also turns the caster cache off, because a cell has nothing to replace a car with once it has driven out of it.");
 	}

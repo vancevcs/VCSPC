@@ -117,7 +117,8 @@ bool IsGameBuild();
 // The three positions of the Shadows row, in the order they appear.
 inline constexpr int kVCSShadowsOff = 0;
 inline constexpr int kVCSShadowsEntities = 1;
-inline constexpr int kVCSShadowsEverything = 2;
+inline constexpr int kVCSShadowsProps = 2;
+inline constexpr int kVCSShadowsEverything = 3;
 
 struct VCSGameSettings {
 	bool showFps = false;
@@ -132,14 +133,7 @@ struct VCSGameSettings {
 	// and a player choosing between them is making a single decision. It was a bool plus
 	// a choice, which meant a mode row that greyed out and a saved mode that went on
 	// existing while the feature was off.
-	int shadows = kVCSShadowsEntities;
-
-	// How far from the camera the shadow cascade reaches, in world units - the radius of
-	// the box the depth pass covers. A caster outside it casts nothing, and a caster only
-	// PARTLY inside it casts only the part that is in, which is what a building whose
-	// shadow comes apart looks like. Costs sharpness rather than frames: the map is a
-	// fixed number of texels, so a wider box spreads them thinner.
-	float shadowDistance = 70.0f;
+	int shadows = kVCSShadowsProps;
 
 	// How many times the retail 4.75MB of resident world to keep. This is the whole of how
 	// far VCS can see - four distance mechanisms were patched and measured and none of them

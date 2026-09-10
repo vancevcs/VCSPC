@@ -40,16 +40,10 @@ namespace VCS {
 // place is what stops "off" and "people and vehicles" ever being live at the same time.
 static void ApplyShadowSetting() {
 	const int mode = GameSettings().shadows;
-	VCSShadow::GetSettings().entityCastersOnly = mode == kVCSShadowsEntities;
-	VCSShadow::SetEnabled(mode != kVCSShadowsOff);
-
-	// The cache has to hold everything that can cast INTO the cascade, which is the box
-	// itself plus how far up-sun a caster still reaches - so it moves with the box rather
-	// than being a second number to keep in step by hand. Getting this wrong does not look
-	// like a small cache, it looks like shadows that vanish as their caster leaves the view.
 	VCSShadow::Settings &shadow = VCSShadow::GetSettings();
-	shadow.cascadeRadius = GameSettings().shadowDistance;
-	shadow.cacheRadius = shadow.cascadeRadius + shadow.casterReach + 50.0f;
+	shadow.entityCastersOnly = mode == kVCSShadowsEntities || mode == kVCSShadowsProps;
+	shadow.propCasters = mode == kVCSShadowsProps;
+	VCSShadow::SetEnabled(mode != kVCSShadowsOff);
 }
 
 // Labels for the Choice options. These mirror PPSSPP's own settings screen so the two never
@@ -61,7 +55,9 @@ static const char *const kAnisoLabels[] = { "Off", "2x", "4x", "8x", "16x" };
 
 // Not "all" and "entities". A player knows what a person and a car are, and has never heard of an
 // entity - and "everything" says the thing the other choice is measured against.
-static const char *const kShadowLabels[] = { "Off", "People, vehicles and props", "Everything" };
+static const char *const kShadowLabels[] = {
+	"Off", "People and vehicles", "People, vehicles and props", "Everything",
+};
 
 // "3x (1440x816)". The multiplier is what the setting means; the pixel count is what it does, and
 // a resolution is the one setting a player already has a number for. Computed rather than written
@@ -418,16 +414,6 @@ const std::vector<Option> &Options() {
 		// emulator draws it. It only takes effect on the next boot, because the pools are
 		// built about a second into one and never again - the help line says so, because a
 		// setting that appears to do nothing is worse than one that is not offered.
-		// Wider costs sharpness rather than frames - the shadow map is a fixed number of
-		// texels either way, so a bigger box spreads them thinner. Worth having as a row
-		// because it is the one number that decides whether a whole building casts or only
-		// the part of it standing inside the box.
-		addFloat(OptionPage::Graphics, "ShadowDistance", "Shadow distance",
-			"How far out things still cast shadows. Wider catches whole buildings; softer "
-			"and blockier the further you push it.",
-			&GameSettings().shadowDistance, 40.0f, 400.0f, "%.0f m",
-			[]() { ApplyShadowSetting(); });
-
 		addFloat(OptionPage::Graphics, "WorldMemory", "World memory",
 			"How much of the city stays loaded at once. Higher means you see further and "
 			"more of it casts shadows. Takes effect after a restart.",

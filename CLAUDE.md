@@ -4116,35 +4116,68 @@ catching pieces of BUILDING, and a building that casts in pieces is the exact co
 line of work started from - so a prop count that climbs into the hundreds is the signature of a
 span set too wide, not of a street full of bins.
 
-#### Shadow distance is a row now, and turning it up is not simply better
+#### Four positions, because props and people are two questions
 
-`Shadow distance` on the Graphics page, and the same value on the debugger's Shadows tab. It is
-`cascadeRadius` - the radius of the box the depth pass covers - and it exists because that box is
-**140 units across by default**, so a caster outside it casts nothing and a caster only PARTLY
-inside it casts only the part that is in. That is what a building whose shadow comes apart looks
-like, and it is a far better fit for the symptom than any of the four distance mechanisms in the
-GAME, none of which decides anything.
+`Off`, `People and vehicles`, `People, vehicles and props`, `Everything`, defaulting to the third.
+The renderer carries the two halves separately - `entityCastersOnly` and `propCasters` - because
+they answer different questions: one is about what MOVES, the other about what is small enough to
+be a thing rather than the world. A player who dislikes one has no reason to lose the other.
 
-`cacheRadius` moves with it rather than being a second number to keep in step by hand - the cache
-has to hold everything that can cast INTO the box, which is the box plus `casterReach`. Getting
-that wrong does not look like a small cache; it looks like shadows vanishing as their caster leaves
-the view, which is a bug this file has already recorded twice.
+**`propMaxSpan` is tuned by eye and the count is a poor guide**, which is worth stating plainly
+because the number looks measured and is not. Six metres put 283 props among 307 casters on one
+street - that is not a street full of bins, it is building segments getting through - and 2.5m
+caught nothing at all. The cliff between them is the tell: `AddCaster` sees one FLUSH, not one
+object, so a batch of three lamp posts has a bounding box three lamp posts wide and no single
+threshold cleanly separates a prop from a wall. It sits at 4.0 with a slider on the Shadows tab
+next to a live prop count - hundreds means buildings, zero means nothing qualifies, a few dozen is
+a street.
 
-**Measured at 400 against 70, same savestate, same spot: the shadows got WEAKER, not wider.** The
-map is a fixed 4096 texels either way, so a 400-unit box is 19.5cm a texel against 3.4cm - and
-`slopeBias` multiplies `fwidth` of the light-space depth, which scales with texel size, so the
-world-space bias grows with it and detaches shadows from their casters. Widening the box without
-touching the bias trades the shadows you have for the ones you wanted.
+#### Shadow distance was a row, and it could never have done anything
 
-So the row ships at the stock 70 and the honest state of it is: **the lever is real, the tuning is
-not done.** Whoever picks this up next should scale `depthBias` and `slopeBias` down as the radius
-goes up, so the world-space bias stays put, and only then judge the width.
+Removed. `cascadeRadius` is back to living on the debugger tab where knobs that need measuring
+belong.
 
-**And a note on the measurement, because it cost most of a session.** Two savestate loads of the
-SAME state do not reliably settle the camera the same way - the grass fixture gave yaw 0.5336 twice
-and then 6.0766 - and a fixture at 08:06 is a fixture with a low weak sun, where shadow strength is
-scaled by the sun's own luminance and there is least to see. A shadow fixture wants midday and a
-camera that has been checked, not assumed.
+It was not broken - `ApplyShadowSetting` really did push it from the ini at boot - it was
+**inert by construction in the mode anyone would be using it in**. In people-and-vehicles-and-props
+mode every caster is a person, a car or a bin, all of them a few units from the camera and all of
+them already inside the default 70-unit box. Widening the box adds nothing because there is nothing
+out there that casts. It can only ever matter in `Everything`.
+
+The lesson is one this file keeps relearning from a new angle: a setting has to be judged in the
+mode it will actually be used in. The earlier measurement that said "400 makes shadows weaker" was
+taken in `Everything`, where the row does something, and was then shipped as a row for players who
+would never be in that mode.
+
+#### A wheel is a disc, not a card
+
+Motorcycle wheels cut their spokes out with the alpha test, so `Reject::Cutout` threw them away
+with the palms - and the reasoning that justifies it for foliage does not survive being pointed at
+a wheel. "The depth pass carries no textures, so it would write the rectangle" is only damning when
+the geometry IS a rectangle. A palm frond is a flat card whose shape lives entirely in its texture;
+a wheel is a disc of real geometry whose silhouette is very nearly what the depth pass would draw
+anyway.
+
+`cutoutEntitiesCast` lets a cut-out draw through when it carries vertex NORMALS - the same fact
+about this game the caster modes rest on, used the other way round. Scenery cut-outs ship prelit
+and carry none, so palms and chain-link are untouched.
+
+**Not verified in play**: getting onto a motorcycle needs a person at the keyboard, and the reject
+counters cannot be read remotely. It is a well-supported hypothesis with a switch next to it, not
+a measurement.
+
+#### People stopped shadowing themselves, in a second pass over the same geometry
+
+Reported as the player and the NPCs casting their own shadows onto themselves. It is real
+shadowing and it is correct - an arm over a torso, the far leg behind the near one - and on a body
+two metres tall against a shadow map built for a street it reads as blotches crawling over the
+model rather than as an arm.
+
+Skinned draws are now a THIRD index stream over the same vertex buffer, drawn after the ordinary
+receivers with `depthBias + pedReceiverBias`. One more draw call per batch and one uniform update;
+no second copy of the geometry and no second pipeline. The bias (0.003, about a metre in the
+default box) skips a body's own thickness while leaving anything deeper - a building, a car, a wall
+- still shadowing them normally, which is why this is a bias rather than simply refusing to shade
+them. Set it to 0 to get self-shadowing back.
 
 #### Known, and deliberately left
 

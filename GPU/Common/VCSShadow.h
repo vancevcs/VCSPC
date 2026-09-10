@@ -399,6 +399,31 @@ struct Settings {
 	// captures is a thing that moves, so there is nothing left worth remembering.
 	bool entityCastersOnly;
 
+	// ... and, on top of that, the props: see propMaxSpan. Separate from the rule above
+	// rather than folded into it, because the two answer different questions - one is
+	// about what MOVES and the other about what is small enough to be a thing rather than
+	// the world - and a player who dislikes one has no reason to lose the other.
+	bool propCasters;
+
+	// Let a cut-out draw cast anyway when it belongs to something that moves - a wheel with
+	// its spokes alpha-tested out. Scenery cut-outs (palms, chain-link) are untouched: the
+	// rule is vertex normals, exactly as for the caster modes. Off puts wheels back to
+	// casting nothing, which is what every build before this did.
+	bool cutoutEntitiesCast;
+
+	// Extra depth bias applied to PEOPLE when they are being shaded, on top of depthBias.
+	//
+	// A character is the one caster whose own shadow lands on itself: an arm over the
+	// torso, the far leg behind the near one. That is real shadowing and it is correct, and
+	// on a body two metres tall against a shadow map built for a street it reads as
+	// blotches crawling over the model rather than as an arm. Pushing the sample this far
+	// along the light skips the body's own thickness while leaving anything deeper - a
+	// building, a car, a wall - still shadowing them normally.
+	//
+	// In light-space depth, so roughly (radius + casterReach) world units per unit here:
+	// 0.003 is about a metre at the default box. 0 restores self-shadowing.
+	float pedReceiverBias;
+
 	// Which way up the shadow map's V axis runs depends on the backend's clip convention. Wrong,
 	// and the shadows track the right shapes in the wrong places - so it is a toggle to be
 	// settled in one run rather than a guess compiled into the shader.
