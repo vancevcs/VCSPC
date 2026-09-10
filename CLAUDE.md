@@ -4079,6 +4079,36 @@ counter printing where the candidates were being lost - the funnel says "0 over 
 is nothing left to have an opinion about. **A counter through the stages costs less than one round
 of reasoning about which stage it is.**
 
+#### Shadow distance is a row now, and turning it up is not simply better
+
+`Shadow distance` on the Graphics page, and the same value on the debugger's Shadows tab. It is
+`cascadeRadius` - the radius of the box the depth pass covers - and it exists because that box is
+**140 units across by default**, so a caster outside it casts nothing and a caster only PARTLY
+inside it casts only the part that is in. That is what a building whose shadow comes apart looks
+like, and it is a far better fit for the symptom than any of the four distance mechanisms in the
+GAME, none of which decides anything.
+
+`cacheRadius` moves with it rather than being a second number to keep in step by hand - the cache
+has to hold everything that can cast INTO the box, which is the box plus `casterReach`. Getting
+that wrong does not look like a small cache; it looks like shadows vanishing as their caster leaves
+the view, which is a bug this file has already recorded twice.
+
+**Measured at 400 against 70, same savestate, same spot: the shadows got WEAKER, not wider.** The
+map is a fixed 4096 texels either way, so a 400-unit box is 19.5cm a texel against 3.4cm - and
+`slopeBias` multiplies `fwidth` of the light-space depth, which scales with texel size, so the
+world-space bias grows with it and detaches shadows from their casters. Widening the box without
+touching the bias trades the shadows you have for the ones you wanted.
+
+So the row ships at the stock 70 and the honest state of it is: **the lever is real, the tuning is
+not done.** Whoever picks this up next should scale `depthBias` and `slopeBias` down as the radius
+goes up, so the world-space bias stays put, and only then judge the width.
+
+**And a note on the measurement, because it cost most of a session.** Two savestate loads of the
+SAME state do not reliably settle the camera the same way - the grass fixture gave yaw 0.5336 twice
+and then 6.0766 - and a fixture at 08:06 is a fixture with a low weak sun, where shadow strength is
+scaled by the sun's own luminance and there is least to see. A shadow fixture wants midday and a
+camera that has been checked, not assumed.
+
 #### Known, and deliberately left
 
 **Geometry you have never looked at cannot cast.** The capture only ever sees what the game
