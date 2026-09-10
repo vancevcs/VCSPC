@@ -47,6 +47,7 @@
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/System.h"
+#include "Core/VCS/VCSSettings.h"
 #include "Core/PSPLoaders.h"
 #include "Core/HLE/sceKernelModule.h"
 
@@ -186,8 +187,12 @@ void InitMemorySizeForGame() {
 	// at all - the heap it builds for itself grows with the answer. Deliberately NOT an entry in
 	// g_HDRemasters: that sets g_RemasterMode, which also turns on double texture coordinates
 	// and changes video handling, none of which this game wants.
+	//
+	// Conditional, and that is not caution for its own sake: a savestate written under one
+	// partition size will not load under another, so taking the bigger one unasked would
+	// silently orphan every state the player already has.
 	if (gameID == "ULUS10160" && !g_RemasterMode && Memory::g_PSPModel != PSP_MODEL_FAT &&
-		Memory::g_MemorySize < Memory::RAM_DOUBLE_SIZE) {
+		Memory::g_MemorySize < Memory::RAM_DOUBLE_SIZE && VCS::WantsExtraWorldMemory()) {
 		Memory::g_MemorySize = Memory::RAM_DOUBLE_SIZE;
 		INFO_LOG(Log::Loader, "VCS: giving the streaming heap a PSP-2000 partition");
 	}

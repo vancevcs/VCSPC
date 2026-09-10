@@ -476,6 +476,30 @@ void SetGamePath(std::string_view path) {
 	SaveSettings();
 }
 
+bool WantsExtraWorldMemory() {
+	// Asked before anything else here exists. The partition has to be sized while the ISO is
+	// being loaded, which is long before Init builds the option table, so this reads the one
+	// key straight out of the file rather than going through it.
+	//
+	// It is asked at all because the answer costs savestate compatibility: a state written
+	// under one partition size cannot be loaded under another, and every state this fork's
+	// users already have was written on the retail 32MB. So the larger partition is taken
+	// only when somebody has actually asked for more world.
+	IniFile ini;
+	if (!ini.Load(SettingsPath())) {
+		return false;
+	}
+	const Section *section = ini.GetSection("Settings");
+	if (!section) {
+		return false;
+	}
+	float value = 1.0f;
+	if (!section->Get("WorldMemory", &value)) {
+		return false;
+	}
+	return value > 1.0f;
+}
+
 void LoadSettings() {
 	// Touch the table before the file, so the defaults it captures are the compiled-in ones.
 	const std::vector<Option> &options = Options();

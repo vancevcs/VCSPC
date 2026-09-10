@@ -149,6 +149,10 @@ const std::vector<Option> &Options();
 // upstream edits constantly - stays untouched, which is the difference between a clean rebase
 // and a merge conflict on every pull.
 void LoadSettings();
+
+// Whether the player has asked for more world than the retail 4.75MB, answered from the ini
+// alone so it can be asked before the game is loaded. See the .cpp for why it is conditional.
+bool WantsExtraWorldMemory();
 void SaveSettings();
 
 // Put one page back to the values the code shipped with.
