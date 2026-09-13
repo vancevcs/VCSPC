@@ -125,4 +125,31 @@ const VCSState &GetState();
 void UpdateSharedState();
 void ClearSharedState();
 
+// The weather, read on demand rather than out of the per-frame state.
+//
+// It lives here rather than in VCSState because its one caller is the RENDERER, and the renderer
+// must not depend on VCSInputOverhaul being switched on - the water and shadow features are
+// deliberately independent of the input layer, so nothing may assume VCSGame::Tick is running.
+// This reads the addresses directly, which is two bounds-checked reads. Call it once a frame.
+//
+// Emu thread only, like everything else in this namespace.
+struct WeatherState {
+	bool valid = false;
+
+	// 0..1. The renderer drives road wetness off this and nothing else, so a build where the
+	// address is wrong shows dry roads rather than permanent rain.
+	float rain = 0.0f;
+
+	// The pair being interpolated between, and how far along. Not used by the renderer yet; here
+	// because they are what proves the block was identified correctly - see VCSAddresses.h.
+	int oldType = 0;
+	int newType = 0;
+	float interp = 0.0f;
+
+	// Script-forced weather, or -1 when the script has released it.
+	int forcedType = -1;
+};
+
+WeatherState ReadWeather();
+
 }  // namespace VCS

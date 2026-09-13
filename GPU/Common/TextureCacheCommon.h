@@ -387,6 +387,11 @@ public:
 	virtual void *GetNativeTextureView(const TexCacheEntry *entry, bool flat) const = 0;
 
 	const TexCache &Cache() const { return cache_; }
+
+	// VCS shadows: every built texture's native view, with the address and dimensions it was built
+	// from. A remembered cut-out caster uses this to find its texture again in a later frame - or
+	// to learn it is gone. A plain callback so this header's includes stay as they are.
+	void ForEachNativeTextureView(void (*fn)(void *ctx, void *view, u32 addr, u16 dim), void *ctx) const;
 	const TexCache &SecondCache() const { return secondCache_; }
 
 	const size_t CacheSizeEstimate() const;
@@ -460,6 +465,7 @@ protected:
 	int decimationCounter_ = 0;
 	int texelsScaledThisFrame_ = 0;
 	double replacementTimeThisFrame_ = 0;
+	int replacementPollsThisFrame_ = 0;
 	// Recomputed once per frame. Depends FPS and soon also config.
 	double replacementFrameBudgetSeconds_ = 0.5 / 60.0;
 

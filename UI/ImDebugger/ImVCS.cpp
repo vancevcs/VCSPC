@@ -42,6 +42,7 @@
 #include "Core/VCS/VCSWorld.h"
 
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSWater.h"
 
 static const ImVec4 kUnsetColor = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
 static const ImVec4 kGoodColor = ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
@@ -2194,6 +2195,11 @@ void ImVCSWindow::DrawShadows() {
 		// a non-zero caster count means the filter is keeping the wrong draws.
 		ImGui::Text("draws casting: %d, of which %d skinned (people) and %d props",
 			cap.draws - cap.receiverOnlyDraws, cap.casterSkinnedDraws, cap.casterPropDraws);
+		// Remembered-but-unresolved is a texture the cache has let go of: that cell's fronds
+		// stay dark until the game draws them again.
+		ImGui::Text("cut-outs: %d live, %d remembered, %d draw calls, %d unresolved, %d unsampleable",
+			cap.cutoutDraws, cap.cutoutCachedDraws, cap.cutoutGroups, cap.cutoutUnresolved,
+			cap.cutoutSkipped);
 		if (set.entityCastersOnly && set.propCasters) {
 			// Small on the ground and tall against it. Raising the span past a car's width starts
 			// catching pieces of building, which is how a building's shadow comes apart.
@@ -2330,8 +2336,16 @@ void ImVCSWindow::DrawShadows() {
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("The game only draws what its own camera can see, so without this a caster stops casting the moment it leaves the view and its shadow blinks out of the road. Costs memory, not frames - the cache only ever feeds the depth pass.");
 	}
-	ImGui::SliderFloat("Remember for", &set.cacheHoldSeconds, 0.5f, 20.0f, "%.1f s");
+	ImGui::SliderFloat("Remember for", &set.cacheHoldSeconds, 0.0f, 60.0f,
+		set.cacheHoldSeconds <= 0.0f ? "forever" : "%.1f s");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Zero keeps scenery for as long as it is within range. Nothing that moves is remembered, so there is nothing for a clock to catch.");
+	}
 	ImGui::SliderFloat("Remember within", &set.cacheRadius, 50.0f, 400.0f, "%.0f units");
+	ImGui::SliderFloat("Replace only within", &set.cacheReplaceRadius, 0.0f, 300.0f, "%.0f units");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Further away than this the game draws a building in low detail, so what it drew there does not overwrite the remembered full shadow - both cast.");
+	}
 	ImGui::Checkbox("Hide the game's own blob shadows", &set.hideBlobShadows);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Otherwise everything that moves has two shadows. The textures are learned from flat quads that sit under something, not named, so a decal on open road is left alone.");
@@ -2348,6 +2362,7 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::Checkbox("... and props (lamp posts, bins, hydrants)", &set.propCasters);
 	}
 	ImGui::Checkbox("Cut-out parts of vehicles and people cast", &set.cutoutEntitiesCast);
+	ImGui::Checkbox("Cut-out scenery casts through its texture (palms, fences)", &set.texturedCutouts);
 	// A body is the one caster whose shadow lands on itself. Zero here restores that, which
 	// is correct shadowing and reads as blotches crawling over the model.
 	ImGui::SliderFloat("People self-shadow bias", &set.pedReceiverBias, 0.0f, 0.02f, "%.4f");
@@ -2406,6 +2421,164 @@ void ImVCSWindow::DrawShadows() {
 	ImGui::TextDisabled("Walk around, get in a car, then open a menu. Casters should track the geometry\non screen, skinned casters should follow the pedestrians, and the 2D count\nshould jump the moment the menu opens.");
 }
 
+void ImVCSWindow::DrawWater() {
+	if (!VCSWater::IsAvailable()) {
+		ImGui::TextColored(kUnsetColor, "inactive - VCSWaterQuality is not set for this disc");
+		return;
+	}
+	bool enabled = VCSWater::IsEnabled();
+	if (ImGui::Checkbox("Enable wet surfaces", &enabled)) {
+		VCSWater::SetEnabled(enabled);
+	}
+	if (!VCSWater::IsActive()) {
+		ImGui::TextDisabled("Off. Nothing below is being captured or drawn.");
+		return;
+	}
+
+	const VCSWater::FrameStats &s = VCSWater::LastFrameStats();
+	VCSWater::Settings &set = VCSWater::GetSettings();
+
+	// --- the sea ----------------------------------------------------------------------------
+	ImGui::SeparatorText("The sea");
+	if (s.textureAddr) {
+		ImGui::Text("recognised: texture %08x, plane z %.2f", s.textureAddr, s.planeZ);
+	} else {
+		ImGui::TextColored(kUnsetColor, "not recognised yet (%d shape candidates this frame)",
+			s.learnCandidates);
+		ImGui::TextDisabled("The learner wants three flat, unlit, colourless quads at one height.\n"
+			"Look at some water; it takes one frame.");
+	}
+	ImGui::Text("draws: %d water (%d verts), %d solid, of %d", s.waterDraws, s.waterVerts,
+		s.solidDraws, s.draws);
+	if (s.framesSinceWater > 0) {
+		ImGui::TextDisabled("%d frames since any water was drawn", s.framesSinceWater);
+	}
+
+	ImGui::Checkbox("Shade the sea", &set.water);
+	ImGui::SliderFloat("Wave scale", &set.waveScale, 0.05f, 2.0f);
+	ImGui::SliderFloat("Wave steepness", &set.waveAmplitude, 0.0f, 0.4f);
+	ImGui::SliderFloat("Wave speed", &set.waveSpeed, 0.0f, 4.0f);
+	ImGui::SliderFloat("Detail fade (units)", &set.detailFade, 40.0f, 800.0f);
+	ImGui::SliderFloat("Deep colour mix", &set.deepMix, 0.0f, 1.0f);
+	ImGui::ColorEdit3("Deep colour", set.deepColour);
+	ImGui::SliderFloat("Reflection", &set.reflectionStrength, 0.0f, 1.0f);
+	ImGui::SliderFloat("Reflection spread", &set.reflectionSpread, 0.0f, 0.15f);
+	ImGui::SliderFloat("Mirror scale", &set.mirrorScale, 0.0f, 1.5f);
+	ImGui::SliderFloat("Reflection blur", &set.reflectionBlur, 0.0f, 0.12f);
+	ImGui::SliderFloat("Max reflection", &set.maxReflection, 0.05f, 1.0f);
+	// The measurement that "the sea is too reflective" is a complaint about. Median is the
+	// middle of the distribution over the frame's own water; the share above half is how much
+	// of it is more mirror than water.
+	if (s.reflectionMeasured) {
+		ImGui::Text("measured over %d samples: median %.3f, %.1f%% above half mirror",
+			s.reflectionSamples, s.medianFresnel, s.mirrorFraction * 100.0f);
+	} else {
+		ImGui::TextDisabled("no water in view to measure");
+	}
+	ImGui::SliderFloat("Sun glint", &set.specularStrength, 0.0f, 2.0f);
+	ImGui::SliderFloat("Glint tightness", &set.specularPower, 8.0f, 400.0f);
+	if (s.sunValid) {
+		ImGui::Text("sun %.2f %.2f %.2f, luminance %.2f", s.sunDir[0], s.sunDir[1], s.sunDir[2],
+			s.sunLuminance);
+	} else {
+		ImGui::TextColored(kUnsetColor, "no sun above the horizon this frame - no glint");
+	}
+
+	// --- the rain ---------------------------------------------------------------------------
+	ImGui::SeparatorText("Rain on the roads");
+	if (s.weatherValid) {
+		ImGui::Text("the game says: rain %.3f, weather %d -> %d", s.rain, s.weatherOld,
+			s.weatherNew);
+	} else {
+		ImGui::TextColored(kUnsetColor, "weather unreadable");
+	}
+	ImGui::Text("road map: %s, %d nodes, %d links, centred %.0f %.0f",
+		s.roadValid ? "built" : "NOT BUILT", s.roadNodes, s.roadLinks,
+		s.roadCentre[0], s.roadCentre[1]);
+	ImGui::Text("GE-to-world offset: %.1f %.1f", s.geOffset[0], s.geOffset[1]);
+	// The pair the whole lag is about: what the sky is doing, and what the road has caught up to.
+	ImGui::Text("rain %.2f (normalised) -> wetness %.2f%s", s.rainNorm, s.wetness,
+		s.wetnessSnapped ? "  SNAPPED" : "");
+	ImGui::ProgressBar(s.wetness, ImVec2(-1.0f, 0.0f));
+	if (ImGui::Button("Soak now")) {
+		VCSWater::SoakNow();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Dry now")) {
+		VCSWater::DryNow();
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled("(the RAINY WEATHER cheat soaks them by itself)");
+	if (s.camWorldValid && s.cameraValid) {
+		// The pair the road mask stands on. If these two stop agreeing in Z, the offset has
+		// stopped being a translation and the mask will be in the wrong place.
+		ImGui::TextDisabled("camera GE %.1f %.1f %.1f vs world %.1f %.1f %.1f",
+			s.cameraPos[0], s.cameraPos[1], s.cameraPos[2],
+			s.camWorld[0], s.camWorld[1], s.camWorld[2]);
+	}
+
+	ImGui::Checkbox("Wet the roads", &set.wetRoads);
+	// -1 is "use the game's own rain". The slider cannot express that, so it is a checkbox.
+	bool forced = set.rainOverride >= 0.0f;
+	if (ImGui::Checkbox("Force rain", &forced)) {
+		set.rainOverride = forced ? 1.0f : -1.0f;
+	}
+	if (forced) {
+		ImGui::SliderFloat("Forced rain", &set.rainOverride, 0.0f, 1.0f);
+	}
+	ImGui::SliderFloat("Road half width", &set.roadHalfWidth, 1.0f, 12.0f);
+	ImGui::SliderFloat("Road map span", &set.roadMapSpan, 128.0f, 1024.0f);
+	ImGui::SliderFloat("Seconds to soak", &set.wetSeconds, 1.0f, 120.0f);
+	ImGui::SliderFloat("Seconds to dry", &set.drySeconds, 1.0f, 300.0f);
+	ImGui::SliderFloat("Puddle size", &set.puddleScale, 0.02f, 0.4f);
+	ImGui::SliderFloat("Drain patch (units)", &set.drainPatchSize, 6.0f, 80.0f);
+	ImGui::SliderFloat("Wet darkening", &set.wetDarkening, 0.3f, 1.0f);
+	ImGui::SliderFloat("Wet reflection", &set.wetReflection, 0.0f, 1.0f);
+	ImGui::SliderFloat("Wet mirror scale", &set.wetMirrorScale, 0.0f, 1.0f);
+	ImGui::SliderFloat("Map edge fade", &set.wetEdgeFade, 0.02f, 0.6f);
+	// The default is 2.9, so a range ending at 2.0 clamped the setting the moment it was touched.
+	ImGui::SliderFloat("Droplets per unit", &set.rippleScale, 0.1f, 6.0f);
+	ImGui::SliderFloat("Droplet rate", &set.rippleRate, 0.1f, 4.0f);
+	ImGui::SliderFloat("Droplet strength", &set.rippleStrength, 0.0f, 2.0f);
+	ImGui::SliderFloat("Droplet brightness", &set.rippleLight, 0.0f, 2.0f);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("How bright each ring is from any angle. Strength only tilts the surface, which shows through the reflection and the sun's glint - so from above, strength alone is nearly invisible.");
+	}
+
+	// --- shared -----------------------------------------------------------------------------
+	ImGui::SeparatorText("Passes");
+	ImGui::SliderFloat("Buffer scale", &set.surfaceScale, 0.25f, 1.0f);
+	static const char *kViews[] = {
+		"off", "wetness (r=wet, g=road, b=up)", "normals", "reflection source", "water mask",
+	};
+	ImGui::Combo("Debug view", &set.debugView, kViews, 5);
+
+	int rejectedTotal = 0;
+	for (int i = 1; i < (int)VCSWater::Reject::Count; i++) {
+		rejectedTotal += s.rejected[i];
+	}
+	if (ImGui::TreeNode("What the frame was made of")) {
+		ImGui::Text("captured %d, rejected %d", s.waterDraws + s.solidDraws, rejectedTotal);
+		for (int i = 1; i < (int)VCSWater::Reject::Count; i++) {
+			if (s.rejected[i]) {
+				ImGui::Text("  %-24s %d", VCSWater::RejectName((VCSWater::Reject)i),
+					s.rejected[i]);
+			}
+		}
+		ImGui::TreePop();
+	}
+
+	if (Draw::Framebuffer *fbo = VCSWater::SurfaceBuffer()) {
+		ImGui::Separator();
+		ImGui::Text("what this module is painting on top (transparent where it is not):");
+		ImTextureID id = ImGui_ImplThin3d_AddFBAsTextureTemp(fbo, Draw::Aspect::COLOR_BIT,
+			ImGuiPipeline::TexturedOpaque);
+		ImGui::Image(id, ImVec2(384.0f, 218.0f));
+	}
+
+	ImGui::TextDisabled("Force rain and walk into the road. The tarmac should darken and start\n"
+		"catching droplets; the pavement beside it should not.");
+}
 void ImVCSWindow::Draw(ImConfig &cfg) {
 	ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("VCS", &cfg.vcsOpen)) {
@@ -2451,6 +2624,11 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 		}
 		if (ImGui::BeginTabItem("Shadows")) {
 			DrawShadows();
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Water")) {
+			DrawWater();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();

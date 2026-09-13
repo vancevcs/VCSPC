@@ -235,4 +235,41 @@ void ClearSharedState() {
 	g_state.Clear();
 }
 
+// Two s16s stored by `sh`, so the table calls them U16 and the sign has to be put back here.
+// -1 in the forced slot is the game's own "released", written by `010A release_weather`.
+static int SignedWeatherType(std::optional<u32> raw) {
+	if (!raw.has_value()) {
+		return -1;
+	}
+	return (int)(s16)(u16)*raw;
+}
+
+WeatherState ReadWeather() {
+	WeatherState w;
+	const std::optional<float> rain = ReadAddrFloat(VCSAddr::WeatherRain);
+	if (!rain.has_value()) {
+		return w;
+	}
+	w.valid = true;
+
+	// Clamped rather than trusted. This is the one value a renderer multiplies by every frame,
+	// and a wrong address that happens to read as 1e30 would be a white screen rather than a
+	// visibly wrong number - so the failure mode is capped at "as wet as it gets".
+	float r = *rain;
+	if (!(r > 0.0f)) {   // also catches NaN
+		r = 0.0f;
+	} else if (r > 1.0f) {
+		r = 1.0f;
+	}
+	w.rain = r;
+
+	w.oldType = SignedWeatherType(ReadAddrAsU32(VCSAddr::WeatherOld));
+	w.newType = SignedWeatherType(ReadAddrAsU32(VCSAddr::WeatherNew));
+	w.forcedType = SignedWeatherType(ReadAddrAsU32(VCSAddr::WeatherForced));
+	if (const std::optional<float> interp = ReadAddrFloat(VCSAddr::WeatherInterp)) {
+		w.interp = *interp;
+	}
+	return w;
+}
+
 }  // namespace VCS

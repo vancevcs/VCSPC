@@ -264,6 +264,9 @@
     <ClInclude Include="Common\VCSShadow.h">
       <Filter>Common</Filter>
     </ClInclude>
+    <ClInclude Include="Common\VCSWater.h">
+      <Filter>Common</Filter>
+    </ClInclude>
     <ClInclude Include="GPUStateSIMDUtil.h">
       <Filter>Common</Filter>
     </ClInclude>
@@ -531,6 +534,9 @@
       <Filter>Common</Filter>
     </ClCompile>
     <ClCompile Include="Common\VCSShadow.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\VCSWater.cpp">
       <Filter>Common</Filter>
     </ClCompile>
     <ClCompile Include="Common\VertexDecoderLoongArch64.cpp">

@@ -120,6 +120,13 @@ inline constexpr int kVCSShadowsEntities = 1;
 inline constexpr int kVCSShadowsProps = 2;
 inline constexpr int kVCSShadowsEverything = 3;
 
+// Wet surfaces: the sea, and rain on the roads. Same shape as the shadow row above and for the
+// same reason - each step costs frames and adds something, so it is one decision rather than two
+// switches that can contradict each other.
+inline constexpr int kVCSWaterOff = 0;
+inline constexpr int kVCSWaterSea = 1;
+inline constexpr int kVCSWaterSeaAndRoads = 2;
+
 struct VCSGameSettings {
 	bool showFps = false;
 
@@ -134,6 +141,16 @@ struct VCSGameSettings {
 	// a choice, which meant a mode row that greyed out and a saved mode that went on
 	// existing while the feature was off.
 	int shadows = kVCSShadowsProps;
+
+	// Better water, and rain on the roads. Ours rather than the game's - see
+	// GPU/Common/VCSWater.cpp - so like `shadows` it reaches the renderer through an onChange in
+	// the option table rather than through ApplyGamePrefs.
+	//
+	// The road half of it does nothing at all in dry weather, which is most of the time. That is
+	// not a reason to split it into its own row: a player who turns water up wants the weather to
+	// look right when it arrives, and a row that appears to do nothing when you move it is worse
+	// than one whose effect waits for the rain.
+	int water = kVCSWaterSeaAndRoads;
 
 	// How many times the retail 4.75MB of resident world to keep. This is the whole of how
 	// far VCS can see - four distance mechanisms were patched and measured and none of them

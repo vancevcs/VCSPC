@@ -559,6 +559,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/GPU/Common/DepthBufferCommon.cpp \
   $(SRC)/GPU/Common/DepthRaster.cpp \
   $(SRC)/GPU/Common/VCSShadow.cpp \
+  $(SRC)/GPU/Common/VCSWater.cpp \
   $(SRC)/GPU/Common/VertexDecoderCommon.cpp.arm \
   $(SRC)/GPU/Common/VertexDecoderHandwritten.cpp.arm \
   $(SRC)/GPU/Common/TextureCacheCommon.cpp.arm \

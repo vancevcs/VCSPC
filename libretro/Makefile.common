@@ -587,6 +587,7 @@ SOURCES_CXX += \
 	$(GPUDIR)/Common/DepthBufferCommon.cpp \
 	$(GPUDIR)/Common/DepthRaster.cpp \
 	$(GPUDIR)/Common/VCSShadow.cpp \
+	$(GPUDIR)/Common/VCSWater.cpp \
 	$(GPUDIR)/Common/StencilCommon.cpp \
 	$(GPUDIR)/Software/TransformUnit.cpp \
 	$(GPUDIR)/Software/SoftGpu.cpp \

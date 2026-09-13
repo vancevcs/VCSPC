@@ -150,7 +150,9 @@ bool Load(u32 paths) {
 		RoadNode &n = g_nodes[i];
 		n.x = (float)(s16)*xw / kVCSPathNodeScale;
 		n.y = (float)(s16)*yw / kVCSPathNodeScale;
-		n.z = (float)(s8)*zb / kVCSPathNodeScale;
+		// Not divided by the scale, unlike x and y - see kVCSPathNodeZ. The byte IS the
+		// height in world units.
+		n.z = (float)(s8)*zb;
 		n.firstLink = (int)*firstLink;
 		n.linkCount = (int)(*flags & 0x0f);
 		maxLink = std::max(maxLink, n.firstLink + n.linkCount);

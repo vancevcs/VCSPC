@@ -1542,3 +1542,111 @@ loop was in the disassembly the whole time.
 
 Before hunting for a safe moment to call something, read what the thing itself waits for. If it
 waits on a resource, find who holds it; if the answer is "the game, always", there is no moment.
+
+
+## The weather, the camera in world space, and a path node's height
+
+Four small findings that the water and wet-road pass needed, and one correction to something that
+was already shipped. All of it came out of the script command table and a savestate, offline, with
+nothing running.
+
+### Weather — the whole block, from `store_weather`
+
+`0166 store_weather` and `0167 restore_weather` are the pair that names everything else. Resolve
+them the usual way:
+
+```python
+handler = u32(0x08b846e0 + opcode * 8 + 4)
+# 0108 force_weather      -> 0x08a878e0
+# 0109 force_weather_now  -> 0x08a87924
+# 010A release_weather    -> 0x08a87968
+# 0166 store_weather      -> 0x08a87988
+# 0167 restore_weather    -> 0x08a879a8
+```
+
+Each is nine instructions of glue over a real function, and `store_weather`'s
+(`CWeather::StoreWeatherState`, `0x08afc0d4`) copies exactly four values into a save slot:
+
+```
+08afc0d4  lh    $a0, 0x2098($gp)     ; OldWeatherType
+08afc0d8  lh    $a1, 0x20a0($gp)     ; NewWeatherType
+08afc0dc  sh    $a0, 0x28b8($gp)
+08afc0e0  lwc1  $f12, 0x21d8($gp)    ; InterpolationValue
+08afc0e4  sh    $a1, 0x28ba($gp)
+08afc0e8  lwc1  $f13, 0x1ed8($gp)    ; Rain
+...
+08afc0fc  sb    $a0, 0x28c4($gp)     ; the "a state is stored" flag
+```
+
+That is the shape of VC's `CWeather::StoreWeatherState` — two s16 weather types, an interpolation
+value and the rain level — which is what names each address rather than leaving them as four
+numbers. `force_weather_now` (`0x08afb4e8`) then writes its argument to **both** s16s, which is what
+separates Old from New from the *forced* one, and `release_weather` (`0x08afb4f8`) writes `-1`.
+
+`gp` is `0x08bb1d60`, the same base the `SfxVolume` rows are quoted against — so these are absolute
+addresses rather than a second derivation to be trusted:
+
+| Address | Name | Type | |
+|---|---|---|---|
+| `0x08bb3df8` | `WeatherOld` | s16 | gp+0x2098, the weather being interpolated FROM |
+| `0x08bb3e00` | `WeatherNew` | s16 | gp+0x20a0, the weather being interpolated TO |
+| `0x08bb3f38` | `WeatherInterp` | float | gp+0x21d8, 0..1 between them |
+| `0x08bb3c38` | `WeatherRain` | float | gp+0x1ed8, **rain intensity 0..1** |
+| `0x08bb458c` | `WeatherForced` | s16 | gp+0x282c, script-forced weather, -1 when released |
+
+Checked across five savestates: the two types move together except mid-transition (one state caught
+Old=1, New=3), Interp stays inside 0..1, Forced reads -1 in four of the five and 4 in the one saved
+while a mission had forced the weather, and Rain reads 0.0 in all five — which is what a dry day
+looks like, and is the one of the five *not* yet seen take a nonzero value.
+
+### The player and the camera, in the game's own world space
+
+| Address | Name | |
+|---|---|---|
+| `PlayerBase + 0x30/0x34/0x38` | `PlayerPosX/Y/Z` | float, straight off the entity transform |
+| `0x08bc7ec0/4/8` | `CameraWorldX/Y/Z` | float, `CCam[0]+0x20` |
+
+`CCam[0]` is `0x08bc7ea0` — see the `CamMode` row for how that was pinned down. Offset `0x20` read
+`(154.576, -670.037, 13.739)` in a savestate where the player was at `(150.163, -670.830, 12.770)`:
+4.4 units behind him and 1.0 above, which is the chase camera and nothing else.
+
+**Why the renderer wanted it.** The space the GE is fed is not the game's world space — it is a
+translation of it, XY only, and it changes as you move. The camera is the one thing knowable in
+*both* spaces at once, so `worldOffset = CameraWorld − cameraRecoveredFromViewMatrix` is exact, live,
+and needs nothing to be learned. Measured while walking: the offset held to a tenth of a unit over
+many seconds and the Z halves agreed to the last digit in every sample.
+
+### Correction: a path node's Z is one byte and is NOT scaled
+
+`kVCSPathNodeZ` was being divided by `kVCSPathNodeScale` (8) like x and y. It should not be — the
+byte is the height in world units.
+
+Measured after a road-wetness pass came out dry everywhere: the road nodes nearest a player standing
+at world z **12.77** hold raw bytes of **10, 11 and 13**, and the whole road graph spans **5..26**.
+Dividing by 8 puts the entire network between 0.6 and 3.2 — underneath the sea, which sits at 5.50 —
+and one byte at that scale could not reach a bridge deck at all.
+
+Nothing noticed until now because routing is a 2D search and the radar draws a 2D line. It is the
+kind of bug a second consumer finds and the first never could.
+
+### What each weather id actually does to Rain
+
+Measured live rather than reasoned from VC's enum: force each id in turn (write it to `WeatherOld`,
+`WeatherNew` and `WeatherForced`, which is what `0109 force_weather_now` does) and read `Rain` back
+at 0.5 s, 2 s and 5 s.
+
+| forced id | 0 | 1 | **2** | 3 | 4 | **5** | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Rain | 0 | 0 | **0.500** | 0 | 0 | **0.500** | 0 | 0 | 0 | 0 |
+
+Two findings, both load-bearing for the renderer:
+
+- **Ids 2 and 5 are the wet ones**, and `Rain` peaks at **0.5, not 1.0**. Anything scaling by it
+  has to divide by 0.5 first or it runs at half strength and looks like a tuning problem.
+- **Rain follows a forced weather inside half a second**, with no ramp - identical at 0.5 s, 2 s
+  and 5 s. Natural weather is different: `WeatherInterp` moves about 0.06 per 7.5 s, so an
+  unforced transition takes a couple of minutes. That difference is what lets a renderer tell a
+  cheat apart from the sky changing its mind.
+
+`Tools`-side, this was a Python WebSocket client against `--debugger=1337` using `memory.write_u16`
+and `memory.read_u32`; no pausing was needed for either.

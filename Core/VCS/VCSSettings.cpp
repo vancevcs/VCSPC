@@ -33,6 +33,7 @@
 #include "Core/VCS/VCSSettings.h"
 #include "Core/VCS/VCSVault.h"
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSWater.h"
 
 namespace VCS {
 
@@ -46,6 +47,18 @@ static void ApplyShadowSetting() {
 	VCSShadow::SetEnabled(mode != kVCSShadowsOff);
 }
 
+// Same shape as the shadow row: one number, two answers, derived in one place so the halves
+// cannot contradict each other.
+static void ApplyWaterSetting() {
+	const int mode = GameSettings().water;
+	VCSWater::Settings &water = VCSWater::GetSettings();
+	water.water = mode != kVCSWaterOff;
+	water.wetRoads = mode == kVCSWaterSeaAndRoads;
+	// The module is switched off entirely at Off, so the capture stops too rather than baking a
+	// frame's geometry for passes nobody will draw.
+	VCSWater::SetEnabled(mode != kVCSWaterOff);
+}
+
 // Labels for the Choice options. These mirror PPSSPP's own settings screen so the two never
 // disagree about what a given index means.
 static const char *const kResolutionLabels[] = {
@@ -53,10 +66,29 @@ static const char *const kResolutionLabels[] = {
 };
 static const char *const kAnisoLabels[] = { "Off", "2x", "4x", "8x", "16x" };
 
-// Not "all" and "entities". A player knows what a person and a car are, and has never heard of an
-// entity - and "everything" says the thing the other choice is measured against.
+// A quality ladder, in the same voice as the Texture quality row above it on the page.
+//
+// These used to name what each step casts - "People and vehicles", "People, vehicles and props",
+// "Everything" - which is more informative and reads worse next to the other rows. A graphics page
+// is a list of things that cost frames, and a player scanning it wants them ordered by cost, not
+// described. What each step actually does moved into the help line, which is the only reason
+// dropping the descriptive labels is not a loss.
+//
+// The index is unchanged, so a settings file written before the rename still means what it said:
+// 0 off, 1 people and vehicles, 2 plus props, 3 the whole city.
 static const char *const kShadowLabels[] = {
-	"Off", "People and vehicles", "People, vehicles and props", "Everything",
+	"LOW", "MEDIUM", "HIGH", "ULTRA",
+};
+
+// Same ladder as the shadows above, and the same trade: the steps used to be named ("Off", "Sea",
+// "Sea and wet roads") and now the help line carries that instead.
+//
+// Three positions rather than four, because there is no fourth thing to turn on - the sea and the
+// wet roads are all of it. A ladder does not have to have four rungs to be a ladder.
+//
+// The index is unchanged: 0 off, 1 sea only, 2 sea and wet roads.
+static const char *const kWaterLabels[] = {
+	"LOW", "MEDIUM", "HIGH",
 };
 
 // "3x (1440x816)". The multiplier is what the setting means; the pixel count is what it does, and
@@ -339,6 +371,10 @@ const std::vector<Option> &Options() {
 		enabledBy(&g_Config.bEnableSound);
 
 		// --- Graphics ---
+		//
+		// The order is the one a player works down: what the picture is rendered at, then how big the
+		// window is, then the three quality steps that cost real frames, then the cheap filtering
+		// knob, then the two rows that are not really about the picture at all.
 
 		addChoice(OptionPage::Graphics, nullptr, "Resolution",
 			"Internal rendering resolution. Higher is sharper and costs more.",
@@ -346,31 +382,6 @@ const std::vector<Option> &Options() {
 			Config::GetDefaultValueInt(&g_Config.iInternalResolution), true, []() {
 				System_PostUIMessage(UIMessage::GPU_RENDER_RESIZED);
 			}, &ResolutionText);
-		addChoice(OptionPage::Graphics, nullptr, "Anisotropic filtering",
-			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
-			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
-			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
-
-		// The HD pack, under the name a player would look for it by. It is PPSSPP's texture
-		// replacement underneath - the same flag its own developer tools expose - and this is the
-		// one place in this port where that switch is a GAME setting rather than a developer one:
-		// with a pack installed it is the difference between the PSP's textures and this port's,
-		// which is most of what "PC version" means from three feet away.
-		//
-		// HIGH and LOW rather than ON and OFF, because nobody chooses "texture replacement off";
-		// they choose the lower setting when the higher one costs too much.
-		//
-		// The change takes effect on the next frame rather than needing a restart:
-		// GPU_CONFIG_CHANGED makes the GPU clear its texture cache and re-ask the replacer what
-		// it has, which is exactly what happens when the same flag is flipped in PPSSPP's own
-		// settings.
-		addBool(OptionPage::Graphics, nullptr, "Texture quality",
-			"HIGH uses the installed HD texture pack. LOW draws the PSP's own textures.",
-			&g_Config.bReplaceTextures, true, true, []() {
-				System_PostUIMessage(UIMessage::GPU_CONFIG_CHANGED);
-			}, [](const Option &opt) {
-				return std::string(*opt.boolValue ? "HIGH" : "LOW");
-			});
 
 		// FULLSCREEN, and it is here because this build took away every other way to reach it.
 		//
@@ -389,26 +400,75 @@ const std::vector<Option> &Options() {
 				System_ApplyFullscreenState();
 			});
 
-		// Ours rather than g_Config.iShowStatusFlags, which is a bitfield the option table has no
-		// type for - and which the Debug build still uses. See VCSGameSettings for why the two are
-		// not one setting with two homes.
+		// The HD pack, under the name a player would look for it by. It is PPSSPP's texture
+		// replacement underneath - the same flag its own developer tools expose - and this is the
+		// one place in this port where that switch is a GAME setting rather than a developer one:
+		// with a pack installed it is the difference between the PSP's textures and this port's,
+		// which is most of what "PC version" means from three feet away.
+		//
+		// HIGH and LOW rather than ON and OFF, because nobody chooses "texture replacement off";
+		// they choose the lower setting when the higher one costs too much. The two quality ladders
+		// below it are worded to match, which is why they are LOW/MEDIUM/HIGH and not a description
+		// of what each step draws.
+		//
+		// The change takes effect on the next frame rather than needing a restart:
+		// GPU_CONFIG_CHANGED makes the GPU clear its texture cache and re-ask the replacer what
+		// it has, which is exactly what happens when the same flag is flipped in PPSSPP's own
+		// settings.
+		addBool(OptionPage::Graphics, nullptr, "Texture quality",
+			"HIGH uses the installed HD texture pack. LOW draws the PSP's own textures.",
+			&g_Config.bReplaceTextures, true, true, []() {
+				System_PostUIMessage(UIMessage::GPU_CONFIG_CHANGED);
+			}, [](const Option &opt) {
+				return std::string(*opt.boolValue ? "HIGH" : "LOW");
+			});
+
 		// Dynamic sun shadows. The sun comes from the directional light the game already hands
 		// the hardware, so this follows the time of day by itself and there is nothing to set
 		// but whether it runs at all - everything a player would otherwise tune (cascade size,
 		// bias, tint) is in the debugger's Shadows tab, which is where a knob needing a
 		// paragraph of measurement belongs.
-		// One row, three positions, because it is one decision. What the pass costs is mostly
-		// the geometry it draws a second time, and the city is nearly all of that geometry - so
-		// the middle position is the frame-rate setting as well as a real preference. Shadows
-		// under the player, the traffic and the crowd are the ones a player watches, and the
-		// ones the PSP game itself fakes with a blob under every object.
-		addChoice(OptionPage::Graphics, "Shadows", "Shadows",
-			"Real shadows from the sun, which the PSP game has none of. Each step costs frames; "
-			"the middle one keeps the shadows you actually watch.",
+		//
+		// One row, four positions, because it is one decision. What the pass costs is mostly the
+		// geometry it draws a second time, and the city is nearly all of that geometry - so the
+		// middle positions are the frame-rate setting as well as a real preference. Shadows under
+		// the player, the traffic and the crowd are the ones a player watches, and the ones the
+		// PSP game itself fakes with a blob under every object.
+		//
+		// The labels are a quality ladder rather than a description of what each step casts, which
+		// is what they used to be. A ladder is what a player expects on a graphics page and it sorts
+		// by cost at a glance - but it says nothing about WHAT changes, so the help line has to carry
+		// that instead, and it now does.
+		addChoice(OptionPage::Graphics, "Shadows", "Shadow quality",
+			"Real shadows from the sun, which the PSP game has none of. MEDIUM shadows people and "
+			"vehicles, HIGH adds props like lamp posts and bins, ULTRA shadows the whole city.",
 			&GameSettings().shadows, kShadowLabels,
 			ARRAY_SIZE(kShadowLabels), kVCSShadowsEntities, false, []() {
 				ApplyShadowSetting();
 			});
+
+		// Water. Two halves a player has no reason to separate: a shaded sea in place of the flat
+		// blue quad the PSP draws, and roads that go wet and reflective when it rains. Both run at
+		// the same seam and share one geometry capture, so the second costs very little once the
+		// first is on - which is why the step from MEDIUM to HIGH is the cheap one and the step from
+		// LOW is not.
+		//
+		// Everything tunable - wave size, how much of the sea colour is ours, how wide a road is,
+		// how hard it rains - is in the debugger's Water tab, for the same reason the shadow knobs
+		// are: a setting that needs a paragraph of measurement to explain does not belong on a
+		// pause menu.
+		addChoice(OptionPage::Graphics, "Water", "Water quality",
+			"Waves, reflections and sun glint on the sea, which the PSP draws as one flat colour. "
+			"HIGH also makes the roads go wet and catch droplets while it is raining.",
+			&GameSettings().water, kWaterLabels,
+			ARRAY_SIZE(kWaterLabels), kVCSWaterSeaAndRoads, false, []() {
+				ApplyWaterSetting();
+			});
+
+		addChoice(OptionPage::Graphics, nullptr, "Anisotropic filtering",
+			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
+			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
+			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
 
 		// The one setting here that changes what the GAME can hold rather than how the
 		// emulator draws it. It only takes effect on the next boot, because the pools are
@@ -419,6 +479,10 @@ const std::vector<Option> &Options() {
 			"more of it casts shadows. Takes effect after a restart.",
 			&GameSettings().worldMemory, 1.0f, kVCSWorldMemoryMax, "%.1fx");
 
+		// Ours rather than g_Config.iShowStatusFlags, which is a bitfield the option table has no
+		// type for - and which the Debug build still uses. See VCSGameSettings for why the two are
+		// not one setting with two homes. (That note used to sit above the shadow row, which is not
+		// what it is about.)
 		addBool(OptionPage::Graphics, "ShowFps", "Show FPS",
 			"Draw the frame rate in the corner of the screen.",
 			&GameSettings().showFps);
@@ -563,6 +627,7 @@ void LoadSettings() {
 	// well as from the row's onChange, so the value in the file is live from the first frame
 	// rather than from the first time somebody opens the page.
 	ApplyShadowSetting();
+	ApplyWaterSetting();
 }
 
 void SaveSettings() {

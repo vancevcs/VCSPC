@@ -171,6 +171,7 @@ void Compatibility::CheckSettings(IniFile &iniFile, const std::string &gameID) {
 	CheckSetting(iniFile, gameID, "DisableRangeCulling", &flags_.DisableRangeCulling);
 	CheckSetting(iniFile, gameID, "VCSInputOverhaul", &flags_.VCSInputOverhaul);
 	CheckSetting(iniFile, gameID, "VCSDynamicShadows", &flags_.VCSDynamicShadows);
+	CheckSetting(iniFile, gameID, "VCSWaterQuality", &flags_.VCSWaterQuality);
 }
 
 void Compatibility::CheckVRSettings(IniFile &iniFile, const std::string &gameID) {

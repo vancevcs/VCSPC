@@ -44,6 +44,7 @@ private:
 	void DrawCamera();
 	void DrawVault();
 	void DrawShadows();
+	void DrawWater();
 	void DrawFrontEnd();
 	void DrawRoute();
 

@@ -324,9 +324,19 @@ inline constexpr u32 kVCSPathNodeArray = 0x00;    // ThePaths+0x00
 inline constexpr u32 kVCSPathNodeCount = 0x0c;    // ThePaths+0x0c, read 8380
 inline constexpr u32 kVCSPathNodeStride = 10;
 inline constexpr float kVCSPathNodeScale = 8.0f;
-inline constexpr u32 kVCSPathNodeX = 0x00;        // s16
-inline constexpr u32 kVCSPathNodeY = 0x02;        // s16
-inline constexpr u32 kVCSPathNodeZ = 0x04;        // s8
+inline constexpr u32 kVCSPathNodeX = 0x00;        // s16, times kVCSPathNodeScale
+inline constexpr u32 kVCSPathNodeY = 0x02;        // s16, times kVCSPathNodeScale
+
+// Z is ONE BYTE and it is NOT scaled - the byte is the height in world units.
+//
+// Measured, after a road-wetness pass came out dry everywhere: the road nodes nearest a player
+// standing at world z 12.77 hold raw bytes of 10, 11 and 13, and the whole road graph spans
+// 5..26. Dividing by 8 the way x and y are divided puts the entire network between 0.6 and 3.2 -
+// underneath the sea, which sits at 5.50 - and one byte at that scale could not reach a bridge
+// deck at all.
+//
+// Nothing noticed until now because routing is a 2D search and the radar draws a 2D line.
+inline constexpr u32 kVCSPathNodeZ = 0x04;        // s8, world units, unscaled
 inline constexpr u32 kVCSPathNodeFirstLink = 0x06;  // u16 into the link array
 inline constexpr u32 kVCSPathNodeLinkCount = 0x08;  // low nibble; the high nibble is flags
 
@@ -782,6 +792,40 @@ enum class VCSAddr {
 	SfxVolume,
 	RadioVolume,
 
+
+	// --- The player, in the game's own world space ---
+	//
+	// The player's position in the game's OWN world space, as opposed to the space the GE is fed.
+	// The renderer needs both: its geometry arrives in the latter and the road network it wants to
+	// line up with lives in the former, so something has to say whether the two are the same space.
+	// Straight off the entity's transform, which every entity starts with - see the PlayerBase row.
+	PlayerPosX,
+	PlayerPosY,
+	PlayerPosZ,
+
+	// The CAMERA in the game's own world space - CCam[0]+0x20, four units behind the player and
+	// one above him, which is exactly what a third-person chase camera should read. Paired with
+	// the camera the renderer recovers from the view matrix, these two say whether the space the
+	// GE is fed is the game's world space or a translation of it, and by how much.
+	CameraWorldX,
+	CameraWorldY,
+	CameraWorldZ,
+
+	// --- Weather ---
+	//
+	// All five came out of the script command table in one sitting, with nothing running. `0166
+	// store_weather` and `0167 restore_weather` are the pair that names them: their handlers
+	// (0x08afc0d4 / 0x08afc100) copy exactly four values into and out of a save slot, which is the
+	// same shape as VC's CWeather::StoreWeatherState - two s16 weather types, an interpolation
+	// value and the rain level. `0109 force_weather_now` (0x08afb4e8) then writes its argument to
+	// BOTH of the s16s, which is what separates Old from New from the forced one, and `010A
+	// release_weather` (0x08afb4f8) writes -1 to the forced slot.
+	WeatherOld,
+	WeatherNew,
+	WeatherInterp,
+	WeatherRain,
+	WeatherForced,
+
 	Count,
 };
 
@@ -1145,6 +1189,28 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	{ VCSAddr::RadioVolumePref,   "RadioVolumePref",   VCSAddrType::U32, 0x20,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x20. The Audio page's MUSIC VOLUME, 0..127" },
 	{ VCSAddr::SfxVolume,         "SfxVolume",         VCSAddrType::U8,  0x08bb3b74, kNoBase,        "gp+0x1e14. The live SFX level the mixer reads, 0..127" },
 	{ VCSAddr::RadioVolume,       "RadioVolume",       VCSAddrType::U8,  0x08bb3b75, kNoBase,        "gp+0x1e15. The live music/radio level the mixer reads, 0..127" },
+	{ VCSAddr::PlayerPosX, "PlayerPosX", VCSAddrType::Float, 0x30, VCSAddr::PlayerBase, "Entity transform + 0x30. World X" },
+	{ VCSAddr::PlayerPosY, "PlayerPosY", VCSAddrType::Float, 0x34, VCSAddr::PlayerBase, "Entity transform + 0x34. World Y" },
+	{ VCSAddr::PlayerPosZ, "PlayerPosZ", VCSAddrType::Float, 0x38, VCSAddr::PlayerBase, "Entity transform + 0x38. World Z" },
+	// CCam[0] is 0x08bc7ea0 - see the CamMode row above for how that was pinned down. Offset 0x20
+	// holds a position that read (154.576, -670.037, 13.739) in a savestate where the player was at
+	// (150.163, -670.830, 12.770): 4.4 units behind him and 1.0 above, which is the chase camera.
+	{ VCSAddr::CameraWorldX, "CameraWorldX", VCSAddrType::Float, 0x08bc7ec0, kNoBase, "CCam[0]+0x20. Camera position, world X" },
+	{ VCSAddr::CameraWorldY, "CameraWorldY", VCSAddrType::Float, 0x08bc7ec4, kNoBase, "CCam[0]+0x24. Camera position, world Y" },
+	{ VCSAddr::CameraWorldZ, "CameraWorldZ", VCSAddrType::Float, 0x08bc7ec8, kNoBase, "CCam[0]+0x28. Camera position, world Z" },
+
+	// Weather. gp is 0x08bb1d60 - the same base the SfxVolume rows above are quoted against, which
+	// is what makes these absolute addresses rather than a second derivation to be trusted.
+	//
+	// Checked across five savestates: the two types move together except mid-transition (one state
+	// caught Old=1, New=3), Interp stays inside 0..1, Forced reads -1 in four of the five and 4 in
+	// the one saved while a mission had forced the weather, and Rain reads 0.0 in all five - which is
+	// what a dry day looks like and is the one of the five NOT yet seen take a nonzero value.
+	{ VCSAddr::WeatherOld,    "WeatherOld",    VCSAddrType::U16,   0x08bb3df8, kNoBase, "gp+0x2098. s16. The weather being interpolated FROM" },
+	{ VCSAddr::WeatherNew,    "WeatherNew",    VCSAddrType::U16,   0x08bb3e00, kNoBase, "gp+0x20a0. s16. The weather being interpolated TO" },
+	{ VCSAddr::WeatherInterp, "WeatherInterp", VCSAddrType::Float, 0x08bb3f38, kNoBase, "gp+0x21d8. 0..1 between Old and New" },
+	{ VCSAddr::WeatherRain,   "WeatherRain",   VCSAddrType::Float, 0x08bb3c38, kNoBase, "gp+0x1ed8. Rain intensity, 0..1. What the wet-road pass is driven by" },
+	{ VCSAddr::WeatherForced, "WeatherForced", VCSAddrType::U16,   0x08bb458c, kNoBase, "gp+0x282c. s16. Script-forced weather, -1 when released" },
 };
 
 static_assert(ARRAY_SIZE(kVCSAddresses) == (size_t)VCSAddr::Count,

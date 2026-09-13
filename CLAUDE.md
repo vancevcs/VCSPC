@@ -57,6 +57,7 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
 
 GPU/Common/
   VCSShadow.h/cpp   dynamic sun shadows: caster capture, cascade, screen mask, composite
+  VCSWater.h/cpp    the sea, and rain on the roads: capture, depth, shading, composite
 
 UI/ImDebugger/
   ImVCS.h/cpp       the "VCS" debugger window (lives here so Core stays ImGui-free)
@@ -211,9 +212,11 @@ The entire integration is five small edits. Keep it that way.
 | Shutdown | `__KernelShutdown()` in [Core/HLE/sceKernel.cpp](Core/HLE/sceKernel.cpp) | *Before* `__CtrlShutdown`, so held buttons get released while sceCtrl is alive |
 | Host keys | `NativeKey()` in [UI/NativeApp.cpp](UI/NativeApp.cpp) | Inside the existing `passKeyThrough` branch, which already handles ImGui capture and UI-vs-ingame gating |
 | Mouse look | `NativeMouseDelta()` in [UI/NativeApp.cpp](UI/NativeApp.cpp) | Same claim pattern as keys; skipped while the ImGui debugger wants the mouse |
-| Compat flag | [Core/Compatibility.h](Core/Compatibility.h) + `.cpp` + [assets/compat.ini](assets/compat.ini) | One struct field, one `CheckSetting` line, one `[VCSInputOverhaul]` section - and a second pair for `VCSDynamicShadows`, kept separate because one is a renderer feature and the other is input |
+| Compat flag | [Core/Compatibility.h](Core/Compatibility.h) + `.cpp` + [assets/compat.ini](assets/compat.ini) | One struct field, one `CheckSetting` line, one `[VCSInputOverhaul]` section - and a second pair for `VCSDynamicShadows`, kept separate because one is a renderer feature and the other is input, and a third for `VCSWaterQuality` |
 | Shadow capture | `Flush()` in [GPU/Vulkan/DrawEngineVulkan.cpp](GPU/Vulkan/DrawEngineVulkan.cpp) | Classify + capture on both transform paths, the predecode gate, and `OnFlush` at the top for the 3D→2D seam |
 | Shadow frame reset | `BeginHostFrame()` in [GPU/Vulkan/GPU_Vulkan.cpp](GPU/Vulkan/GPU_Vulkan.cpp) | Publishes last frame's counts; renders nothing |
+| Water capture | `Flush()` in [GPU/Vulkan/DrawEngineVulkan.cpp](GPU/Vulkan/DrawEngineVulkan.cpp) | Beside the shadow capture on both transform paths, and its own `OnFlush` *after* the shadow one - see the comment there for why the order matters |
+| Water frame reset | `BeginHostFrame()` in [GPU/Vulkan/GPU_Vulkan.cpp](GPU/Vulkan/GPU_Vulkan.cpp) | Also where the road mask is rasterised and uploaded, because it is the one point in the frame with no render pass open |
 | Pause menu | the three `GamePauseScreen` sites in [UI/EmuScreen.cpp](UI/EmuScreen.cpp) | All three now call `CreatePauseScreen()`, which returns PPSSPP's own screen unless `VCS::IsActive()` |
 
 **Mouse input requires "Use Mouse Control" to be on** (Settings → Controls, `UseMouse` in
@@ -4118,7 +4121,9 @@ span set too wide, not of a street full of bins.
 
 #### Four positions, because props and people are two questions
 
-`Off`, `People and vehicles`, `People, vehicles and props`, `Everything`, defaulting to the third.
+`LOW`, `MEDIUM`, `HIGH`, `ULTRA` - off, people and vehicles, plus props, and the whole city -
+defaulting to the third. The row was renamed to a quality ladder to sit with the other graphics
+rows; the indices did not move, so a settings file written before that still means what it said.
 The renderer carries the two halves separately - `entityCastersOnly` and `propCasters` - because
 they answer different questions: one is about what MOVES, the other about what is small enough to
 be a thing rather than the world. A player who dislikes one has no reason to lose the other.
@@ -4179,6 +4184,224 @@ default box) skips a body's own thickness while leaving anything deeper - a buil
 - still shadowing them normally, which is why this is a bias rather than simply refusing to shade
 them. Set it to 0 to get self-shadowing back.
 
+#### Cast once, then there: the cache keeps scenery for good
+
+Reported from play: a building's shadow still came apart as you walked away from it, and still went
+out when the building had been behind you long enough. Neither was missing geometry. Both were rules
+in the caster cache, and the cache had the building the whole time.
+
+- **The clock.** `cacheHoldSeconds` was 25, so a building behind you for longer than that expired.
+  The clock only ever existed for things that move, and in this game everything that moves carries
+  vertex normals - so entities now stay out of the cache in every mode (props still go in), and
+  the hold defaults to 0, which now means for as long as the cell is within `cacheRadius`.
+- **Replace-on-sight at a distance.** A drawn cell replaced its memory wholesale whenever it was
+  wholly on screen. But a far building is drawn as its LOD stand-in, or as only some of its parts,
+  because the full-detail radius is baked into the level archives - see "The map is baked per cell"
+  - so walking away overwrote the full shadow with the stand-in's. Only a sighting within
+  `cacheReplaceRadius` (150 units, inside the ~266 the archives bake) may replace a cell now. A far
+  one can still fill an empty cell.
+- **A cell that keeps its memory now casts it that frame too.** Keeping used to mean keeping for
+  later, so a half-visible or far cell cast only the live draw while it was being drawn - half a
+  shadow for as long as half a building was on screen. It replays the memory alongside the live draw
+  now. Depth keeps the nearest surface, so the two agree where they overlap and the remembered one
+  fills in wherever the live one is short.
+
+The log says so once per boot - "cells the game drew only in part or in low detail are casting
+their remembered shadow" - at NOTICE, because WARN does not survive this build's log level. The
+Shadows tab has `Replace only within`, and `Remember for` reads "forever" at zero.
+
+What it does not change: geometry that has never been on screen still cannot cast, and a far building
+seen for the first time is remembered as its stand-in until you have been within 150 units of it once.
+
+**Two more ways a remembered shadow went out, both reported as shadows that disappear after being
+cast once:**
+
+- **A rebase wiped the cache.** Any recovered-camera jump over 40 units cleared everything, on the
+  reasoning that a rebase, a teleport and a load look alike from the GE. The game rebases the GE space
+  as you travel, so every rebase put out the shadow of everything already passed. The game's own
+  camera (`CameraWorldX/Y`, read in `ClassifyDraw` on the same frame) tells them apart - it stays put
+  across a rebase - so a rebase now shifts every cell by how far the space moved
+  (`RebaseCachedCasters`), and only a camera that really jumped clears. Both are logged, the first
+  twenty of each.
+- **"Wholly in view" tested the cell's centre.** A 32-unit cell beside the camera has its centre on
+  screen while half of it is off the edge; the game draws that half, and it replaced the whole cell's
+  memory. `CellIsWhollyInView` now wants all eight corners inside the camera frustum.
+
+**Not yet measured in play.** It needs a building walked away from and the camera turned, and the
+harness can do neither - see the tooling limits in the streaming grid section.
+
+#### The vanilla shadow sprite is always empty, and the texture pack says so
+
+The game's own shadow sprite flashed for a moment whenever a new chunk loaded, and some edge cases
+summoned it even at ULTRA. The blob hider cannot catch it reliably - it knows a sprite by its texture
+ADDRESS, a chunk that streams in puts the same artwork somewhere new, and the positional test needs
+something already captured standing over the sprite.
+
+The replacement hash does not move, so the fix is data rather than code: `textures.ini` maps the
+sprite to an empty PNG, whatever the shadow setting, so there is no sprite to flash and nothing has
+to recognise it first. Off means no sprites as well - that was the decision, not an accident.
+
+| key | size | replaced with |
+|---|---|---|
+| `00000000c7e766bc10deb3d8` | 64x64 | `Misc/vcs_no_shadow_64x64.png` |
+| `000000007a13bf646b5c82bb` | 8x8 | `Misc/vcs_no_shadow_8x8.png` |
+| `000000002303bdd0f09f186f` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - the round one under people |
+| `0000000007abc5ff3c1d7920` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a vehicle's |
+| `0000000072614c46f94bfae7` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a vehicle's |
+| `000000000914bef8f56d4b11` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a soft noisy square |
+| `00000000f695bda8ad66d582` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a soft noisy square |
+| `00000000122f0bca04a78a03` | 64x64 | `Misc/vcs_no_shadow_64x64.png` |
+
+The last three were picked by eye in play from a gallery of every transparent texture in the dump,
+which is the fastest way to finish this list: a page of checkerboard cards, sprite-like ones first,
+click to collect keys. It was built from the dump folder by a throwaway script, not kept in the repo.
+
+The first two used to point at the pack's HD match for them, VC's `shad_heli`, which is how they were
+found among the dump's blob-shaped textures. The other three were reported from play - a round blob
+still under the player - and **their pack names are no help at all**: they were upscales under `up/`,
+and the textures the pack does call `blackshadow1`, `blackshadow3` and `boatshadow_32` turned out to be
+a curved panel, a striped sign and noise. What found them was the dump itself: every texture of 128
+texels or less whose visible pixels are one flat colour and whose alpha does the shaping, drawn as a
+labelled contact sheet and read by eye. Scorch marks, blood pools and hanging grass come up in that
+same scan and are not shadows - leave them. The ini before the change is `textures.ini.bak-shadowsprites`,
+which `Tools/vcspackage.py` leaves out of a package like every other backup.
+
+**One line of code stays**, in `TextureCacheCommon::PollReplacement`: the rule that lets 3D draws
+during play take replacements without waiting (see the driving stutter section) makes an exception
+for any replacement whose file is `vcs_no_shadow_*`. Without it the first sighting of each sprite per
+boot would draw the original for a frame.
+
+**Add to the list from the dump, by eye, and nothing else.** A log of "the key of every draw the
+positional blob test dropped" was built to complete it and taken straight back out: it named a NO
+PARKING sign, chain-link, a fence, a newspaper, starflowers and rail mesh as blob shadows. It looked
+the key up by texture address, and after a chunk streams in the first cache entry at an address can
+belong to whatever lived there before.
+
+The same run is a reason to look harder at the positional hider itself: skid marks and blood pools
+genuinely are flat blended decals lying under something, and that rule drops those draws on sight.
+
+#### People and vehicles flickered because the game drew a second frame after the passes
+
+Reported on MEDIUM, where nothing is remembered: people, vehicles and the player flickering in and out
+of shadow. A temporary per-frame log settled it in one play session. On the frames that flickered,
+**1168 casters were classified after the passes had run, against 1159 before** - a whole second
+scene, every person and vehicle in it. The game sometimes gets two frames into one host frame; the
+passes ran at the first seam, the second frame painted over the first, and nothing had captured it.
+
+`RestartCapture` is the fix: a caster that arrives after the passes starts a fresh capture, and the
+next seam runs the passes again for the frame that is actually shown. It logs the first few times. The
+cost is a second set of passes on those frames, which are the ones that were broken anyway.
+
+The same log named a second, smaller cause: 5 to 10 draws of people and vehicles a frame fell to
+`nearCameraCutoff`, the rule that drops the game's full-screen overlays, whenever the camera pulled in.
+Skinned draws are now never dropped by it, and draws with normals only when they are no bigger than the
+0.6-unit overlay quad.
+
+What the log ruled out is worth as much: the sun did not jump between frames (once, by 26 degrees, in
+two minutes), no frame went without a composite, and the rebase of the GE space was being followed -
+seven rebases, each a multiple of the streaming grid (125 by 108.25), none of them clearing anything.
+
+A second log settled what the second frames are: the same scene drawn again into the SAME framebuffer,
+with draw, caster and receiver counts within a few of the first, not one frame split by a 2D draw. So
+the re-capture is right as it stands, and it was not the whole story.
+
+**The rest - and the cause of every flicker on every setting - was draws in two spaces at once.** It
+still vanished after that, and neither log could see why, because the player was captured as a caster
+in every frame. A rolling capture of the game window (below) put the drop-out at 16:42:38.5-39.0, and
+the water module's camera-jump log - which, unlike the shadow one, is not capped - had a rebase of the
+GE space at 38.676. The player had called it first: "somehow it's bound to the chunk generation".
+
+The capture bakes every draw with its world matrix into one space and projects all of it with the view
+matrix of the frame's FIRST caster. Around a chunk swap the game draws part of the scene with the camera
+of the NEW space while the rest is still in the old one. Each draw is right on screen, because the GE
+puts it through its own view matrix; baked with its world matrix alone it lands a whole streaming cell
+away. So the player sat 125 units from the ground under them, the shadow was cast onto nothing, and the
+same happened to cars, people, remembered buildings - everything, on every setting. `BakeDraw` now moves
+a draw whose view matrix differs into the frame's space (`PrepareViewCorrection`: through its own view,
+back through the inverse of the frame's). Confirmed in play: 33 logged corrections, every one exactly a
+cell step apart (62.5 x 108.2, or 125), starting 30-280 ms before each logged rebase, about 5000 draws
+every few seconds of riding. Reported afterwards as nothing flickering at all, ULTRA included.
+
+**Two things built on a wrong reading of the same capture, recorded so nobody re-derives them.** The
+crop showed the shadow vanishing exactly where "a separately drawn stretch of pavement began, behind a
+hard seam", and that was read as ground that could not receive a shadow. It was the newly streamed chunk
+arriving in the new space. `AddReceiver` - flat blended and cut-out surfaces kept as receivers - was
+added on that reading and did not fix the drop-out; it stays because shadows landing on pavement edges
+and decals is right on its own terms, and it logs the first one it takes. The re-capture of a second
+frame and the near-camera exemption for people are NOT in that category: both were measured.
+
+The first question for any future "it flickers around here" report is whether a rebase lines up with it.
+
+The rolling capture is worth rebuilding for any "it flickers" report: a screenshot taken after the
+player says so is always too late, and the logs only see what the capture was told to count. One trap
+in writing it: PowerShell variable names ignore case, so a ring size `$N` and a frame counter `$n` are
+the same variable, and the buffer silently stops being a ring.
+
+#### Palm fronds cast through their own texture
+
+Reported as "first it was a square texture, and when you fixed it, it doesn't cast the leaves at
+all". Both halves were the plain depth pass carrying no textures: it could only write a frond's
+card, which is the square, and rejecting cut-outs outright is what left palms casting nothing.
+
+A cut-out is now drawn into the same shadow map by a second pipeline that samples the texture and
+discards the holes. Four things make it work, and each one is the kind of thing a tidy-up undoes:
+
+- **Fronds are drawn with a BLEND, not only the alpha test.** The standard alpha blend over opaque
+  vertices blends only through the texture's alpha, so a mostly-hole texture drawn that way used to
+  be filed as glass (`Reject::Blended`) before the cut-out test was even reached. `TestDraw` calls it
+  `Reject::Cutout` now.
+- **The geometry is baked before the texture is known.** Classification runs before the draw engine
+  applies the draw's texture, so `AddCutoutCaster` bakes positions and UVs, and `NoteCutoutTexture` -
+  called after the texture block on both transform paths - commits them with the image view. A bake
+  nobody commits is dropped at the next `ClassifyDraw`, or it would pick up the next flush's texture.
+- **The decoded UVs are already final.** In `GE_TEXMAP_TEXTURE_COORDS` the decoder applies the game's
+  UV scale and offset, and the shader's own `u_uvscaleoffset` is 1.0 unless the texture is a
+  framebuffer - which, like a palette expanded in the shader, is skipped rather than sampled.
+- **A remembered frond does not keep its view.** The caster cache remembers cut-outs per cell with
+  their texture's ADDRESS and dimensions, and every frame that replays them looks the view up again
+  among the texture cache's live entries (`TextureCacheCommon::ForEachNativeTextureView`). A view
+  handed to Vulkan after the cache freed it is a crash, not a wrong shadow. Not found means skipped
+  for that frame, and the Shadows tab counts it as "unresolved".
+
+Every triangle casts, not only the half facing away from the light: the back-face rule works by
+putting an object's thickness between caster and receiver, and a frond is one card. Cut-outs are
+casters only, never receivers - the mask carries no textures either, and a card's holes would hide
+the ground behind them. Anything flatter than half a unit is a decal and casts nothing.
+
+**On HIGH, cut-out scenery casts at any size a caster may be.** HIGH casts people, vehicles and
+props, and a prop is at most `propMaxSpan` (4 units) across because a wide SOLID draw on that setting
+is a building. A wide cut-out is still foliage or a fence. A 16-unit cut-out limit was tried first and
+the fronds cast on ULTRA and nothing on HIGH - a temporary diagnostic logged 69 frond draws where even
+single crowns were wider than that - so the limit is gone rather than tuned.
+
+**Size is judged per connected piece, not per draw.** The game hands over every copy of a texture
+across a wide area as one flush, and draws measured here spanned 500 to 3000 units. Judged per draw, a
+row of palms sharing a frond texture was one object wider than any caster, while a lone palm beside
+it cast - reported as "some palms fixed, others not". `AddCutoutCaster` splits the draw into connected
+meshes (a union-find over its triangles) and keeps the pieces that pass. Flatness stays a question
+about the whole draw, because a single frond card can lie nearly level.
+
+**The alpha scan's verdict is keyed on content as well as address.** `TextureIsSolid` caches whether
+a texture is a cut-out, and it was keyed on address, format and size. The streamer frees textures and
+loads others at the same address, often at the same size and format, so a palm could inherit a wall's
+"solid" for the rest of the session. `TextureContentFingerprint` samples 32 bytes across level 0 and
+the start of the palette into the key. The cache also used to stop storing at 4096 entries, after
+which everything new was read as solid between scans; it empties itself at 8192 instead.
+
+**The diagnostic that found both is worth rebuilding the same way if cut-outs go missing again**, and
+its first version is worth knowing about: it spent all 400 lines in the frame the city appeared,
+because this game draws everything with the alpha test and blending on. Skip unscanned textures and
+solid ones, and log the replacement file behind the bound view so a line leads to a texture in the
+dump.
+
+thin3d writes whatever texture and sampler are bound into the next draw's descriptor set through any
+pipeline, so `DrawCutouts` unbinds both when it finishes. The log says `cut-out pass ran` once per
+boot the first time it draws.
+
+**Confirmed in play on ULTRA:** the fronds cast their shape. HIGH, after the size rule above was
+dropped, has not been looked at yet, and nobody has measured what the per-texture draw calls cost on
+a street full of palms.
+
 #### Known, and deliberately left
 
 **Geometry you have never looked at cannot cast.** The capture only ever sees what the game
@@ -4190,14 +4413,408 @@ is left is that VCS draws whatever the streamer has loaded, so widening the view
 question and nothing else. See "The LOD multiplier was patched properly" below for the four
 negatives in one table.
 
-**Foliage casts nothing.** A cut-out shadow needs the depth pass to sample the texture, which
-needs UVs in the capture and a draw call per texture rather than one for the whole cascade. The
-image views are reachable - `TextureCacheVulkan::GetVulkanHandles` hands them out at capture time
-and thin3d has `BindNativeTexture` - so this is a known road rather than an open question, but it
-makes the pass Vulkan-specific and it is not free.
+**A remembered frond needs its texture to still be in the cache.** Off-screen fronds are replayed
+only if the texture cache still holds a texture at their address, so a palm whose texture has been
+freed stops casting until the game draws it again. See "Palm fronds cast through their own texture".
 
 **The moon is the sun's light mirrored, not a real lunar position.** It puts night shadows
 somewhere plausible rather than somewhere correct.
+
+### Water, and rain on the roads
+
+**Status: shipped.** The sea is shaded rather than flat - moving normals, a Fresnel blend into a
+reflection of the frame, and sun glint - and when the game says it is raining, the roads go wet and
+catch droplets. One module, `GPU/Common/VCSWater.cpp`, one compat flag (`VCSWaterQuality`), one
+player-facing row (Graphics → Water quality: LOW off, MEDIUM sea, HIGH sea and wet roads) and one
+debugger tab.
+
+The two halves are one feature because they are one pass. Both need the frame's geometry in world
+space, both need the frame's own colour to reflect, and both composite at the 3D→2D seam - so the
+second costs very little once the first is on.
+
+#### The sea was identified by what the game submits, not by guessing
+
+There is no "this is water" bit in a display list, so the first thing built was a probe that writes
+one frame's draw table to the log (`VCS_WATER_PROBE=<frame>`). Standing on the grass at the west end
+of the Downtown bridge, the frame is 451 3D draws and the last sixteen of them are the sea:
+
+| what | count | span | z | normals | colours | lighting |
+|---|---|---|---|---|---|---|
+| far sectors, one quad each | 5 | 64 | **5.50 exactly** | no | no | off |
+| near sectors, the game's own wave mesh | 8 | 32 | 5.86–6.12 | yes | no | off |
+| a larger flat piece | 1 | 128 | 5.50 | no | yes | off |
+| the map-spanning skirt | 1 | 2048 | 2.50–5.00 | no | yes | off |
+
+All sixteen share one texture, and that is what the classifier keys on. The **learner** looks for
+the first row of that table - a texture carrying three or more perfectly flat, unlit, normal-free,
+colour-free quads of at least 24 units, all at the same z - and takes its address and its height.
+The address is a heap address, so it is learned every session and forgotten when the camera jumps,
+exactly as `VCSShadow` learns the blob-shadow textures.
+
+Two things fell out of that measurement for free, and both are used: the sea is a **plane at a known
+height**, and the game applies **no hardware lighting to it at all**. There is nothing to preserve
+except the colour.
+
+#### Four passes, and why there is a copy of the frame
+
+1. **A copy of the frame** the game has just finished drawing, into a scratch framebuffer.
+2. **A depth pre-pass** over the captured geometry, water and solid alike, through the camera's own
+   transform. This is the whole of the occlusion: a pier, a boat or the player in front of the sea
+   wins those pixels and nothing is painted over them.
+3. **One shading pass, drawn twice with the same shader** - once over the solid geometry for road
+   wetness, once over the water - with the depth test set to `EQUAL` so only the surface that won
+   the pre-pass is shaded. One shader for both is not tidiness: `EQUAL` is only safe because the
+   two passes run *the same vertex shader* with the same uniforms.
+4. **One triangle** compositing the result over the game's framebuffer, premultiplied, so a pixel
+   the pass did not touch is left bit-for-bit as the game drew it.
+
+**The copy is what makes any of this possible**, and it is worth being clear about why. A fragment
+shader cannot read the framebuffer it is writing, so without a copy the water could only ever be
+painted a colour of its own - which is wrong at sunset, wrong in fog and wrong in the rain. Starting
+from the pixel the game drew and moving it towards `deepColour` by `deepMix` keeps VCS's own time of
+day for free, and hands the reflection something real to sample.
+
+**The reflection is the frame, mirrored about the horizon.** That is exact for a surface at eye
+height and increasingly wrong for one below it, which is the right way round: what a sea reflects is
+the sky and the far bank, both effectively at infinity. A road at your feet given the same mirror
+comes back with palm trees standing full height in it and reads as a *flood* - reported exactly that
+way from the first build - so a road gets the same approximation with the mirror compressed
+(`wetMirrorScale`, 0.35). Everything a screen-space ray march would need is already here except a
+depth texture, and that is the upgrade path if this is ever not enough.
+
+Reconstructing world position from the GAME's depth buffer instead of drawing the geometry a second
+time was rejected for the reason `VCSShadow` rejected it: PPSSPP rewrites `gl_Position.z` on its way
+out, differently by backend and render state, and replicating a moving target would break in ways
+that look like water bugs.
+
+#### The waves are a sum of sines, and the fade is not an optimisation
+
+Three layers of sine gradient, from world XY, six cosines a pixel. The gradient of a sum of sines
+*is* the normal up to the amplitude, so there is no normal map to project, scale or wrap across a
+surface 2048 units across. Past a few hundred units the normal changes faster than a pixel and the
+sea turns to sparkling noise, which is worse than a flat mirror - hence `detailFade`.
+
+The near sectors already carry the game's own wave *mesh*; this is the detail on top of it, which is
+the part 32 units of vertices cannot express.
+
+#### The roads come from the game's own traffic network
+
+`ThePaths` - the graph the AI drives on, already parsed for the GPS (see `VCSRoute.h`) - is
+rasterised into a top-down mask around the camera and sampled by world XY in the fragment shader.
+One texture fetch a pixel instead of a loop over thousands of segments, rebuilt only when the camera
+leaves the middle eighth of it.
+
+Three things had to be measured before that worked, and each of them was a wrong assumption first:
+
+**1. The space the GE is fed is NOT the game's world space.** The probe put the recovered camera at
+`(14.0, -31.4, 9.6)` while the player stood at `(236.3, -133.6, 8.1)`. It is a translation, it is
+**XY only** - the two Z values agree to the last digit in every sample - and it is *not constant*:
+one session held `(225.0, -105.6)` and another `(287.7, -213.6)`. So it is derived live rather than
+learned, from `CCam[0]+0x20` (the camera in world space) minus the camera recovered from the view
+matrix. That pair is printed side by side on the Water tab; if the Z halves ever stop agreeing, the
+rebase has stopped being a translation and the mask will be in the wrong place.
+
+**2. A path node's Z is one byte and it is NOT scaled.** `VCSRoute` divided it by 8 like x and y,
+which put the entire road network between 0.6 and 3.2 units - *underneath the sea*, which sits at
+5.50 - and one byte at that scale cannot reach a bridge deck. Measured: the road nodes nearest a
+player standing at world z 12.77 hold raw bytes of 10, 11 and 13, and the whole road graph spans
+5..26. **This was a real bug in shipped code**, invisible because routing is a 2D search and the
+radar draws a 2D line; it was found because a wet-road pass came out dry everywhere and the height
+term said why.
+
+**3. The mask needs a height channel, or a fence gets rained on.** A top-down mask knows nothing
+about the third dimension, so a fence rail, a balcony or a rooftop over a road is "on a road" -
+reported as pink fence rails over a canal. The second byte carries the road's own height, and the
+shader wants the surface within a few units of it. The window is deliberately generous: a car roof
+is a metre and a half up and *should* be wet.
+
+**The graph's width is not the road's width.** A two-way street is two parallel lines of nodes about
+eight metres apart and each gets `roadHalfWidth`, so seven metres - which is what a street half-width
+measures - produced a mask covering **26.6%** of a 512-metre square and bleeding twenty metres past
+the kerb into the canal. Four metres is a street.
+
+#### The droplets
+
+One expanding ring per grid cell, the cell's phase hashed from its coordinates so the impacts are
+scattered rather than in step, keyed off WORLD position so a puddle stays where it is while the
+camera moves. The ring is a wavelet - a sine damped by distance from the ring's radius - and its
+gradient is the normal perturbation. Nine cells, and every one of them is behind the wetness test:
+a dry frame pays for a compare, not for nine hashes.
+
+**A tilted normal alone shows from one angle only**, which is how it was reported: "the rain
+droplets are visible only in a certain camera angle". The normal reaches the road's colour through
+two terms and both are angle-bound - the reflection is weighted by Fresnel, about two per cent
+looking down at your feet, and the highlight needs the sun lined up behind the ring. So the rings
+showed along the road at a low angle or into the glint, and nowhere else.
+
+Each ring's crest now carries a brightness of its own as well (`rippleLight`, "Droplet brightness"
+on the Water tab, riding in `u_wet4.w`): the positive half of the wavelet, lit by the game's own
+pixel and the reflection so it follows the time of day and is dim at night, and scaled by
+`1 - fres` so a low angle - where the reflection already shows the ring through the normal - does
+not get it twice. `rippleStrength` still only tilts the normal.
+
+The same pass fixed the "Droplets per unit" slider, which ended at 2.0 against a default of 2.9 and
+so clamped the setting the moment it was touched.
+
+#### The weather is the game's own, and it came out of the script command table
+
+`0166 store_weather` and `0167 restore_weather` name the whole block: their handlers copy exactly
+four values into and out of a save slot, which is the shape of VC's `CWeather::StoreWeatherState`.
+`0109 force_weather_now` then writes its argument to *both* s16s, which separates Old from New, and
+`010A release_weather` writes -1 to the forced slot. Twenty minutes, offline, with nothing running.
+`WeatherRain` (gp+0x1ed8) is the only one the renderer reads.
+
+Rain is the one value multiplied every frame by a pass that covers the screen, so `ReadWeather`
+clamps it to 0..1 and treats NaN as dry: a wrong address shows dry roads rather than a white screen.
+
+#### Two dev hatches, and why they are environment variables
+
+```
+VCS_WATER_PROBE=<host frame>   dump that frame's draw table, and log the camera in both spaces
+VCS_WATER_RAIN=<0..1>          force the rain level
+VCS_WATER_DEBUG=<0..4>         pick a debug view
+```
+
+All three have to be set *before* the frame they affect, from a command line, with nobody at the
+keyboard - which is what an environment variable is for and a settings row is not. The last two set
+the ordinary `rainOverride` and `debugView` settings, so the menu and the hatch are the same lever.
+
+While the probe is armed, the camera in both spaces and the mask value under the player's own feet
+are logged once a second. That second line is the whole wetness calculation short of the surface
+normal, and it is what answered "the road is dry and I do not know why" in one run rather than by
+staring at screenshots.
+
+#### Rain does not wet a road instantly, and the roads say so
+
+The wetness the puddles follow is a **lagged** copy of the game's rain, with two different rates:
+`wetSeconds` (30) to soak and `drySeconds` (90) to dry. Linear rather than exponential on purpose -
+"thirty seconds to soak" is a sentence a player can check with a stopwatch, and an exponential's
+time constant is not. Measured over a driven cycle: forced rain on, then off, and the wetness came
+down 0.200 → 0.178 → 0.155 → … → 0.000 at exactly 1/90 per second.
+
+**A STEP in the rain skips the ramp.** `Rain` follows a forced weather inside half a second - see
+the measurement below - so a jump of more than 0.4 in one frame is not weather arriving, it is a
+decision: the **RAINY WEATHER cheat**, or a mission script. The ramp models water accumulating from
+rain that has been *falling*; a discontinuity means that premise never held. Upwards only: switching
+the rain off does not mop the road, and watching the puddles drain is the half worth having.
+
+So the in-game trigger is the cheat that already exists, with no coupling between the cheat layer
+and the renderer at all - `VCSCheats` still knows nothing but which buttons to press. `Soak now`
+and `Dry now` on the debugger tab are the same thing for testing.
+
+#### Rain is 0.5 at its heaviest, and that is a measurement
+
+Forcing each weather id in turn over the WebSocket debugger and reading `CWeather::Rain` back:
+
+| forced id | 0 | 1 | **2** | 3 | 4 | **5** | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Rain | 0 | 0 | **0.500** | 0 | 0 | **0.500** | 0 | 0 | 0 | 0 |
+
+Two things fall out. Ids **2 and 5 are the wet ones**, and the maximum is **0.5, not 1.0** - so
+everything here divides by `kRainFullScale` and works in a normalised 0..1. Without that the whole
+feature ran at half strength in real weather with nothing to say why. And Rain reached its value
+inside the first half-second sample every time, with no ramp, which is what makes the step detection
+above both possible and necessary.
+
+#### Where the water goes as it dries
+
+Two things happen at once, and neither alone looks like drying:
+
+- the wet **band** retreats towards wherever that stretch of road drains, and
+- what is left **breaks up** into patches.
+
+Which way a stretch drains is hashed from world position on a coarse grid (`drainPatchSize`, 24
+units), smoothly, so one street does not drain the same way for its whole length and there is no
+seam where the cells meet. `drain` is 0 at the crown and 1 at the kerb, and the band is the part of
+the road within `wetness` of it. The break-up is a two-octave value noise thresholded against the
+same wetness, and a `wetness³` floor keeps a road that is *actually being rained on* uniformly wet
+rather than covered in puddles with dry tarmac between them.
+
+**All of that is a pure function of (world x, world y, wetness), so it was tuned off the GPU.**
+`Tools/vcspuddles.py` renders the same formula at six wetness levels. That is a far better
+instrument than a screenshot here: the game decides where the camera is, drying takes ninety
+seconds, and a still frame cannot show a sequence anyway. Two things came out of it that would have
+been slow to find in game:
+
+**One octave of noise is a stripe, not a puddle.** Median length of a wet run along the road at half
+wetness: **25.6 m** with one octave, **7.7 m** with two. A 25-metre puddle is a stripe painted down
+the road.
+
+**And the gutter puddles were being erased by the gutter.** `across` - where a pixel sits between
+the crown and the kerb - was normalised over the whole of `reach`, which includes the soft shoulder.
+So `across = 1`, the place drying water is supposed to end up, sat out in the shoulder where the
+kerb fade had already taken it to nothing. Normalising over the *drivable* half width instead more
+than doubled what survives late in the dry: wet area at wetness 0.30 went from **4.8% to 10.2%**,
+and at 0.15 from **0.0% to 2.1%**. The bug is worth recognising again in general form: a coordinate
+normalised over the wrong extent is not wrong everywhere, it is wrong exactly at one end.
+
+#### The droplets stop when the rain does
+
+The rings follow a separate, barely-lagged copy of the live rain (`s_rippleRain`, 1.5 s), not the
+wetness. "It has stopped raining and the road is still wet" is precisely the state in which rings
+would be wrong - nothing is landing on it. The 1.5 s is so a forced weather change fades them rather
+than cutting one off mid-ring.
+
+#### The sea was too reflective, and the number says why it was not the Fresnel's fault
+
+Reported as looking like a straight-up mirror. The instinct - turn the reflection down - would have
+been guessing, so the distribution was measured instead: `MeasureReflection` walks the frame's own
+captured water vertices and computes the flat-water Fresnel at each.
+
+```
+raw p10 0.278   p50 0.682   p90 0.967   |   74.4% of the visible sea above 0.5
+```
+
+**Three quarters of the sea is physically more mirror than water**, and that is correct: a camera a
+few units above the surface sees most of the water at a grazing angle, and the Schlick term with
+F0 = 0.02 is right about what water does there. So the problem was never the Fresnel curve. It was
+two other things:
+
+- **A single tap is a sheet of glass.** Real water at any distance is roughened by capillary waves
+  smaller than a pixel and hands back the average over all of them. The reflection now takes five
+  taps, spread wider with distance - which is also exactly where the Fresnel term is highest.
+- **`reflectionStrength` was 0.85**, which is a near-unity scale on a curve that already reaches 1.
+
+Set from the measurement rather than by eye, at 0.45 with a 0.50 ceiling:
+
+| | p10 | p50 | p90 | raw needed to be half mirror |
+|---|---|---|---|---|
+| was (0.85, no cap) | 0.236 | **0.580** | 0.822 | 0.59 |
+| now (0.45, cap 0.50) | 0.125 | **0.307** | 0.435 | 1.11 — unreachable |
+
+So nothing on screen can now be more than 44% reflection, the median is halved, and the Fresnel
+gradient survives intact because the ceiling never actually bites. The tab reports both numbers
+live, so this is checkable rather than remembered.
+
+
+#### The whole feature was dead for a build, and the reason is one identifier
+
+`patch` is a **reserved keyword in GLSL 4.50** - it is a tessellation qualifier - so `float patch`
+is a syntax error. The shading fragment shader stopped compiling, `s_setupFailed` latched, and
+every pass after it drew nothing. Water AND roads, silently, for a whole round of work.
+
+Two things made it survive longer than it should have:
+
+- **glslang's message goes out at `WARN_LOG`** (thin3d_vulkan.cpp's `VKShaderModule::Compile`),
+  and this build's `G3DLevel = 2` drops WARNING while passing NOTICE and ERROR. Only the bare
+  `Failed to compile shader vcs_water_shade_fs:` line at ERROR reached the log, with the source
+  but no reason. Raise `G3DLevel` to 4 to see the actual error, and put it back afterwards.
+- **Nothing said the passes had not run.** Absence of an error was being read as success. The
+  probe now prints `PASSES ran` / `PASSES FAILED TO SET UP` once a second, positively, which is
+  the line to look for first after any change to this shader.
+
+The general shape, and it is worth recognising again: a latched setup failure is invisible from
+the outside and looks exactly like a feature that is switched off. **Log what DID happen, not
+just what went wrong.**
+
+#### And the sea still looked untouched at range, for three compounding reasons
+
+Reported as "sea looks like the og one" once the shader compiled again. Arithmetic, not opinion:
+
+1. **The distance fade was killing the waves.** `g` is a SLOPE, so it was fading every octave -
+   normal tilt went from 8.3 degrees at 30 metres to 0.9 degrees at 300. Most of the time you see
+   this sea it is hundreds of metres away, so the waves existed almost nowhere. A **swell** octave
+   at a sixth of the frequency now runs unfaded; a long wavelength costs nothing in steepness and
+   is never smaller than a pixel, so it cannot alias, which is the only thing the fade was for.
+2. **The reflection had been over-cut.** Reducing `reflectionStrength` to 0.45 took the median
+   reflection to 0.22 - and over open sea the reflection is of the SKY, which is nearly the
+   water's own colour, so at that weight the term is a no-op. The fix for "it looks like a
+   mirror" was the five-tap blur, not the strength; a single tap is a sheet of glass whatever it
+   is scaled by. Back to 0.70 with the 0.62 ceiling.
+3. **The deep colour was a filter, not depth.** Mixing a fixed 30% of `deepColour` everywhere
+   just tints the sea darker. Scaled by `(1 - fres)` it becomes the other half of the Fresnel -
+   dark where you look INTO the water, pale where you see sky off it - which is the strongest
+   "this is water" cue over open sea after the sun glitter.
+
+And the glint lobe went from `pow(..., 120)` to 55 at nearly double the strength, because at 120
+it only existed when the sun was almost dead ahead.
+
+#### Testing this needs the player put somewhere, and there is only one lever
+
+The boot autoload decides where the player stands and **overrides `--state`**, so three rounds of
+screenshots came back from inside a shop while the notes claimed the sea had been checked. The way
+out is to write `PlayerBase + 0x30/34/38` over the WebSocket debugger and wait about twelve seconds
+for the streamer - the benchmark spot at `150.2, -670.8, 13.0` looks straight across the water.
+Anything claiming to have verified how this looks should say where it was standing.
+#### Four reports from play, and what each one turned out to be
+
+**The puddles swam while driving.** The offset that crosses from the space the GE is fed into the
+game's own world space was derived in `BeginFrame` by pairing the camera it had just read out of
+PSP memory with the camera recovered from the PREVIOUS frame's view matrix. At driving speed those
+are a whole frame of travel apart, so the offset wobbled by however far the car had moved - and the
+puddles are a noise field sampled at (GE position + offset), so the entire field moved with it every
+frame. Derived at the seam now, where both halves come from the same frame, and latched on top:
+measured residual went from a frame of travel to **0.001-0.003 units**.
+
+The latch is worth keeping separately from the pairing. A rebase is a step, not a drift - it holds
+for many seconds and then jumps - so anything under `kOffsetLatch` is noise, and moving a
+world-anchored field for noise can only make it shimmer.
+
+**The road mask was a 2.8 ms spike every couple of seconds.** It recentres when the camera leaves
+the middle eighth of the map, which while driving is every two seconds or so, and it ran in one go
+on the emu thread against a 33 ms budget. It is sliced across frames now - it writes a private
+buffer and swaps it in only when finished, so the live mask stays correct and merely a little
+stale, and the map reaches 256 units against a 64-unit trigger so there is four times the slack a
+build needs.
+
+Budgeting it took three attempts and the two failures are the interesting part. **Nodes** were
+wrong: cost per node runs from a bounding-box rejection to hundreds of rasterised texels, and
+slices came out anywhere between 0.19 and 1.32 ms. **Texels** were wrong too, and more
+instructively - most of a build is the ~10000 segment REJECTIONS, not the ~25000 texels that
+survive them, so a texel budget let thousands of nodes through for free and put most of the build
+back into one frame. Budgeting against the clock works because the clock is the thing being
+budgeted. Now ~0.8 ms total at =< 0.35 ms a frame.
+
+A separate 47 ms spike in the same place turned out to be `VCS::EnsureGraph` re-reading ~3000 nodes
+and ~17000 links when the level changes. That is once per island, during a load, and is left alone.
+
+**Shadows flickered while driving.** Counted rather than described: a BLINK is a frame where the
+composite ran last frame and not this one, which is exactly what the player sees. Two mechanisms,
+and the count separated them.
+
+The first was the **sun**. It is read off whatever draw hands the hardware an enabled directional
+light, and this game's scenery is prelit and unlit - so the lit draws are the traffic and the
+pedestrians, and a frame containing neither has no sun at all. `ComputeShadowView` gave up, and
+every shadow on screen vanished for that frame. Measured: five such frames in a forty-second run.
+The sun is held now; one that is a frame or two stale differs by a few thousandths of a degree.
+
+With that closed, the remaining blinks were **all** attributed to an empty caster set - a frame
+where nothing at all qualified as a caster, which happens while a chunk swaps. The depth map from
+the last frame that had something in it is reused for up to `kMaxHeldMapFrames`, which takes the
+count from **seven to one** under teleport stress and to **zero** in ordinary play. What goes stale
+is only the casters; the receivers are this frame's geometry, so shadows still land on the ground
+that is actually there. The camera matrix is emphatically NOT held - the mask is screen space and
+the camera has moved - so the two are kept apart: fresh `cameraViewProj`, held light matrices.
+Mixing them puts the right shadows in the wrong places.
+
+**The vanilla blob sprite flashed on every chunk load.** Suppression waited for a texture to be
+LEARNED, which takes `kBlobSightingsToLearn` frames - and every texture address moves when a chunk
+streams in, so each load showed the game's own blob under the player until the learner caught up.
+The positional test already knows the answer for the draw in front of it on the first frame it sees
+it; the learned set only ever needed to carry that knowledge to frames where whatever stands over
+the blob did not reach the capture. Suppressing immediately and learning in parallel: measured over
+a session, **28461 blobs hidden by position against 10621 by learned texture**.
+
+#### What is NOT verified
+
+- **Bridges and flyovers.** Where two roads cross at different heights the mask keeps the height of
+  whichever covers the texel more strongly. One byte cannot hold both. Driving over the Downtown
+  bridge in the rain is the test.
+- **Interiors.** Nothing tests for being indoors, so a garage floor at a road's XY and height would
+  go wet.
+- **The sea drawing over the player's model.** Reported: looking at the character's FRONT with
+  water behind him, the water layer overlaps parts of him in some situations. Deferred rather than
+  fixed. What has been ruled out: people do reach the depth pre-pass - 20 skinned draws seen, 20
+  captured, none rejected - so it is not the caster filter eating them. The next thing to try is
+  `Tools`-side camera control (write `CameraYaw`, sweep it round the player at the water's edge)
+  with debug view 4, which paints every pixel the water pass claims.
+- **How the puddles look on a real road at mid-wetness.** The formula was verified off the GPU at
+  six wetness levels and the timing numerically in play, and a fully wet road was photographed -
+  but the half-dry state in game was not. Soak now / Dry now on the Water tab is a ten-second
+  check for anyone with a keyboard.
+- **Cost.** The passes were never profiled. The geometry is captured a second time (`VCSShadow`
+  captures its own), which is one vertex transform per vertex on the CPU, and the shading pass draws
+  the scene twice more. Nothing was measured, so nothing is claimed.
 
 ### The hunt for the visibility function, and the frustum that decides nothing
 
@@ -4613,7 +5230,7 @@ because a teleport drops the player onto whatever ground is there, the clock kee
 follow camera is still settling. **A savestate is the fixture; a teleport is not.** Take one at the
 spot the question is about, and reload it for every run.
 
-### The world is 4.75MB, and that is the only thing that decides how far you can see
+### The world is 4.75MB, and that is what decides how much city there is to see
 
 **Status: found, patched, measured, shipped as `World memory` on the Graphics page.** After four
 distance mechanisms that turned out to decide nothing, this is the one that does - and it is not a
@@ -4693,6 +5310,235 @@ run; slot 2 is one such fixture for a long sightline and reads 486 draws with a 
 More resident world is necessary for a wider view and may not be sufficient, and the honest next
 question is which specific geometry is still missing once the ceiling is gone.
 
+
+### The far city was always drawn - the haze is what you cannot see past
+
+**Status: found, applied in the renderer, measured, and removed - never committed.** The numbers
+below are real and nobody could see them in play, and "The map is baked per cell" says why: past the
+first few hundred units the city IS the LOD stand-ins, and a clearer stand-in is still a stand-in.
+The whole implementation was the two lines quoted here and a float read out of `VCSGame.h`. Five distance mechanisms have now been decoded here. Four of them
+decide nothing. This is the fifth, it is not a distance either, and unlike the memory pool it costs
+nothing at all.
+
+**The evidence was already in this file, in the control rather than in the measurement.** The LOD
+multiplier run recorded that at 0.05x "the entire skyline, the bridge and the far shore are still
+drawn, pixel for pixel, and the thing that vanishes is the player". Read that the other way round:
+the far city is IN the frame at a twentieth of the draw distance. Nothing about distance is taking
+it away. What takes it away is the fog painted over it - so the question was never how far the game
+draws, it was how far you can see what it has already drawn.
+
+**Where the band lives, and why it is the renderer's business rather than the game's.** The fog is
+two GE registers. PPSSPP's shader computes `v_fogdepth = (viewPos.z + fogCoef[0]) * fogCoef[1]`, so
+`fogCoef[0]` is where the fog ENDS and `1/fogCoef[1]` is how wide the band is. Scaling one up and
+the other down by the same factor moves the start and the end together and leaves the shape of the
+fade alone - which is the difference between seeing further and seeing the same view less foggily:
+
+```cpp
+	const float fogScale = VCS::FogScale();
+	if (fogScale != 1.0f) {
+		fogCoef[0] *= fogScale;
+		fogCoef[1] /= fogScale;
+	}
+```
+
+That is the whole feature, in `UpdateFogCoef` (`GPU/Common/ShaderUniforms.cpp`), which all three of
+its callers go through. `VCS::FogScale()` is a plain float in `VCSGame.h` rather than a call into
+Core, the shape `VCSShadow::g_active` already uses and for the same reason - it is read once per
+draw call. It reads exactly 1.0 for every other disc, and `RefreshFogScale` is the only thing that
+writes it.
+
+Doing it here rather than in the game is the point. `CCamera + 0x7a0` is the game's own copy of the
+distance behind the band, and it is rebuilt every frame - the same property that forced the LOD
+multiplier to be a code patch instead of a memory write. The renderer sits downstream of all of it.
+
+**Measured**, on slot 2, with the camera identical across runs to within 1.3/255 over the lower half
+of the frame. The instrument is not the draw count, which cannot see this at all: the pixels are
+already being drawn either way, and what changes is what colour they are. So it is the standard
+deviation of luminance over a band of distant geometry - fog collapses a building towards one flat
+sky colour, and contrast coming back IS the building coming back.
+
+| Horizon haze | far shore, contrast | downtown behind the crane, contrast |
+|---|---|---|
+| 1.0x (stock) | 30.01 | 40.21 |
+| 2.0x | 39.97 | 43.87 |
+| 4.0x | 45.09 | 46.02 |
+| 8.0x | 47.61 | 47.08 |
+
+**+59% on the far shore**, and the mean colour of that band moves from `68, 173, 190` - the sky is
+`63, 174, 240` - to `82, 158, 156`, which is what a row of buildings looks like when it is not being
+painted the colour of the sky. Most of it arrives by 2x and the curve flattens after 4x, which is
+the band having already moved off the geometry that is there.
+
+Two runs of the same setting reproduce to three significant figures (43.86 against 43.87), which is
+what says the differences above are the setting and not the scene.
+
+**No hard edge at 8x.** The predicted failure was the game's own far clip arriving before the fade
+finishes, and at the ceiling of the row it has not happened at this spot - the far shore still ends
+in water and sky. That is one sightline, not a proof, and the help line still warns about it.
+
+### Three ways to lose a fixture, all found in one afternoon
+
+The fog measurement above took eight runs, and five of them were thrown away. Each failure has a
+shape worth recognising before it costs a run again.
+
+**A savestate belongs to a partition size.** Slot 2 was written under `World memory` 1 and will only
+load under it. Loading it at 7 kills the emulator - once as `Bad Execution Address` at `0x0bffecc0`,
+which is high memory a 32MB partition does not have, and once by simply vanishing between two
+samples. The commit that made the partition conditional already said this; it is repeated here
+because the failure does not look like a savestate problem, it looks like whatever else changed in
+that build. **Choose the fixture and `World memory` together, and pass both to the runner** rather
+than inheriting whichever is in the file.
+
+**Mouse look randomises the camera.** `VCSCamera` writes yaw directly, from host state a savestate
+does not restore, so the same slot came back facing a hotel in one run and the downtown skyline in
+the next. A fixture whose camera is not the same is not a fixture. `MouseEnabled = False` for the
+duration of a measurement, and check it afterwards: the lower half of the frame is ground and
+player, so a mean absolute difference near zero there is the proof that only the sky changed.
+
+**The fork's own autoload will eat a savestate loaded too early.** Boot walks the game's front end
+to load the newest save, and that lands somewhere between 100 and 160 seconds in. A savestate loaded
+at 100s is silently replaced by the game loading its save on top of it, and the run measures the
+autoload's destination instead. Three runs were lost to this - and the dangerous part is that all
+three AGREED with each other, because they were all the same wrong scene. **Consistency between runs
+is not evidence that the fixture loaded.** Look at one of the frames. The runner now waits past the
+walk and loads twice, twenty seconds apart.
+
+And one that is not about the game at all: a PowerShell harness writing `vcs.ini` with `"{0:F6}"`
+formats in the machine's locale, which on this one is a decimal COMMA. `FogDistance = 1,000000` is
+not a number the ini reader recognises. Use `[System.Globalization.CultureInfo]::InvariantCulture`
+for anything written into a config file.
+
+### The map is baked per cell, and that is the whole of the draw distance
+
+**Status: decoded end to end, a rebuild tool and a runtime built and verified mechanically in game,
+then removed without being committed.** What wider detail was wanted for was building shadows that
+come apart with distance and go out behind you, and "Cast once, then there" fixed that inside the
+shadow cache without touching the map. The decoding below stands; the tool and the runtime it
+describes are gone, and this section is the only record of them. With the row on, both
+levels' chunk tables were widened with nothing refused (461 `BEACH` entries, 482 `MAINLA`), widened
+again after every savestate load put the retail table back, and merged chunks streamed in without a
+crash - the fixture's own cell among them, chunk 225 at 552,860 bytes instead of 483,092, once the
+player had been hopped far enough away to push it out of all three slots. One jump was not enough:
+the streamer kept the cell as its spare and reused it. What is not settled is the picture. Every
+on/off pair shot in separate sessions came back at a different camera angle, restoring the ped's
+whole transform made it worse, and the single-session comparison - flip the loaded chunk's pass
+pointers between the merged lists and the original ones it still carries, and shoot on/off/on - was
+stopped before it ran. Two things that comparison has to do first: re-flag the original lists, whose
+records carry bit 15 as the disc has it (525 of 849 in chunk 225, and the game reads that bit as
+hidden), and hold the camera still. This is the section the five inert levers above were circling. None of
+them could move the map because the map is not streamed by distance at all.
+
+**What VCS streams.** Each level - `BEACH`, `MAINLA`, `MALL` - is a `.LVZ` and an `.IMG` in
+`RUNDATA`. The LVZ is a zlib'd `WRLD` relocatable chunk; the level struct (`sLevelChunk`, laid out
+exactly as aap's storiesview has it) holds a resource table and 36 rows of a **staggered grid of
+32 x 36 cells, 125 x 108.25 units, origin (-2400, -2000), odd rows shifted half a cell.** Every
+cell is its own chunk in the IMG, and the LVZ carries a table of their 32-byte `WRLD` headers:
+
+```
++0x00 ident "DLRW"   +0x08 fileEnd    +0x0C dataEnd    +0x10 relocTab
++0x14 numRelocs      +0x18 globalTab - the chunk's offset into the IMG
+```
+
+The disc holds a chunk from coordinate 0x20 onward - the header itself lives only in the table - so
+every pointer inside a chunk counts those 32 bytes.
+
+**And a chunk is a precomputed view from its cell**, not a piece of map. Its header lists instance
+passes - `superlod, underwater, lod, roads, normal, nozwrite, lights, transparent` - and for cell
+(20, 12), the slot 2 fixture's, they reach:
+
+| pass | instances | distance from the cell |
+|---|---|---|
+| normal | 166 | 36 - 266 |
+| transparent | 132 | 36 - 266 |
+| roads | 12 | 17 - 214 |
+| lod | 423 | 156 - 1633 |
+| superlod | 43 | 291 - 1772 |
+
+Full detail out to about 266 units and stand-ins past that, **baked into the archive when the game
+was built.** Nothing at runtime chooses between them, which is why the frustum, the delete-behind
+pass, the far clip, the LOD multiplier and the fog were all inert for the map - and why the 0.05x
+LOD multiplier left the whole skyline standing: it is the `lod` and `superlod` passes of one chunk.
+
+**An instance is 0x44 bytes and carries no pointers** - no relocation entry lands inside a pass
+list. `+0x00` u16 id (bit 15 is a hidden flag the game recomputes on every cell swap, set when the
+resource is not loaded), `+0x02` u16 resource id, `+0x04` a half-float bounding sphere **in world
+units**, and `+0x10` twelve position-matrix components **relative to the cell**, each stored as a
+float with its low eight bits dropped: the game shifts the word left 8 and reads IEEE bits
+(`0x08958454`). Mixing those two frames up cost one build - see below.
+
+**The streamer is `cWorldStream`, at `[gp + 0x16e8]` (`0x08BB3448`).** `CStreaming::Update` calls
+its update at `0x08958764` once a frame. It keeps **six slots at `+0x244 .. +0x258`: the current
+cell, the next one and a spare, plus three area packs on a grid a third that size.** It measures the
+camera against the current and next cells' centres (`0x08953a08` computes a centre - the only
+function in the game that loads 108.25) and swaps at `0x08957d74` when the camera crosses; the
+next cell is predicted from a point ahead of the camera built with 50.0 and 150.0.
+
+A load goes `0x08955ec0` (request) -> `0x08956160`, which seeks the IMG to `globalTab`, bump-
+allocates `dataEnd` rounded to 16 from `+0x278`, and reads `fileEnd` bytes asynchronously. The
+completion at `0x089563c0` relocates the chunk through `0x08a313ec` **using the header in the
+in-RAM table** - so the table, not the disc, is what decides a chunk's size and where its
+relocation table is. The IMG's file record is at `cWorldStream + 0x270`: `+0x00` first sector,
+`+0x04` size, `+0x08` position, and **both seek and read clamp to that size** (`0x089394a4`,
+`0x08939590`).
+
+**Memory.** A cell slot's arena is a fixed **773,488 bytes** (`0xBCF70`), four of them sliced out of
+one allocation at `0x08957710`, and the bump allocator has no limit check. Measured across all three
+levels, a cell with its swap chunks leaves between 8 KB and 755 KB free, median about 500 KB.
+
+**Resources.** A resource whose pointer is present in the LVZ file is part of the level image and is
+resident for as long as the level is: 1699 of 1699 agree with a live savestate's resource table.
+Everything else rides in with a chunk (its overlay list) or an area pack.
+
+**What that makes the draw-distance lever: the chunks themselves.** `Tools/vcsworldhd.py` rebuilds
+each world cell's view to carry its neighbours' full detail as well:
+
+- every cell within 260 units contributes its `roads`, `normal`, `nozwrite` and `transparent`
+  instances, deduplicated by id (adjacent chunks share about 60% of them), rebased onto this
+  cell's origin, nearest first;
+- only instances whose resource lives in the level file are taken, so nothing new has to be loaded
+  for them to draw and the chunk needs no new resources or relocations;
+- this cell's LOD stand-ins with new detail inside their bounding sphere are dropped, except the
+  huge block LODs, whose far side the new detail does not reach;
+- the pass lists are **appended past `dataEnd`, all eight of them**, because a pass's end is the
+  next pass's start - moving any one moves them all - and the header's pass pointers repointed. The
+  old lists stay behind as dead bytes, and the relocation table moves to the new end unchanged;
+- a cell is capped by its own arena headroom less 8 KB, dropping the farthest additions first.
+
+For cell (20, 12) that is **full detail out to 511 units instead of 266**: 291 instances added, 114
+stand-ins dropped, 68 KB more chunk. Across the game: `BEACH` 461 of 623 cells, `MAINLA` 482 of
+601, `MALL` 135 of 1152, 115k instances added, one 35 MB file, built in about six seconds.
+
+**The file is a list of changes, not an archive.** Chunks stay where they are on the disc; the
+runtime (`VCS::WorldDetail*` in `VCSGame.cpp`, row `Distant detail`) applies them in two places.
+The level's in-RAM chunk table gets the new `fileEnd`, `dataEnd` and `relocTab` every tick while
+the setting is on, and the disc's values back while it is off - verified against `ident` and
+`globalTab` first, and deferred while `cWorldStream + 0x274` says a read is in flight. And the read
+of a merged chunk, which now runs past the chunk's end on the disc, gets the new pass pointers and
+the appended bytes laid over it, **keyed on the read starting at that chunk** and armed only when
+the table already describes it as merged - so the next chunk's own reads, which overlap the grown
+range, are never touched, and a savestate from before the table was widened reads the disc as it is.
+
+**Two things an earlier design got wrong, worth keeping.**
+
+- **`SMALLPAD.DAT` is not free space for the taking.** It is 173 MB of random letters the game never
+  reads, and the obvious plan was to map rebuilt chunks into it. Two things kill that: the archives
+  are 475 MB and the padding is 173, and the IMG file record clamps every seek to the IMG's own
+  size, so a `globalTab` pointing past it lands on the last byte. Serving only the delta, at the
+  chunk's own offset, needs neither.
+- **The bounding sphere is in world units and the matrix position is not.** The first build rebased
+  both, which moves every merged instance's culling sphere a cell-origin away from its geometry, and
+  it measured the LOD overlap with the cell origin added twice. The check that found it: across a
+  whole cell, sphere centre minus matrix position is a constant 667 units - the length of that
+  cell's origin.
+
+**Tooling notes from getting here.** `Tools/vcsstatic.py --disasm` is the disassembler to use for
+this code: capstone on its own stops dead at the first VFPU instruction or MIPS32r2 `ins`, and a
+dump it "wrote" can be 69 lines of an intended 5000 without saying so. `awk` comparing eight-digit
+hex addresses compares a number with a string and returns nothing. And a function's float
+constants are split across `lui` and an `ori` up to 28 bytes later, with other instructions in
+between, so a scan that only looks at the next three instructions misses the one function it is
+looking for.
+
 ### Streaming stutter, measured - and `CacheFullIsoInRam` is worth its memory
 
 "Average fps" is useless for this. A run that freezes for a third of a second once a second still
@@ -4731,6 +5577,54 @@ session: a probe that reported "the CPU is stopped" when the read had actually s
 returned a null player pointer, and a screenshot helper that captured the wrong window because
 `Process.MainWindowHandle` did not name the game's - enumerating top-level windows by process id and
 picking the visible one is what works. Guard every read, and say which of the two things went wrong.
+
+### Driving stutter was Instant texture loading, and it only waits on 2D now
+
+**Status: cause confirmed from play, rule built.** `ReplacementTextureLoadSpeed` is on Instant for
+a reason: on any other speed the splash and credits art shows its low-res original for a moment
+before the HD file lands. But Instant waits for EVERY replacement inside the frame that asked for
+it, and a chunk that streams in brings dozens of world textures at once - so driving fast into a
+new area loaded all of them synchronously and the frame stalled. Switching to Fast removed the
+stutter and brought the low-res splash back.
+
+`TextureCacheCommon::PollReplacement` now keeps both: while VCS is active and the speed is
+Instant, a 3D draw during play does not wait - it takes its replacement as it arrives, a frame late
+at worst, exactly as Fast does - while through-mode draws (splash, credits, menus, loading screens,
+the HUD) and everything before `BootPhase::Intro` ends still wait. No setting changed.
+
+**The harness did not reproduce it, and that is worth knowing before trusting one.** Dragging the
+ped east at 40 units a second from slot 2 logged one 100 ms stall and not a single frame blocked on
+textures. The writes only covered 500 units in 28 seconds, a teleported ped is not a car, and every
+step that moved the follow camera far enough made the water module forget the sea - so the path
+exercised the streamer far less than driving does. The confirmation is from play.
+
+Two log lines stay, both silent in normal play: `N ms between vblanks at game frame F` past 100 ms
+(`VCS::Tick`), and `last frame spent N ms on M texture replacements` past 50 ms
+(`TextureCacheCommon::StartFrame`). A replacement line during play means the rule above has stopped
+holding.
+
+### The sea painted over the player: two rejects that should never see a person
+
+Reported from play as the water overlapping the character "sometimes". The depth pre-pass is the
+only thing that keeps the sea off anything in front of it, so a person rejected from it is a person
+the sea is composited over. Two tests could reject one, and neither should:
+
+- **Blended.** The game fades people with their material alpha, which turns its copying blend into
+  one that alters the destination, so `BlendAltersDestination` filed a fading player as glass. The
+  same applied to the depth-write test.
+- **Near the camera.** The test that throws out the game's full-screen overlays - geometry sitting
+  entirely within two units of the camera - also caught a separate piece of the player, a head or a
+  hand, whenever the camera pulled in behind him. Measured, not reasoned: the first stutter run
+  logged `a person was left out of the occlusion pass (sits on the camera)`.
+
+A skinned draw is now exempt from all three. The overlays are flat quads and never skinned, and a
+faded person occluding costs the vanilla sea showing through them for the length of the fade -
+the same good way round as the alpha-tested palm fronds. `NoteReject` logs once per reason when a
+person is still rejected, so if it comes back the log names the test.
+
+`VCSShadow::AddCaster` has a near-camera cutoff of the same shape and was left alone: nothing about
+shadows has been reported, and a person's head missing from the shadow pass while the camera is
+inside two units of it is a much smaller thing than the sea covering it.
 
 ### Two traps in patching this emulator's code
 

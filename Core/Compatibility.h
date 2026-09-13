@@ -126,6 +126,7 @@ struct CompatFlags {
 	bool DisableRangeCulling;
 	bool VCSInputOverhaul;
 	bool VCSDynamicShadows;
+	bool VCSWaterQuality;
 };
 
 struct VRCompat {

@@ -25,6 +25,8 @@ class DrawContext;
 class Framebuffer;
 }
 
+class TextureCacheCommon;
+
 // Dynamic sun shadows for GTA: Vice City Stories.
 //
 // Gated on the VCSDynamicShadows compat flag, which assets/compat.ini sets for ULUS10160 and
@@ -309,16 +311,26 @@ struct Settings {
 	// shading nothing.
 	bool cacheCasters;
 
-	// How long a caster keeps casting after it was last drawn. This is also the ghost window: an
-	// object that both moves and leaves the view in the same frame holds its old shadow for this
-	// long. Everything that moves in this game is either skinned or gets caught by the
-	// same-model-different-matrix eviction, so it is a backstop rather than the usual path.
+	// How long a caster keeps casting after it was last drawn. Zero - the default - is for as long
+	// as it stays within cacheRadius: cast once, then there. That is safe because nothing that can
+	// move is remembered (see AddCaster) and scenery holds still, so a clock has nothing left to
+	// catch. It stays a knob for the day something proves that wrong.
 	float cacheHoldSeconds;
 
 	// Cached casters further than this from the camera are dropped. The cascade is 50 units, so
 	// there is nothing to be gained by remembering the far side of the island - and this is what
 	// keeps the cache from growing into the whole city as you drive across it.
 	float cacheRadius;
+
+	// Only a sighting this close may REPLACE what a cell remembers.
+	//
+	// Further out the game draws a building as its LOD stand-in, or draws only some of its parts -
+	// the full-detail radius is baked into the level archives, about 266 units around the cell the
+	// streamer has loaded - so a far sighting is a lesser version of the same place. Letting it
+	// overwrite the full one is how a building's shadow came apart as you walked away from it. A
+	// far cell that already remembers something keeps it and casts it alongside whatever the game
+	// drew there; an empty one still takes what it is offered.
+	float cacheReplaceRadius;
 
 	// Only the faces turned AWAY from the light go into the depth map.
 	//
@@ -410,6 +422,12 @@ struct Settings {
 	// rule is vertex normals, exactly as for the caster modes. Off puts wheels back to
 	// casting nothing, which is what every build before this did.
 	bool cutoutEntitiesCast;
+
+	// Cut-out SCENERY - palm fronds, foliage, chain-link - casts through its own texture. A second
+	// depth pipeline samples the texture's alpha and throws the holes away, so a palm casts fronds
+	// rather than the card they are painted on, which is all the plain pass could ever write.
+	// Off puts them back to casting nothing.
+	bool texturedCutouts;
 
 	// Extra depth bias applied to PEOPLE when they are being shaded, on top of depthBias.
 	//
@@ -530,6 +548,21 @@ struct CaptureStats {
 	// a handful means the former, most of them means the latter.
 	int largeDraws;
 	int largestDrawVerts;
+
+	// Cut-out casters drawn through their texture: draws captured live, remembered ones replayed,
+	// the draw calls that made (one per texture), and their indices. Unresolved is a remembered
+	// piece whose texture the cache has since let go of; unsampleable is a live one whose texture
+	// turned out to be a framebuffer or a palette the shader expands.
+	int cutoutDraws;
+	int cutoutCachedDraws;
+	int cutoutGroups;
+	int cutoutIndices;
+	int cutoutUnresolved;
+	int cutoutSkipped;
+
+	// Flat surfaces drawn with a blend or a cut-out texture, captured as receivers only - see
+	// AddReceiver. Zero on a street means the ground there is all ordinary geometry.
+	int blendedReceiverDraws;
 };
 
 const CaptureStats &LastCapture();
@@ -540,6 +573,21 @@ const CaptureStats &LastCapture();
 // Safe to call with `indices` null for a non-indexed draw. `numDecodedVerts` is the decoded
 // vertex count for the whole flush, which is what the index buffer indexes into.
 void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
+	int stride, int posOffset, GEPrimitiveType prim, const float world[12]);
+
+// The two halves of a cut-out caster - a draw ClassifyDraw called Reject::Cutout.
+//
+// A cut-out needs its texture, and the draw engine only settles which texture a draw uses AFTER
+// classification. So the geometry and texture coordinates are baked first, and NoteCutoutTexture -
+// called once the draw's texture is applied - hands over the view and commits it. A bake nobody
+// commits is dropped at the next ClassifyDraw.
+void AddCutoutCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
+	int stride, int posOffset, int uvFormat, int uvOffset, GEPrimitiveType prim, const float world[12]);
+void NoteCutoutTexture(void *imageView);
+
+// A draw the caster filter threw out for its blend or its cut-out texture, offered as a place for
+// shadows to land. Only surfaces lying roughly flat are kept.
+void AddReceiver(const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
 	int stride, int posOffset, GEPrimitiveType prim, const float world[12]);
 
 // Offered every draw the caster filter threw out for writing no depth, with its geometry, so the
@@ -593,7 +641,11 @@ void BeginFrame(Draw::DrawContext *draw);
 // run and the mask is multiplied into `target` - the framebuffer the game is currently drawing
 // into. Returns true if anything was drawn, which is the caller's cue to rebind its own render
 // target; false is the ordinary case and costs one bool test.
-bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target);
+//
+// `textureCache` is how remembered cut-out casters find their textures again - see
+// ResolveCutoutTexture. Null costs only those.
+bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
+	TextureCacheCommon *textureCache);
 
 // The depth target, for the debugger to preview. Null until the pass has run once.
 Draw::Framebuffer *ShadowMap();

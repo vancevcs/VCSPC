@@ -22,6 +22,7 @@
 #include "Common/File/FileUtil.h"
 #include "Common/File/Path.h"
 #include "Common/Log.h"
+#include "Common/TimeUtil.h"
 #include "Core/Config.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/sceCtrl.h"
@@ -281,6 +282,21 @@ void Tick() {
 	}
 
 	g_tickCount++;
+
+	// What stutter IS, measured where the player feels it: host time between two vblanks. Normal is
+	// 16.7 ms and a 30 fps game frame is two of them; past 100 ms it is logged, with the game's own
+	// frame counter so a run can line it up against anything else in the log. The pause menu and
+	// loading screens trip it too, and are easy to tell apart by where they fall.
+	{
+		static double s_lastTickTime = 0.0;
+		const double now = time_now_d();
+		if (s_lastTickTime > 0.0 && now - s_lastTickTime > 0.1) {
+			const std::optional<u32> frame = ReadAddrU32(VCSAddr::FrameCounter);
+			NOTICE_LOG(Log::System, "VCS: %.0f ms between vblanks at game frame %u",
+				(now - s_lastTickTime) * 1000.0, frame ? *frame : 0);
+		}
+		s_lastTickTime = now;
+	}
 
 	// Cheap, and the front end needs it before anything else this tick.
 	UpdateBootPhase();

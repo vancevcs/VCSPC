@@ -38,6 +38,7 @@
 #include "Core/HW/Display.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Common/TextureCacheCommon.h"
+#include "Core/VCS/VCSGame.h"
 #include "GPU/Common/TextureDecoder.h"
 #include "GPU/Common/GPUStateUtils.h"
 #include "GPU/ge_constants.h"
@@ -122,6 +123,14 @@ TextureCacheCommon::~TextureCacheCommon() {
 void TextureCacheCommon::StartFrame() {
 	ForgetLastTexture();
 	clutTextureCache_.Decimate();
+	// VCS: a frame that spent real time blocked on replacement textures says so. On Instant that used
+	// to be every frame that drove into a new chunk - see the rule in PollReplacement - so a line here
+	// during play now means that rule has stopped holding.
+	if (VCS::IsActive() && replacementTimeThisFrame_ > 0.05) {
+		NOTICE_LOG(Log::TexReplacement, "VCS: last frame spent %.0f ms on %d texture replacements (load speed %d)",
+			replacementTimeThisFrame_ * 1000.0, replacementPollsThisFrame_, g_Config.iReplacementTextureLoadSpeed);
+	}
+	replacementPollsThisFrame_ = 0;
 	replacementTimeThisFrame_ = 0.0;
 
 	float fps;
@@ -1787,6 +1796,27 @@ void TextureCacheCommon::PollReplacement(TexCacheEntry *entry, int *w, int *h, i
 	if (g_Config.iReplacementTextureLoadSpeed != ReplacementTextureLoadSpeed::INSTANT) {
 		waitBudget = 0.0;
 	}
+	// VCS: Instant only waits where waiting is what the player wants.
+	//
+	// It is set for the splash and credits art, which on any other speed shows its low-res original
+	// for a moment before the HD file lands. But it waits for EVERY texture, and a chunk that streams
+	// in brings dozens of world textures at once - so driving fast into a new area loaded all of them
+	// synchronously inside one frame, and that was the stutter. Confirmed from play: Fast removes it.
+	//
+	// So during play a 3D draw takes its replacement as it arrives - a frame late at worst, exactly as
+	// Fast does, and on geometry that is usually still in the distance when it streams. 2D (through
+	// mode: splash, credits, menus, loading screens, the HUD) and everything before the world has
+	// started still wait, which is all Instant was for.
+	//
+	// One exception during play: the game's static shadow sprites, which the pack maps to an empty
+	// PNG (textures.ini, Misc/vcs_no_shadow_*) so they never draw. Not waiting for those would show
+	// the original sprite for a frame the first time each one appears - which is the flash the empty
+	// replacement exists to remove - and an empty 64x64 costs nothing to wait for.
+	if (waitBudget > 0.0 && VCS::IsActive() && !gstate.isModeThrough() &&
+			VCS::GetBootPhase() != VCS::BootPhase::Intro &&
+			entry->replacedTexture->logId_.find("vcs_no_shadow") == std::string::npos) {
+		waitBudget = 0.0;
+	}
 	if (entry->replacedTexture->Poll(waitBudget)) {
 		if (entry->replacedTexture->State() == ReplacementState::ACTIVE) {
 			entry->replacedTexture->GetSize(0, w, h);
@@ -1798,6 +1828,7 @@ void TextureCacheCommon::PollReplacement(TexCacheEntry *entry, int *w, int *h, i
 		entry->status &= ~TexStatus::TO_REPLACE;
 	}
 	replacementTimeThisFrame_ += time_now_d() - replaceStart;
+	replacementPollsThisFrame_++;
 
 	switch (entry->replacedTexture->State()) {
 	case ReplacementState::UNLOADED:
@@ -2737,6 +2768,17 @@ void TextureCacheCommon::InvalidateAll(GPUInvalidationType /*unused*/) {
 
 void TextureCacheCommon::ClearNextFrame() {
 	clearCacheNextFrame_ = true;
+}
+
+void TextureCacheCommon::ForEachNativeTextureView(void (*fn)(void *ctx, void *view, u32 addr, u16 dim), void *ctx) const {
+	for (const TexCache *cache : { &cache_, &secondCache_ }) {
+		for (const auto &it : *cache) {
+			const TexCacheEntry *entry = it.second.get();
+			if (entry && entry->texturePtr) {
+				fn(ctx, GetNativeTextureView(entry, true), entry->addr, entry->dim);
+			}
+		}
+	}
 }
 
 std::string AttachCandidate::ToString() const {

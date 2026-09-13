@@ -37,6 +37,7 @@
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/ShaderUniforms.h"
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSWater.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
 #include "GPU/Vulkan/TextureCacheVulkan.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
@@ -53,6 +54,7 @@ DrawEngineVulkan::DrawEngineVulkan(Draw::DrawContext *draw)
 	: draw_(draw) {
 	decOptions_.expand8BitNormalsToFloat = false;
 	VCSShadow::Init();
+	VCSWater::Init();
 }
 
 void DrawEngineVulkan::InitDeviceObjects() {
@@ -97,6 +99,7 @@ void DrawEngineVulkan::InitDeviceObjects() {
 DrawEngineVulkan::~DrawEngineVulkan() {
 	DestroyDeviceObjects();
 	VCSShadow::Shutdown();
+	VCSWater::Shutdown();
 }
 
 void DrawEngineVulkan::DestroyDeviceObjects() {
@@ -209,8 +212,19 @@ void DrawEngineVulkan::Flush() {
 	// own back afterwards rather than being left to notice.
 	if (VCSShadow::IsActive()) {
 		VirtualFramebuffer *vfb = framebufferManager_->GetCurrentRenderVFB();
-		if (VCSShadow::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr)) {
+		if (VCSShadow::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr, textureCache_)) {
 			framebufferManager_->RebindFramebuffer("vcs_shadow_done");
+		}
+	}
+
+	// ...and the water passes, after them on purpose. The shadow composite multiplies the frame
+	// by its mask, and the water pass starts from the pixel it FINDS - so running water second
+	// means the sea is shaded from a frame that already has its shadows in it, rather than a
+	// shadow mask being laid over the top of new water.
+	if (VCSWater::IsActive()) {
+		VirtualFramebuffer *vfb = framebufferManager_->GetCurrentRenderVFB();
+		if (VCSWater::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr)) {
+			framebufferManager_->RebindFramebuffer("vcs_water_done");
 		}
 	}
 
@@ -265,7 +279,7 @@ void DrawEngineVulkan::Flush() {
 		// capture needs to read positions back, and the push buffer it would otherwise decode
 		// straight into is write-combined - cheap to write, painfully slow to read - so when
 		// shadows are on, everything takes the predecode path. Gated, so no other game moves.
-		if ((lastVType_ & GE_VTYPE_WEIGHT_MASK) || VCSShadow::IsActive()) {
+		if ((lastVType_ & GE_VTYPE_WEIGHT_MASK) || VCSShadow::IsActive() || VCSWater::IsActive()) {
 			// If skinning, we're predecoding into "decoded". So make sure we're done, then push that content.
 			DecodeVerts(dec_, decoded_);
 			VkDeviceSize size = numDecodedVerts_ * dec_->GetDecVtxFmt().stride;
@@ -295,6 +309,12 @@ void DrawEngineVulkan::Flush() {
 		// Classify and capture here rather than after the draw: this has to run once
 		// vertexFullAlpha is settled, because the blend test reads it, and once the indices
 		// are decoded, because that is what produces the counts.
+		if (VCSWater::IsActive()) {
+			const DecVtxFormat &waterFmt = dec_->GetDecVtxFmt();
+			VCSWater::NoteDraw(prim, dec_->VertexType(), vertexCount, decoded_,
+				numDecodedVerts_, useElements ? decIndex_ : nullptr, vertexCount,
+				waterFmt.stride, waterFmt.posoff, gstate.worldMatrix);
+		}
 		if (VCSShadow::IsActive()) {
 			const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
 			const VCSShadow::Reject reject = VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
@@ -307,6 +327,16 @@ void DrawEngineVulkan::Flush() {
 				// from a decal.
 				VCSShadow::NoteGroundQuad(decoded_, numDecodedVerts_, fmt.stride, fmt.posoff,
 					gstate.worldMatrix, gstate.getTextureAddress(0));
+			} else if (reject == VCSShadow::Reject::Cutout) {
+				// A palm frond: cast through its texture, which is only settled further down. A flat
+				// cut-out - a pavement edge - is somewhere for shadows to land instead.
+				VCSShadow::AddReceiver(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
+				VCSShadow::AddCutoutCaster(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
+					vertexCount, fmt.stride, fmt.posoff, fmt.uvfmt, fmt.uvoff, prim, gstate.worldMatrix);
+			} else if (reject == VCSShadow::Reject::Blended) {
+				VCSShadow::AddReceiver(decoded_, numDecodedVerts_, useElements ? decIndex_ : nullptr,
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
 			}
 			if (VCSShadow::ShouldSkipDraw()) {
 				ResetAfterDrawInline();
@@ -327,6 +357,9 @@ void DrawEngineVulkan::Flush() {
 		} else if (gstate.getTextureAddress(0) == (gstate.getFrameBufRawAddress() | 0x04000000)) {
 			// This catches the case of clearing a texture.
 			gstate_c.Dirty(DIRTY_TEXTURE_IMAGE);
+		}
+		if (VCSShadow::IsActive()) {
+			VCSShadow::NoteCutoutTexture((void *)imageView);
 		}
 
 		if (!lastPipeline_ || gstate_c.IsDirty(DIRTY_BLEND_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE) || prim != lastPrim_) {
@@ -431,6 +464,12 @@ void DrawEngineVulkan::Flush() {
 		if (useDepthRaster_) {
 			DepthRasterPredecoded(prim, decoded_, numDecodedVerts_, dec_, vertexCount);
 		}
+		if (VCSWater::IsActive()) {
+			const DecVtxFormat &waterFmt = dec_->GetDecVtxFmt();
+			VCSWater::NoteDraw(prim, dec_->VertexType(), vertexCount, decoded_,
+				numDecodedVerts_, decIndex_, vertexCount,
+				waterFmt.stride, waterFmt.posoff, gstate.worldMatrix);
+		}
 		if (VCSShadow::IsActive()) {
 			const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
 			const VCSShadow::Reject reject = VCSShadow::ClassifyDraw(prim, dec_->VertexType(), vertexCount);
@@ -440,6 +479,14 @@ void DrawEngineVulkan::Flush() {
 			} else if (reject == VCSShadow::Reject::NoDepthWrite && numDecodedVerts_ <= 64) {
 				VCSShadow::NoteGroundQuad(decoded_, numDecodedVerts_, fmt.stride, fmt.posoff,
 					gstate.worldMatrix, gstate.getTextureAddress(0));
+			} else if (reject == VCSShadow::Reject::Cutout) {
+				VCSShadow::AddReceiver(decoded_, numDecodedVerts_, decIndex_,
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
+				VCSShadow::AddCutoutCaster(decoded_, numDecodedVerts_, decIndex_,
+					vertexCount, fmt.stride, fmt.posoff, fmt.uvfmt, fmt.uvoff, prim, gstate.worldMatrix);
+			} else if (reject == VCSShadow::Reject::Blended) {
+				VCSShadow::AddReceiver(decoded_, numDecodedVerts_, decIndex_,
+					vertexCount, fmt.stride, fmt.posoff, prim, gstate.worldMatrix);
 			}
 			if (VCSShadow::ShouldSkipDraw()) {
 				ResetAfterDrawInline();
@@ -499,6 +546,9 @@ void DrawEngineVulkan::Flush() {
 				if (gstate_c.dstSquared) {
 					gstate_c.Dirty(DIRTY_BLEND_STATE);
 				}
+			}
+			if (VCSShadow::IsActive()) {
+				VCSShadow::NoteCutoutTexture((void *)imageView);
 			}
 			if (!lastPipeline_ || gstate_c.IsDirty(DIRTY_BLEND_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE | DIRTY_VERTEXSHADER_STATE | DIRTY_FRAGMENTSHADER_STATE) || prim != lastPrim_) {
 				if (prim != lastPrim_ || gstate_c.IsDirty(DIRTY_BLEND_STATE | DIRTY_VIEWPORTSCISSOR_STATE | DIRTY_RASTER_STATE | DIRTY_DEPTHSTENCIL_STATE)) {
