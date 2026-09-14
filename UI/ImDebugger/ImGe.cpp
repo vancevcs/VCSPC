@@ -117,6 +117,17 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 		return;
 	}
 
+	// VCS fork: what is on screen NOW rather than everything the cache holds, for finding a texture
+	// by looking at the frame it is in. A texture counts as drawn when it was applied within the last
+	// two flips; one left bound across a frame boundary is not re-applied and can lag by a frame.
+	static bool s_onlyDrawnRecently = true;
+	static int s_maxTexSize = 128;
+	ImGui::Checkbox("Drawn in the last frames only", &s_onlyDrawnRecently);
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(140.0f);
+	ImGui::SliderInt("Max size (0 = any)", &s_maxTexSize, 0, 1024);
+	const int nowFlip = (int)gpuStats.totals.numFlips;
+
 	ImVec2 avail = ImGui::GetContentRegionAvail();
 	auto &style = ImGui::GetStyle();
 	ImGui::BeginChild("left", ImVec2(140.0f, 0.0f), ImGuiChildFlags_ResizeX);
@@ -128,9 +139,16 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 		ImGui::Text("Primary Cache");
 	}
 
-	auto listTextureCache = [&cfg, &textureCache, &style, window_visible_x2, &replacementStateCounts](const TexCache &cache, bool isSecondary) {
+	auto listTextureCache = [&cfg, &textureCache, &style, window_visible_x2, &replacementStateCounts, nowFlip](const TexCache &cache, bool isSecondary) {
 		for (auto &[key, value] : cache) {
 			u64 id = key;
+			const TexCacheEntry *candidate = value.get();
+			if (s_onlyDrawnRecently && (int)candidate->lastFrame + 2 < nowFlip) {
+				continue;
+			}
+			if (s_maxTexSize > 0 && (dimWidth(candidate->dim) > s_maxTexSize || dimHeight(candidate->dim) > s_maxTexSize)) {
+				continue;
+			}
 			ImGui::PushID((void *)id);
 			const TexCacheEntry *entry = value.get();
 			void *nativeView = textureCache->GetNativeTextureView(value.get(), true);
@@ -209,6 +227,19 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 							ImGui::Text("Level 0 size: %d bytes, format: %s", entry->replacedTexture->GetLevelDataSizeAfterCopy(0), Draw::DataFormatToString(entry->replacedTexture->Format()));
 						}
 						ImGui::Text("Key: %08x_%08x_%08x", desc.cacheKey.Address(), desc.cacheKey.ClutHash(), desc.cacheKey.ContentsHash());
+						// VCS fork: the key as textures.ini spells it. The VCS pack sets ignoreAddress, so the
+						// address half is zero there - which is why every line in it starts 00000000.
+						char iniKey[32];
+						snprintf(iniKey, sizeof(iniKey), "%08x%08x%08x", 0u, desc.cacheKey.ClutHash(), desc.cacheKey.ContentsHash());
+						ImGui::Text("textures.ini key: %s", iniKey);
+						if (ImGui::SmallButton("Copy key")) {
+							ImGui::SetClipboardText(iniKey);
+						}
+						ImGui::SameLine();
+						if (ImGui::SmallButton("Copy as empty")) {
+							const std::string line = std::string(iniKey) + " = Misc/vcs_no_shadow_" + std::to_string(w) + "x" + std::to_string(h) + ".png";
+							ImGui::SetClipboardText(line.c_str());
+						}
 						ImGui::Text("Hashfiles: %s", desc.hashfiles.c_str());
 						ImGui::Text("Base: %s", desc.basePath.c_str());
 						ImGui::Text("Alpha status: %d", (int)entry->replacedTexture->AlphaStatus());

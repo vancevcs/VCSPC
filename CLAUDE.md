@@ -4251,6 +4251,14 @@ to recognise it first. Off means no sprites as well - that was the decision, not
 | `000000000914bef8f56d4b11` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a soft noisy square |
 | `00000000f695bda8ad66d582` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a soft noisy square |
 | `00000000122f0bca04a78a03` | 64x64 | `Misc/vcs_no_shadow_64x64.png` |
+| `00000000f5df92ec0336c0b3` | 128x128 | `Misc/vcs_no_shadow_128x128.png` - the car's |
+
+The car's was the one no scan of the dump could find, because it was never dumped: the pack already
+mapped it, to `Particles/00000000f5df92ec0336c0b3.dds`, filed among the particles. It was found with
+the Debug build's ImGui **Textures** window, which the fork extends to list only textures drawn in the
+last couple of frames (with a size cap) and to show the selected one's key as `textures.ini` spells it,
+with Copy key and Copy as empty buttons. Stand next to the thing, filter, click - that is the tool for
+the next one of these. Its empty PNG matches the size of the replacement it displaces, 128x128.
 
 The last three were picked by eye in play from a gallery of every transparent texture in the dump,
 which is the fastest way to finish this list: a page of checkerboard cards, sprite-like ones first,
