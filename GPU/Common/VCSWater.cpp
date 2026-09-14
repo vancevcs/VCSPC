@@ -153,6 +153,10 @@ static float s_frameCameraPos[3];
 static float s_frameCameraForward[3];
 static float s_lastCameraPos[3];
 static bool s_haveLastCameraPos;
+// The game's own camera in world space, as of the last frame's camera. It is what tells a rebase of
+// the GE space from a real jump - see NoteDraw.
+static float s_lastCameraWorld[2];
+static bool s_haveLastCameraWorld;
 
 // world = GE + s_geOffset. Zero until the camera has been read in both spaces once.
 static float s_geOffset[2];
@@ -455,6 +459,75 @@ static void AppendGeometry(const float *pos, int vertCount, const u16 *idx, int 
 	}
 }
 
+// Every draw is captured in the space of the frame's FIRST 3D draw, whose view matrix is what the
+// passes project with. Around a chunk swap the game draws part of a frame with the camera of the NEW
+// space - VCSShadow found it, as the cause of every shadow flicker there was. Each draw is right on
+// screen, because the GE puts it through its own view matrix; baked with its world matrix alone it
+// lands a whole streaming cell, 125 units, away, and the wet road is shaded where it is not.
+//
+// Same fix as VCSShadow::PrepareViewCorrection, copied for the reason at the top of this file: a draw
+// whose view matrix differs goes through its own view and back through the inverse of the frame's.
+static bool s_frameViewInvValid;
+static float s_frameViewInvR[9];
+static float s_viewCorrA[9];
+static float s_viewCorrB[3];
+static int s_viewCorrectedDraws;
+static int s_viewCorrectedLogs;
+
+static bool Invert3x3(const float m[9], float out[9]) {
+	const float c00 = m[4] * m[8] - m[5] * m[7];
+	const float c01 = m[5] * m[6] - m[3] * m[8];
+	const float c02 = m[3] * m[7] - m[4] * m[6];
+	const float det = m[0] * c00 + m[1] * c01 + m[2] * c02;
+	if (fabsf(det) < 1e-12f) {
+		return false;
+	}
+	const float inv = 1.0f / det;
+	out[0] = c00 * inv;
+	out[1] = (m[2] * m[7] - m[1] * m[8]) * inv;
+	out[2] = (m[1] * m[5] - m[2] * m[4]) * inv;
+	out[3] = c01 * inv;
+	out[4] = (m[0] * m[8] - m[2] * m[6]) * inv;
+	out[5] = (m[2] * m[3] - m[0] * m[5]) * inv;
+	out[6] = c02 * inv;
+	out[7] = (m[1] * m[6] - m[0] * m[7]) * inv;
+	out[8] = (m[0] * m[4] - m[1] * m[3]) * inv;
+	return true;
+}
+
+// Fills s_viewCorrA / s_viewCorrB for the draw about to be baked, when its view matrix is not the
+// frame's. Row vectors: frame = world * A + B.
+static bool PrepareViewCorrection() {
+	if (!s_haveViewMatrix || !s_frameViewInvValid) {
+		return false;
+	}
+	if (memcmp(gstate.viewMatrix, s_frameViewMatrix, sizeof(s_frameViewMatrix)) == 0) {
+		return false;
+	}
+	const float *d = gstate.viewMatrix;
+	const float *f = s_frameViewMatrix;
+	const float *inv = s_frameViewInvR;
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
+			s_viewCorrA[r * 3 + c] = d[r * 3] * inv[c] + d[r * 3 + 1] * inv[3 + c] + d[r * 3 + 2] * inv[6 + c];
+		}
+	}
+	const float dt[3] = { d[9] - f[9], d[10] - f[10], d[11] - f[11] };
+	for (int c = 0; c < 3; c++) {
+		s_viewCorrB[c] = dt[0] * inv[c] + dt[1] * inv[3 + c] + dt[2] * inv[6 + c];
+	}
+	s_viewCorrectedDraws++;
+	const float shift = sqrtf(s_viewCorrB[0] * s_viewCorrB[0] + s_viewCorrB[1] * s_viewCorrB[1] +
+		s_viewCorrB[2] * s_viewCorrB[2]);
+	if (shift > 1.0f && (s_viewCorrectedLogs < 6 || s_viewCorrectedDraws % 5000 == 0)) {
+		s_viewCorrectedLogs++;
+		NOTICE_LOG(Log::G3D,
+			"VCS water: a draw used a different camera matrix than the frame's (%.1f %.1f %.1f units apart) - moved into the frame's space (%d draws so far)",
+			s_viewCorrB[0], s_viewCorrB[1], s_viewCorrB[2], s_viewCorrectedDraws);
+	}
+	return true;
+}
+
 // Transforms a draw's decoded vertices into s_drawPos and expands its topology into s_drawIdx as
 // a plain triangle list. Row-vector, matching the vertex shader: world = vec4(pos, 1.0) * m, with
 // the 4x3 matrix holding its translation in the last row. For a skinned mesh the bones are
@@ -469,14 +542,23 @@ static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices,
 		drawMin[c] = 1e30f;
 		drawMax[c] = -1e30f;
 	}
+	const bool correctView = PrepareViewCorrection();
+	const float *ca = s_viewCorrA;
+	const float *cb = s_viewCorrB;
 	float *out = s_drawPos.data();
 	for (int i = 0; i < numDecodedVerts; i++) {
 		const float *p = (const float *)(decoded + (size_t)i * stride + posOffset);
-		const float v[3] = {
+		float v[3] = {
 			p[0] * world[0] + p[1] * world[3] + p[2] * world[6] + world[9],
 			p[0] * world[1] + p[1] * world[4] + p[2] * world[7] + world[10],
 			p[0] * world[2] + p[1] * world[5] + p[2] * world[8] + world[11],
 		};
+		if (correctView) {
+			const float x = v[0], y = v[1], z = v[2];
+			v[0] = x * ca[0] + y * ca[3] + z * ca[6] + cb[0];
+			v[1] = x * ca[1] + y * ca[4] + z * ca[7] + cb[1];
+			v[2] = x * ca[2] + y * ca[5] + z * ca[8] + cb[2];
+		}
 		for (int c = 0; c < 3; c++) {
 			out[i * 3 + c] = v[c];
 			if (v[c] < drawMin[c]) drawMin[c] = v[c];
@@ -941,6 +1023,13 @@ static inline void NoteReject(Reject why, bool skinned) {
 	}
 }
 
+// How many rebases of the GE space NoteDraw has followed rather than treated as a jump.
+//
+// There is deliberately NO re-capture of draws that arrive after the passes, though VCSShadow has one.
+// It was copied across and taken out: in rain the frame has a 2D draw in the middle of it, the restart
+// threw the road away and ran the passes again on what was left, and the sea won every road pixel.
+static int s_rebasesFollowed;
+
 void NoteDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount,
 	const u8 *decoded, int numDecodedVerts, const u16 *indices, int indexCount,
 	int stride, int posOffset, const float world[12]) {
@@ -983,6 +1072,7 @@ void NoteDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount,
 	if (!s_haveViewMatrix) {
 		memcpy(s_frameViewMatrix, gstate.viewMatrix, sizeof(s_frameViewMatrix));
 		memcpy(s_frameProjMatrix, gstate.projMatrix, sizeof(s_frameProjMatrix));
+		s_frameViewInvValid = Invert3x3(s_frameViewMatrix, s_frameViewInvR);
 		s_frameViewport.scale[0] = gstate.getViewportXScale();
 		s_frameViewport.scale[1] = gstate.getViewportYScale();
 		s_frameViewport.scale[2] = gstate.getViewportZScale();
@@ -1017,8 +1107,19 @@ void NoteDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount,
 		memcpy(s_current.cameraPos, s_frameCameraPos, sizeof(s_frameCameraPos));
 
 		// A rebase, a teleport or a load shows up as the camera moving further in one frame than
-		// any camera can, and the learned texture address belongs to the heap layout that has
-		// just been thrown away. Same event, same response, as VCSShadow's caster cache.
+		// any camera can. A teleport or a load throws the heap away, and the learned texture address
+		// with it. A REBASE does not: the game shifts the space it feeds the GE by a streaming cell
+		// as you travel and nothing else changes - the log showed the same sea address relearned
+		// within one frame of every "forgetting". Treating the one as the other forgot the sea and
+		// dropped the road map at every chunk swap, and the wet pass stays off for the eight-odd
+		// frames a rebuild takes. Reported as wet roads flickering while driving. The road map is in
+		// world space and the offset is re-derived at every seam, so a rebase needs nothing done.
+		//
+		// Told apart the way VCSShadow tells them apart: the game's own camera, read in world space
+		// on this same frame, stays put across a rebase.
+		const std::optional<float> worldX = VCS::ReadAddrFloat(VCS::VCSAddr::CameraWorldX);
+		const std::optional<float> worldY = VCS::ReadAddrFloat(VCS::VCSAddr::CameraWorldY);
+		const bool haveWorld = worldX.has_value() && worldY.has_value();
 		if (s_haveLastCameraPos) {
 			float moved = 0.0f;
 			for (int c = 0; c < 3; c++) {
@@ -1026,12 +1127,34 @@ void NoteDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount,
 				moved += d * d;
 			}
 			if (moved > 40.0f * 40.0f) {
-				ForgetWater("the camera jumped");
-				s_roadValid = false;
+				bool rebased = false;
+				float worldDX = 0.0f, worldDY = 0.0f;
+				if (haveWorld && s_haveLastCameraWorld) {
+					worldDX = *worldX - s_lastCameraWorld[0];
+					worldDY = *worldY - s_lastCameraWorld[1];
+					const float geDZ = s_frameCameraPos[2] - s_lastCameraPos[2];
+					rebased = worldDX * worldDX + worldDY * worldDY < 20.0f * 20.0f && fabsf(geDZ) < 20.0f;
+				}
+				if (rebased) {
+					s_rebasesFollowed++;
+					if (s_rebasesFollowed <= 20) {
+						NOTICE_LOG(Log::G3D, "VCS water: the GE space rebased by %.1f %.1f - kept the sea and the road map (%d so far)",
+							(s_frameCameraPos[0] - s_lastCameraPos[0]) - worldDX,
+							(s_frameCameraPos[1] - s_lastCameraPos[1]) - worldDY, s_rebasesFollowed);
+					}
+				} else {
+					ForgetWater("the camera jumped");
+					s_roadValid = false;
+				}
 			}
 		}
 		memcpy(s_lastCameraPos, s_frameCameraPos, sizeof(s_frameCameraPos));
 		s_haveLastCameraPos = true;
+		if (haveWorld) {
+			s_lastCameraWorld[0] = *worldX;
+			s_lastCameraWorld[1] = *worldY;
+		}
+		s_haveLastCameraWorld = haveWorld;
 	}
 
 	float drawMin[3], drawMax[3];
@@ -2168,6 +2291,8 @@ void Init() {
 	s_lastWetnessTime = 0.0;
 	s_haveViewMatrix = false;
 	s_haveLastCameraPos = false;
+	s_haveLastCameraWorld = false;
+	s_frameViewInvValid = false;
 	s_geOffsetValid = false;
 	s_geOffset[0] = 0.0f;
 	s_geOffset[1] = 0.0f;
@@ -2596,6 +2721,8 @@ void BeginFrame(Draw::DrawContext *draw) {
 	s_current.stepMs = s_worstStepMs;
 	s_current.uploadMs = s_lastUploadMs;
 	s_current.roadRebuilds = s_rebuilds;
+	s_current.rebasesFollowed = s_rebasesFollowed;
+	s_current.viewCorrectedDraws = s_viewCorrectedDraws;
 
 	s_positions.clear();
 	s_waterIndices.clear();

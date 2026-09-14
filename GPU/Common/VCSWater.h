@@ -180,6 +180,11 @@ struct FrameStats {
 	// derivation are being taken from different frames again, and the puddles will swim.
 	float offsetResidual;
 
+	// Chunk swaps, counted since boot - see NoteDraw and PrepareViewCorrection: rebases of the GE
+	// space followed rather than treated as a jump, and draws moved into the frame's own camera space.
+	int rebasesFollowed;
+	int viewCorrectedDraws;
+
 	// The weather, straight from the game.
 	//
 	// `rain` is the raw value; `rainNorm` is it divided by the largest the game produces, which

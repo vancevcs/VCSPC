@@ -354,6 +354,21 @@ struct Settings {
 	// casts are scaled by this. Zero turns night shadows off.
 	float moonStrength;
 
+	// Shadows fade out while it rains, and stay out until the roads have dried.
+	//
+	// Reported from play as shadows projecting strangely onto the puddle reflections - and a storm
+	// has no sun to cast them anyway. Driven by VCSWater's LAGGED wetness when that pass is on,
+	// because the puddles outlast the rain; by the game's rain level alone when it is off.
+	bool hideInRain;
+
+	// Seconds for the shadows to fade all the way out, or all the way back.
+	float rainFadeSeconds;
+
+	// As the roads dry, shadows start back below this wetness and are all the way back at half of it.
+	// From VCSWater's puddle measurements: about 10% of a road is still wet at 0.30 and 2% at 0.15, so
+	// they return while the last puddles are drying rather than after every one has gone.
+	float rainShadowsReturnWetness;
+
 	// The game's own blob shadow - a flat alpha-blended quad under peds and vehicles - is not
 	// wanted once there are real ones, or everything that moves has two shadows.
 	//
@@ -474,6 +489,7 @@ struct CaptureStats {
 	bool rendered;     // the depth pass actually ran this frame
 	bool maskRendered; // ...and so did the screen-space mask
 	bool composited;   // ...and the mask actually reached the game's own framebuffer
+	bool rainSuppressed; // ...or all three were skipped because it is raining - see hideInRain
 
 	// Indices in each of the two streams. Everything captured is a receiver; the subset small
 	// enough to be believable as a caster is what the depth pass draws - see maxCasterSpan.
@@ -566,6 +582,11 @@ struct CaptureStats {
 };
 
 const CaptureStats &LastCapture();
+
+// How much of the shadow strength the weather leaves: 1 in the dry, 0 in the rain. And the
+// normalised 0..1 wetness it was worked out from. See Settings::hideInRain.
+float WeatherFade();
+float WeatherWetness();
 
 // Appends one flush's worth of caster geometry, transformed to world space by `world` and
 // expanded from whatever topology it arrived in to a plain triangle list.

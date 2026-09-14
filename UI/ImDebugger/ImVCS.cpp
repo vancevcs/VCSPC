@@ -2181,8 +2181,16 @@ void ImVCSWindow::DrawShadows() {
 			cap.maskWidth, cap.maskHeight);
 		// The one row that says whether any of this reached the screen. Everything above can read
 		// healthy with the composite never running - a mask nobody multiplies in is invisible.
-		ImGui::TextColored(cap.composited ? kGoodColor : kBadColor,
-			"composite: %s", cap.composited ? "multiplied into the frame" : "did NOT reach the frame");
+		if (cap.rainSuppressed) {
+			ImGui::TextColored(kUnsetColor, "composite: skipped for the rain");
+		} else {
+			ImGui::TextColored(cap.composited ? kGoodColor : kBadColor,
+				"composite: %s", cap.composited ? "multiplied into the frame" : "did NOT reach the frame");
+		}
+		if (VCSShadow::WeatherFade() < 1.0f) {
+			ImGui::Text("rain: shadows at %.0f%%, wetness %.2f",
+				VCSShadow::WeatherFade() * 100.0f, VCSShadow::WeatherWetness());
+		}
 		ImGui::Text("indices: %d casting, %d receiving; %d draw%s receive only (%s)",
 			cap.casterIndices, cap.receiverIndices, cap.receiverOnlyDraws,
 			cap.receiverOnlyDraws == 1 ? "" : "s",
@@ -2331,6 +2339,15 @@ void ImVCSWindow::DrawShadows() {
 	ImGui::SliderFloat("Moon strength", &set.moonStrength, 0.0f, 1.0f, "%.2f");
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("After dark the game's own light is below the horizon and casts nothing, so it is mirrored back above it. Zero turns night shadows off.");
+	}
+	ImGui::Checkbox("Hide shadows in the rain", &set.hideInRain);
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Fades them out while it rains and keeps them out until the puddles have nearly dried - they projected strangely onto the puddle reflections.");
+	}
+	ImGui::SliderFloat("Rain fade", &set.rainFadeSeconds, 0.0f, 10.0f, "%.1f s");
+	ImGui::SliderFloat("Shadows return below", &set.rainShadowsReturnWetness, 0.0f, 1.0f, "wetness %.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("As the roads dry, shadows start fading back in at this wetness and are fully back at half of it. Higher brings them back sooner.");
 	}
 	ImGui::Checkbox("Remember casters the game stops drawing", &set.cacheCasters);
 	if (ImGui::IsItemHovered()) {
@@ -2496,6 +2513,8 @@ void ImVCSWindow::DrawWater() {
 		s.roadValid ? "built" : "NOT BUILT", s.roadNodes, s.roadLinks,
 		s.roadCentre[0], s.roadCentre[1]);
 	ImGui::Text("GE-to-world offset: %.1f %.1f", s.geOffset[0], s.geOffset[1]);
+	ImGui::Text("chunk swaps: %d rebases followed, %d draws moved into the frame's space",
+		s.rebasesFollowed, s.viewCorrectedDraws);
 	// The pair the whole lag is about: what the sky is doing, and what the road has caught up to.
 	ImGui::Text("rain %.2f (normalised) -> wetness %.2f%s", s.rainNorm, s.wetness,
 		s.wetnessSnapped ? "  SNAPPED" : "");

@@ -4428,6 +4428,18 @@ freed stops casting until the game draws it again. See "Palm fronds cast through
 **The moon is the sun's light mirrored, not a real lunar position.** It puts night shadows
 somewhere plausible rather than somewhere correct.
 
+#### Shadows go out in the rain
+
+Reported from play: when it starts raining the shadows project strangely onto the puddle
+reflections. `hideInRain` fades them out over `rainFadeSeconds` (2) and keeps them out while the
+roads are wet, because the puddles outlast the rain. They start back once VCSWater's lagged wetness
+drops under `rainShadowsReturnWetness` (0.30, about 10% of a road still wet) and are fully back at
+half of it (2%). It was 0.1 down to 0, reported as shadows returning only once every puddle had gone.
+With the water pass off it
+goes by the game's rain level alone. Fully faded, `OnFlush` skips all three passes but the capture
+carries on, so the caster cache is warm when they come back. A skipped frame is not a BLINK; the log
+says `off for the rain` and `back, the roads are dry` at NOTICE; both knobs are on the Shadows tab.
+
 ### Water, and rain on the roads
 
 **Status: shipped.** The sea is shaded rather than flat - moving normals, a Fresnel blend into a
@@ -4736,6 +4748,35 @@ Reported as "sea looks like the og one" once the shader compiled again. Arithmet
 
 And the glint lobe went from `pow(..., 120)` to 55 at nearly double the strength, because at 120
 it only existed when the sun was almost dead ahead.
+
+#### Wet roads flickered at chunk swaps, and the shadows had already been through the causes
+
+Reported from play: driving in the rain, the puddles and the fully wet road flicker the way the
+shadows used to, at chunk loads. VCSWater copies VCSShadow's camera code by design (see the top of
+the file) and had fallen behind it on two of the chunk-swap fixes:
+
+- **A rebase was treated as a load.** Any recovered-camera jump over 40 units forgot the sea texture
+  and dropped the road map, and the wet pass then stays off until a rebuild finishes - about eight
+  frames. The map is in world space and the offset is re-derived at every seam, so a rebase
+  invalidates neither, and the log already showed the same sea address relearned within a frame of
+  every "forgetting". Rebases are now told apart as VCSShadow does, by the game's world-space camera
+  staying put, and only a real jump forgets.
+- **No view correction.** Draws carrying the new space's camera were baked a whole cell away.
+  `PrepareViewCorrection` is copied across.
+Both log at NOTICE (`rebased by`, `moved into the frame's space`) and the Water tab counts both. A
+driven run - the player's Y stepped a unit every 50 ms over the WebSocket debugger - logged six rebases
+followed, each a whole cell step, and corrections of exactly one cell.
+
+**VCSShadow's third fix, the re-capture, was copied too and taken back out.** Reported from play at
+once: while it rained, the sea shader covered the whole road. A logged run in real rain (weather 2
+written to Old, New and Forced over the debugger) settled it: 25-30 restarts a second, each after a 2D
+draw in the MIDDLE of the frame (texture `09715bd0` from the moment the rain was on screen), with 35k to
+120k solid indices already captured and a small depth-writing 3D draw arriving behind it. A rain frame
+is one frame with a 2D draw inside it, not a second frame, so the restart threw the road away and ran
+the passes again on what was left - and the sea plane under the city, with nothing captured in front
+of it, won every road pixel. The same run logged no view correction off the cell grid, which cleared
+the other new change. VCSShadow still re-captures; in rain it is hidden by `hideInRain`, but its passes
+will meet the same split frame if that ever changes.
 
 #### Testing this needs the player put somewhere, and there is only one lever
 

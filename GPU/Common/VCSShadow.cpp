@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -22,16 +23,19 @@
 
 #include "Common/CommonFuncs.h"
 #include "Common/Log.h"
+#include "Common/TimeUtil.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/GPU/ShaderWriter.h"
 #include "Core/MemMap.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSMemory.h"
+#include "Core/VCS/VCSState.h"
 #include "GPU/GPU.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/TextureCacheCommon.h"
 #include "GPU/Common/TextureDecoder.h"
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSWater.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 
 namespace VCSShadow {
@@ -87,6 +91,9 @@ static Settings s_settings = {
 	true,     // castBackFacesOnly
 	false,    // flipCasterWinding
 	0.35f,    // moonStrength
+	true,     // hideInRain
+	2.0f,     // rainFadeSeconds
+	0.30f,    // rainShadowsReturnWetness - was effectively 0.1, and read as "only once every puddle is gone"
 	true,     // hideBlobShadows
 	2.0f,     // nearCameraCutoff
 	400.0f,   // maxCasterSpan
@@ -192,6 +199,74 @@ static bool s_frameComposited;
 // Host frames since boot. The cache ages in these rather than in seconds so that nothing here
 // needs a clock, and a stalled emulator does not silently expire the whole cache.
 static int s_frameIndex;
+
+// The weather's share of the shadow strength - see Settings::hideInRain. Starts at 1, so a boot in
+// the dry does not fade in.
+static float s_weatherFade = 1.0f;
+static float s_weatherWetness;
+static double s_lastWeatherTime;
+
+static void UpdateWeatherFade() {
+	const double now = time_now_d();
+	float dt = s_lastWeatherTime > 0.0 ? (float)(now - s_lastWeatherTime) : 0.0f;
+	s_lastWeatherTime = now;
+	// A loading screen or a breakpoint leaves an arbitrary gap, as it does for VCSWater's soak.
+	if (dt < 0.0f) dt = 0.0f;
+	if (dt > 0.25f) dt = 0.25f;
+
+	float wet = 0.0f;
+	if (VCSWater::IsActive()) {
+		// Last frame's - VCSWater's BeginFrame runs after this one. The lagged wetness is the point:
+		// the puddles are still reflecting for a minute and a half after the rain stops.
+		const VCSWater::FrameStats &w = VCSWater::LastFrameStats();
+		wet = std::max(w.rainNorm, w.wetness);
+	} else {
+		// 0.5 is the heaviest Rain the game produces - VCSWater's kRainFullScale, measured there.
+		const VCS::WeatherState w = VCS::ReadWeather();
+		wet = w.valid ? w.rain / 0.5f : 0.0f;
+	}
+	if (!(wet > 0.0f)) {
+		wet = 0.0f;   // also catches NaN
+	} else if (wet > 1.0f) {
+		wet = 1.0f;
+	}
+	s_weatherWetness = wet;
+
+	// Out above rainShadowsReturnWetness, all the way back at half of it, a straight ramp between.
+	float target = 1.0f;
+	const float back = s_settings.rainShadowsReturnWetness * 0.5f;
+	if (s_settings.hideInRain && wet > back) {
+		target = back > 0.0f ? std::max(0.0f, 1.0f - (wet - back) / back) : 0.0f;
+	}
+	const float step = s_settings.rainFadeSeconds > 0.01f ? dt / s_settings.rainFadeSeconds : 1.0f;
+	const float before = s_weatherFade;
+	if (s_weatherFade < target) {
+		s_weatherFade = std::min(s_weatherFade + step, target);
+	} else {
+		s_weatherFade = std::max(s_weatherFade - step, target);
+	}
+
+	// Said when the shadows are all the way gone and all the way back, so a run can show the rain
+	// turned them off rather than leaving it to a screenshot that has no shadow in it.
+	static int s_weatherLogs = 0;
+	if (s_weatherLogs < 64) {
+		if (before > 0.0f && s_weatherFade <= 0.0f) {
+			s_weatherLogs++;
+			NOTICE_LOG(Log::G3D, "VCS shadows: off for the rain (wetness %.2f)", wet);
+		} else if (before < 1.0f && s_weatherFade >= 1.0f) {
+			s_weatherLogs++;
+			NOTICE_LOG(Log::G3D, "VCS shadows: back, the roads are dry (wetness %.2f)", wet);
+		}
+	}
+}
+
+float WeatherFade() {
+	return s_weatherFade;
+}
+
+float WeatherWetness() {
+	return s_weatherWetness;
+}
 
 // Texture alpha scans allowed this frame - see kTexScansPerFrame, far below, for why there is a
 // budget at all. Declared up here because BeginFrame resets it.
@@ -2908,6 +2983,8 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 		} else {
 			ub.tint[3] = s_settings.strength * luminance;
 		}
+		// And the weather's share - see hideInRain. Zero never gets this far; OnFlush skips it.
+		ub.tint[3] *= s_weatherFade;
 	}
 	ub.params[0] = s_settings.showMask ? 1.0f : 0.0f;
 	// The depth map is almost all near-white at these ranges, so it is stretched to be legible.
@@ -2940,6 +3017,13 @@ bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
 	// A render-to-texture target is not the frame the player is looking at. Compositing onto one
 	// would darken whatever the game is about to sample as a texture.
 	if (gstate_c.curRTWidth < 480 || gstate_c.curRTHeight < 272) {
+		return false;
+	}
+	// Faded all the way out for the rain, so skip all three passes rather than composite a mask at
+	// zero strength. The capture carries on, which keeps the caster cache warm for when it dries.
+	if (s_weatherFade <= 0.0f) {
+		s_frameComposited = true;
+		s_capture.rainSuppressed = true;
 		return false;
 	}
 
@@ -3020,6 +3104,9 @@ void Init() {
 	s_haveHeldMap = false;
 	s_framesOnHeldMap = 0;
 	s_usingHeldMap = false;
+	s_weatherFade = 1.0f;
+	s_weatherWetness = 0.0f;
+	s_lastWeatherTime = 0.0;
 
 	// The flag is only set for ULUS10160 in compat.ini, so this is the disc-ID check as well.
 	RefreshAvailability();
@@ -3101,13 +3188,16 @@ void BeginFrame(Draw::DrawContext *draw) {
 		s_buckets.clear();
 	}
 
+	UpdateWeatherFade();
+
 	// A BLINK: the composite ran last frame and did not run this one, which is exactly what the
 	// player sees as shadows flickering. Counted with the reason, because "shadows flicker" has
 	// several possible mechanisms and only a count can say which one is happening.
 	//
 	// The reasons are tested in the order the pass itself gives up in, so the first one that
-	// applies is the one that stopped it.
-	if (s_lastComposited && !s_capture.composited && s_capture.draws > 50) {
+	// applies is the one that stopped it. A frame skipped for the rain is not one: the shadows
+	// had already faded to nothing before it.
+	if (s_lastComposited && !s_capture.composited && !s_capture.rainSuppressed && s_capture.draws > 50) {
 		s_blinks++;
 		if (!s_current.sunValid && !s_haveHeldSun) {
 			s_blinkNoSun++;
