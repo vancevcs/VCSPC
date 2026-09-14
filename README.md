@@ -1,3 +1,66 @@
+GTA: Vice City Stories - PC version
+===================================
+
+A fork of PPSSPP that plays one game, **Grand Theft Auto: Vice City Stories** (USA, `ULUS10160`),
+the way a PC game plays: mouse look and mouse aiming, WASD, key bindings that change on foot, in a
+car and in the air, a remapped gamepad, a GTA-styled menu, dynamic shadows, shaded water and wet
+roads, and tutorial messages that name keyboard keys instead of PSP buttons.
+
+**Just want to play?** Download the zip from [Releases](https://github.com/vancevcs/VCSPC/releases)
+and follow the README inside it.
+
+No disc image and no game files are in this repository, apart from three short menu sound effects
+taken from the game (`assets/vcs/sfx_fe_*.wav`). You need your own copy of the game.
+
+### Building
+
+Windows, with Visual Studio 2022 and its C++ desktop workload.
+
+```
+git clone --recursive https://github.com/vancevcs/VCSPC.git
+cd VCSPC
+msbuild Windows\PPSSPP.sln /t:PPSSPPWindows /p:Configuration=Release /p:Platform=x64 /m
+```
+
+Run `msbuild` from a Developer Command Prompt, or open `Windows\PPSSPP.sln` and build project
+`PPSSPPWindows` as Release x64. The build puts `GTA Vice City Stories.exe` in the repository root.
+A Debug build produces `PPSSPPDebug64.exe` instead, which also has the in-game debugger
+(Debug -> Tools -> VCS).
+
+### Running
+
+1. From the release zip, copy the `memstick` folder next to the exe. It holds the HD texture pack,
+   the tutorial text with keyboard keys (`memstick/PSP/VCS/ENGLISH.GXT`) and the settings this
+   build was tuned with. Without it the game boots with PPSSPP's defaults, which leave mouse
+   control and texture replacement off.
+2. Put your disc image (`.iso` or `.cso`) next to the exe and run it.
+
+### Where things are
+
+| path | what it is |
+|---|---|
+| `Core/VCS/` | the game layer: addresses, memory access, input, camera, aiming, climbing, cheats, saves, menu bridge, settings |
+| `GPU/Common/VCSShadow.*` | dynamic shadows |
+| `GPU/Common/VCSWater.*` | the sea, and rain on the roads |
+| `UI/VCSMenuScreen.*` | the menu |
+| `UI/ImDebugger/ImVCS.*` | the VCS debugger window |
+| `assets/vcs/` | menu page titles, the menu font and sounds |
+| `assets/compat.ini` | the `VCSInputOverhaul`, `VCSDynamicShadows` and `VCSWaterQuality` flags that switch it all on for this disc |
+| `Tools/vcs*.py` | packaging, address scanning, offline disassembly, the keyboard-key GXT patcher |
+| `docs/VCS_ADDRESSES.md` | how every game address was found |
+| `CLAUDE.md` | design notes for the fork |
+
+`python Tools/vcspackage.py --zip` builds the release zip from a Release build and a populated
+`memstick` folder.
+
+PPSSPP and this fork are free software under the GNU GPL, version 2 or later - see `LICENSE.TXT`.
+Grand Theft Auto and Vice City Stories are trademarks of Take-Two Interactive Software. This
+project is not affiliated with or endorsed by Rockstar Games or Take-Two.
+
+Everything below is PPSSPP's own README.
+
+---
+
 PPSSPP - a fast and portable PSP emulator
 =========================================
 

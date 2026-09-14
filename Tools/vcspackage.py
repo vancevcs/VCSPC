@@ -95,8 +95,10 @@ INI_FORCE = {
 }
 
 # Dropped outright: a window rectangle from another monitor layout can put the window somewhere
-# with no screen under it.
-INI_DROP_KEYS = {"WindowX", "WindowY"}
+# with no screen under it. The rest belong to this machine rather than to the build: how many
+# times the dev copy was started, and the MAC address PPSSPP generated for it on first run - a
+# player who gets none generates their own, which also keeps two players apart in ad hoc play.
+INI_DROP_KEYS = {"WindowX", "WindowY", "WindowWidth", "WindowHeight", "RunCount", "MacAddress"}
 
 # The rest of memstick/PSP/SYSTEM ships as it is, and that is the point rather than an oversight.
 #
@@ -224,6 +226,9 @@ A few that are not obvious:
 Mouse look and mouse aiming are on by default, and so is the HD texture
 pack.  SETTINGS -> GRAPHICS has TEXTURE QUALITY if you would rather have the
 PSP's own textures, and FULLSCREEN if you would rather play in a window.
+It also has SHADOW QUALITY and WATER QUALITY.  Shadows start at the top
+setting, and turning them down is the first thing to try if the game
+runs slowly.
 
 
 Saves
@@ -244,6 +249,12 @@ If something is wrong
 
 Nothing happens when you run it, or Windows complains about a missing DLL
     Install the Microsoft Visual C++ Redistributable (x64) from Microsoft.
+
+It takes a long time to start
+    The whole disc image is read into memory before the game boots, so
+    the city streams in without stalling while you play.  From a slow
+    drive that can take a minute or two, and it needs about 3 GB of free
+    memory.
 
 It opens a file browser instead of the game
     There is no disc image in the folder, or there is more than one.  With
