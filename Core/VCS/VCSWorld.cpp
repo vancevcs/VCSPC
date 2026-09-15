@@ -580,6 +580,20 @@ void WorldQueryDispatch(const char *host) {
 	if (!g_block && !g_wantForeign) {
 		return;
 	}
+	// A savestate replaces PSP memory wholesale, the block with it - but a probe asked for before the
+	// load is still waiting here, and the game's first syscall after the load arrives before the vblank
+	// tick whose InstallWorldQuery would notice. Enqueueing then calls into whatever the state holds at
+	// that address. Measured 2026-09-15: loading a savestate on foot crashed with "Bad Execution
+	// Address", the PC inside the old block and RA 08000038 - the return of an enqueued call. One read
+	// settles it; the tick reinstalls.
+	if (g_block && ReadU32(g_block + kBlockMagicOff).value_or(0) != kBlockMagic) {
+		g_block = 0;
+		g_wantDispatch = false;
+		g_status = "the block was lost - reinstalling";
+		if (!g_wantForeign) {
+			return;
+		}
+	}
 
 	// Everything from here on happens with a question waiting, so a refusal is worth writing down.
 	const SceUID cur = __KernelGetCurThread();

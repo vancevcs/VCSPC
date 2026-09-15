@@ -664,6 +664,73 @@ origin  = Source, slid along dir to the point nearest the muzzle
 target  = origin + dir * weaponRange
 ```
 
+### The camera update, and the two points the chase camera takes the view over at
+
+**Found 2026-09-15, offline, out of `ULUS10160_1.03_2.ppst` (on foot) and `_3` (on a motorbike),
+identical in both, and confirmed by installing on them.**
+
+`0x08a225a4` is the game's per-frame camera update, with `$s0` = CCamera (`0x08bc7e30`). Its prologue
+pins three stack vectors to callee-saved registers, and every later stage works on those three:
+
+```
+08a2262c  addiu $fp, $sp, 0x50       Source
+08a22630  addiu $s6, $sp, 0x70       Up
+08a22634  addiu $s7, $sp, 0x60       Front
+...
+08a228bc  jal   0x0899b8f4           CCam::Process on the active cam (CCamera+0x50 is its index)
+08a22ab0  ...                        the three are loaded from the active cam: +0x20, +0x10, +0x60
+08a23994  jal   0x08999940           a small history smoother over gp+0x19f0..0x1a48
+08a239dc  ...                        the camera clip: ProcessLineOfSight from the target entity
+08a23a60  lwc1  $f12, 0xb38($s0)     shake strength - <- the prepare hook
+08a23a74  ...                        shake: random offsets into all three
+08a23be8  jal   0x08a1a5dc           right = Up x Front - <- redirected to the chase camera's program
+08a23bf4  jal   0x08a1accc           normalise
+08a23bfc  ...                        CCamera+0x00 right, +0x10 Front, +0x20 Up, +0x30 Source
+08a23e84  jal   0x08a1db40           the frustum planes (see "The hunt for the visibility function")
+08a23ea0  ...                        the RW camera, and CCamera+0x9b0 = Source
+```
+
+Both hook points are on every path. The one branch in the function that jumps forward
+(`0x08a22c50`) lands at `0x08a2399c`, which still falls through `0x08a23a60`.
+
+**`CWorld::ProcessLineOfSight` is `0x0889786c` and takes thirteen arguments** here, eight in
+registers and five on the stack - the convention copied from the clip's own call:
+
+```
+08a239e0  lw    $a0, 0x7c0($s0)      ; target entity
+08a239e4  addiu $a0, $a0, 0x30       ; $a0 &start
+08a239e8  addiu $a2, $sp, 0x290      ; $a2 &CColPoint - the point at +0x00
+08a239ec  addiu $a3, $sp, 0x2b0      ; $a3 &CEntity* out
+08a239f4  move  $a1, $fp             ; $a1 &end
+08a239f8  ori   $t0, $zero, 1        ; buildings
+08a239fc  move  $t1, $zero           ; vehicles
+08a23a00  move  $t2, $zero           ; peds
+08a23a04  ori   $t3, $zero, 1        ; objects
+08a23a08  sw    $zero, ($sp)         ; 0
+08a23a0c  sw    $v0, 4($sp)          ; 1
+08a23a10  sw    $v0, 8($sp)          ; 1
+08a23a14  sw    $zero, 0xc($sp)      ; 0
+08a23a18  jal   0x0889786c
+08a23a1c  sw    $zero, 0x10($sp)     ; 0                -> $v0 hit
+```
+
+The on-foot mode calls it at `0x0899e2bc` with buildings alone and all five stack words zero, and
+leaves 0x20 bytes for the colpoint, as the clip does.
+
+**Camera modes, and the jump table's off-by-one.** `0x08b7ed88` is indexed by `mode - 1`: mode 4
+(on foot) runs `0x0899dfe4`, modes 18 and 22 (vehicles, boats) both run `0x0899f9ec`, and 44 to 46
+share `0x089a341c`. Counting from zero put mode 15 on the on-foot function in an earlier note here.
+
+**A vehicle's collision model** is `[[gp + 0x18] + model * 4] + 0x14` (`0x0899fb0c`, `0x0899fb1c`),
+and mode 18 reads its box's max.z and |min.y| at `0x0899fcec`. On the motorbike: sphere
+`(0.001, -0.219, 0.165)` r `1.40`, box min `(-0.35, -1.21, -0.61)`, max `(0.35, 0.77, 0.67)`.
+`CCamera+0x798` read `2.0` there - the vehicle zoom level Select cycles.
+
+**Mode 4 is a camera on a string.** The active cam's Source reads back within a few centimetres of
+whatever was last built into the matrix, and the distance it holds is whatever it was given: with
+the chase camera writing the matrix it sat at 2.29 for a whole session. Nothing in it is an ideal
+distance to read.
+
 ### `CWeaponInfo` and the weapon's range — because the ray length was also wrong
 
 `CWeaponInfo::GetWeaponInfo` is `0x08b1fd70` and is three instructions:

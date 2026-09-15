@@ -786,6 +786,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/VCS/VCSState.cpp \
 	       $(COREDIR)/VCS/VCSVault.cpp \
 	       $(COREDIR)/VCS/VCSWorld.cpp \
+	       $(COREDIR)/VCS/VCSChaseCam.cpp \
 	       $(COREDIR)/VCS/VCSSettings.cpp \
 	       $(COREDIR)/HLE/sceDeflt.cpp \
 	       $(COREDIR)/HLE/sceDisplay.cpp \

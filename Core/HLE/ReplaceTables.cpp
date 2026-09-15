@@ -33,6 +33,7 @@
 #include "Core/MIPS/MIPSCodeUtils.h"
 #include "Core/MIPS/MIPSAnalyst.h"
 #include "Core/HLE/ReplaceTables.h"
+#include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSVault.h"
 #include "Core/HLE/FunctionWrappers.h"
@@ -1667,6 +1668,10 @@ static const ReplacementTableEntry entries[] = {
 	// And the water splash the game plays partway through its climb-out, which a vault on dry
 	// land has no business making - see Core/VCS/VCSVault.cpp. Also inert for every other game.
 	{ "vcs_climb_splash", &VCS::Hook_vcs_climb_splash, 0, REPFLAG_HOOKENTER },
+	// And the chase camera's two points in the game's camera update - see Core/VCS/VCSChaseCam.h.
+	// Installed by address, the second one inside a program the fork writes; inert elsewhere.
+	{ "vcs_camera_prepare", &VCS::Hook_vcs_camera_prepare, 0, REPFLAG_HOOKENTER },
+	{ "vcs_camera_finish", &VCS::Hook_vcs_camera_finish, 0, REPFLAG_HOOKENTER },
 	// This is actually used in other games, not just Dissidia.
 	{ "dissidia_recordframe_avi", &Hook_dissidia_recordframe_avi, 0, REPFLAG_HOOKENTER },
 	{ "brandish_download_frame", &Hook_brandish_download_frame, 0, REPFLAG_HOOKENTER },

@@ -36,6 +36,11 @@
 // Threading: mouse deltas arrive on the input thread and are accumulated under a mutex; the
 // accumulated delta is consumed and applied on the emu thread from VCSGame::Tick, which is the
 // only place PSP memory may be written.
+//
+// On foot, driving and flying that is no longer how the view turns. The chase camera
+// (VCSChaseCam.h) owns those views and is handed the turn in radians; this file only turns mouse
+// counts into them. The direct writes remain for aiming, the mounted gun, and plain look when the
+// chase camera is switched off.
 
 namespace VCS {
 
@@ -96,226 +101,12 @@ struct VCSCameraSettings {
 	// the scale it produces, so watch it at speed rather than trusting this sentence.
 	bool scaleByFOV = true;
 
-	// Vertical look while driving. ON by default as of 2026-08-17, confirmed usable in play.
-	//
-	// It was off for a long time because asserting pitch against the vehicle camera ran the view away
-	// to the -89 degree limit and left it there. That is now understood and fixed: the cause was
-	// writing the field every vblank against a game that updates it at its 30fps logic rate, so two
-	// of our writes landed per game frame and wound up the game's own camera integrator. Pitch is now
-	// asserted once per game logic frame in a vehicle - see the FrameCounter check in CameraTick.
-	//
-	// **Known residual, accepted deliberately.** Forcing pitch hard down *through* the vehicle entry
-	// and then continuing to force it down once seated can still provoke the runaway. Normal play does
-	// not do this; reported as working "99% of the time", and enabled on that basis. The complete fix
-	// is to drive the game's own control input rather than the position, as aimResponseModel does for
-	// aiming, which needs mode 18's pitch writers at 0x089a1xxx reverse-engineered. See CLAUDE.md.
-	// OFF: still experimental and it does not behave the way it reads. The vehicle camera is
-	// the spring this fork spent a long time learning not to fight, and pitching it is the
-	// part of that fight still unresolved - so the default is the behaviour that works.
-	//
-	// Worth being deliberate about because the Mouse page no longer has a row for it: with
-	// the row gone, this default IS the setting for every player.
-	bool pitchInVehicle = false;
-
-	// How far below the entry angle, NUMERICALLY, vehicle pitch may travel - in radians. Note the
-	// sign convention: more negative is looking UP, so this is the upward-look allowance, and the
-	// entry angle is the limit in the other direction. (-6.8 deg is level-ish, -89 deg is the roof.)
-	//
-	// Both halves of that come from measurement, not taste. Vehicle pitch is spring-controlled, and
-	// the spring's correction scales with how far we drag pitch off its target - so the fix is to not
-	// drag it far. From a 7379-frame trace, mean correction per frame by region:
-	//
-	//     above the entry angle      0.4069 rad   (max 1.5044)  <- 3.2x worse, so forbidden entirely
-	//     0.02 .. 0.15 below         0.0244 rad   (max 0.1280)  <- this band
-	//     0.15 .. 0.30 below         0.0527 rad
-	//     0.50 .. 0.75 below         0.2623 rad
-	//
-	// 1.45 rad is about -89 deg of look-up from the -6.8 deg baseline, i.e. effectively the full
-	// range, and confirmed good in play.
-	//
-	// It was expected to shudder at this depth and it does not, which corrected the diagnosis. The
-	// per-frame fight numbers above that appear to grow with depth were measured in a trace where
-	// ABOVE-entry excursions were happening in the same session, so what looked like a
-	// depth-dependent fight was largely the spring recovering from being pumped by those. Depth is
-	// not the problem; going numerically above the entry angle is. **The ceiling is the fix**, and
-	// this band can be as wide as the game's own range allows.
-	float pitchVehicleDown = 1.45f;
-
-	// --- Handing the camera back ---
-	//
-	// Mouse look does not persuade the game's camera, it OVERRIDES it: `CameraYaw` is written every
-	// tick for a window after the last movement, and the on-foot follow camera (CCam mode 15,
-	// 0x08999f60) computes its own Beta from the player's heading regardless - it never reads a look
-	// axis at all. So for the length of the window the player sees our value, and the game sees its
-	// own, and the two are free to disagree by as much as the player turned.
-	//
-	// Which made the END of the window a cliff. Full authority on one tick, none on the next, and
-	// whatever the game had been quietly computing underneath arrives in a single frame. That is the
-	// "it snaps back about a second after I stop" report, offset and all: the offset is how far the
-	// game's own follow logic had drifted while it was covered up.
-	//
-	// The fix is to stop dropping the camera and hand it over instead. Once the hold expires the
-	// written value walks toward the game's live value across `lookReleaseFrames`, on a smoothstep,
-	// and the last frame of the walk writes exactly what it read - so the tick where we stop writing
-	// changes nothing by construction. There is no snap left to feel because there is no step left
-	// anywhere in the sequence.
-	//
-	// It is deliberately blind to WHY the two values differ, and that is the useful property. If the
-	// game had in fact adopted our value, the gap is zero, every step of the walk is a no-op, and the
-	// camera simply stays where the player put it. If the game kept its own, the walk covers the gap
-	// smoothly. Both readings of the follow camera's behaviour give a smooth handback, so this did
-	// not have to wait on reverse-engineering mode 15's target field to be correct.
-	//
-	// The proper fix, for when that field IS known, is to write the game's own follow TARGET so it
-	// converges on the player's view rather than being painted over. Then the handback is free.
-
-	// Hand the camera back to the game AT ALL. Off keeps the view exactly where the player put it,
-	// indefinitely: no hold expiry, no walk, no return.
-	//
-	// The master switch over everything else in this section, and the honest end of the road the
-	// last three changes were walking down. The handback exists to give the game its camera back
-	// politely; if the player would rather it never took it back, there is nothing left to be polite
-	// about and every setting below stops meaning anything.
-	//
-	// What it costs is the follow camera entirely, which is the point but is worth stating: the view
-	// no longer swings behind you as you walk, and IN A VEHICLE it no longer swings behind the car -
-	// so a turn leaves you looking at the side of it until you move the mouse. That is what "never
-	// return" means rather than a defect, and it is one click back.
-	//
-	// The write discipline is unchanged, which is what makes an indefinite hold safe rather than a
-	// longer exposure to an old bug: pitch is still asserted once per GAME logic frame in a vehicle
-	// and still clamped to the anchor window, so nothing is being written faster or further than it
-	// was during the hold's first three quarters of a second.
-	//
-	// OFF by default, which is a decision about this game rather than a general preference. The
-	// return was chased through four builds - a fade, a heading target, a learner, an idle hold -
-	// and every one of them landed on the same wall: the follow camera has a resting position while
-	// walking and a different one at a standstill, so a handback at rest is a value the game will
-	// always disagree with. Not returning at all is the only version with nothing left to snap, and
-	// see recenterOnGlance for how the default view is asked for on purpose instead.
-	bool returnLook = false;
-
-	// Ticks of full authority after the last look movement. These are ~60Hz emulator ticks, so 45 is
-	// about three quarters of a second - long enough to cover the gaps between mouse events without
-	// the camera feeling stuck to the player's last flick.
-	//
-	// Ignored entirely when returnLook is off - the hold simply never expires.
-	int lookHoldFrames = 45;
-
-	// Ticks the handback takes once that expires. Raise it for a longer, gentler return; 0 goes back
-	// to the old cliff, which is only useful for confirming what this setting is for.
-	//
-	// The walk advances once per GAME logic frame rather than once per tick - the game runs its
-	// camera at 30fps against our 60Hz, and stepping twice per frame would be the same double-write
-	// that wound up the vehicle pitch integrator - so 45 ticks is about 22 steps.
-	int lookReleaseFrames = 45;
-
-	// End the handback exactly BEHIND the character, rather than wherever the game's camera
-	// happens to be sitting when the walk starts.
-	//
-	// The two are not the same thing, and which one is which is measured rather than assumed:
-	// reported in play, pitch always comes back to -4.6 deg and yaw does not come back to behind
-	// the player at all. So the game returns pitch to a baseline by itself and leaves yaw where it
-	// finds it - which means a handback that fades toward the game's LIVE yaw is fading toward the
-	// value we ourselves last wrote, and correctly does nothing. Smooth, and not what anyone wants
-	// the camera to do after they stop looking around.
-	//
-	// The target is the player's own heading, converted with the same quarter turn PedAimTick
-	// inverts:
-	//
-	//     heading = camYaw + PI/2        (PedAimTick, shipped and confirmed in play)
-	//     camYaw  = heading - PI/2       (therefore, and this is what the walk aims at)
-	//
-	// ON FOOT ONLY. In a vehicle the camera already returns behind the car on its own, `PedHeading`
-	// belongs to a ped who is sitting in a seat rather than facing where the car points, and the
-	// vehicle camera is the one with the spring that this fork has been careful not to fight. There
-	// the walk keeps fading to the game's live value, which is the behaviour that was already right.
-	//
-	// The heading is re-read on every step, so a player who is walking or turning during the walk is
-	// tracked rather than aimed at once and missed.
-	bool returnBehindPlayer = true;
-
-	// LEARN where behind-the-player actually is, instead of trusting the quarter turn.
-	//
-	// `camYaw = heading - PI/2` is derived from PedAimTick's own inverse and it is not wrong, but it
-	// describes a camera sitting exactly opposite the character's facing - and the game's follow
-	// camera does not sit there. Reported in play: the walk lands on that value and the game then
-	// snaps 15-35 degrees off it. The size is the evidence. The known geometric gap between Beta and
-	// the camera's Front is 4.42 degrees, so a constant this much larger is not that gap, and a range
-	// that wide is not one constant being slightly wrong either.
-	//
-	// So measure it rather than pick it. While the player WALKS IN A STRAIGHT LINE and we are not
-	// driving the camera, the game has the camera wherever it wants it - so `CameraYaw - PedHeading`
-	// is, by definition, the offset the follow camera is holding. Sample it there, low-pass it, and
-	// aim the handback at `PedHeading + offset`.
-	//
-	// The three gates on a sample are all doing work:
-	//
-	//   MOVING          the follow camera recentres while you walk and leaves the view alone when
-	//                   you stand still - which is what the first round of this fix established, and
-	//                   why a sample taken standing still would only measure where the player last
-	//                   left the camera pointing.
-	//   NOT TURNING     the camera trails a turn, so a sample mid-turn measures that lag rather than
-	//                   the offset. Steady-state lag is proportional to turn rate, and a straight
-	//                   line has a rate of zero.
-	//   CAMERA SETTLED  the same test from the other end. Both must be still for the pair to be a
-	//                   resting relationship rather than two things in motion.
-	//
-	// Off falls back to the derived quarter turn, which is also what runs until enough samples have
-	// been collected. Either way `returnBehindTrimDeg` is added on top.
-	bool learnFollowOffset = true;
-
-	// Hand trim on the handback target, in degrees. Added to the learned offset, or to the quarter
-	// turn when learning is off or has not run yet.
-	//
-	// Here so the number can be dialled in from play without a rebuild if the learner cannot get a
-	// clean sample - watch the live and learned values on the Camera tab and put the difference in
-	// here. Zero is correct when the learner is working.
-	float returnBehindTrimDeg = 0.0f;
-
-	// Don't hand the camera back at all while the player is standing still. Wait for them to move.
-	//
-	// This is the answer to a measurement rather than a preference. The learner settled at exactly
-	// -90 degrees over 1671 samples, so `heading - PI/2` IS where the follow camera sits WHILE
-	// WALKING - the derived quarter turn was right all along. But the camera read -59.2 degrees off
-	// the heading once the walk had finished and the player was standing still, 30.8 degrees from
-	// where the handback left it, which is the whole of the reported 15-35 degree snap.
-	//
-	// So the game has a resting position while walking and a different one while idle, and no value
-	// we hand over standing still is going to be the one it wants. Two ways out, and this is the
-	// cheaper: don't let go until the player is moving, at which point the game's own recentring is
-	// running and is provably heading for the same -90 the walk aims at. The camera stays exactly
-	// where the player left it in the meantime, which is also what GTA San Andreas does.
-	//
-	// The expensive way out, for when it is needed, is finding mode 15's own stored Beta and writing
-	// THAT - then the handback stops being a negotiation.
-	//
-	// Costs a permanently asserted write while standing still, which is what the hold already does
-	// for its first three quarters of a second and the game does not fight.
-	bool holdUntilMoving = true;
-
-	// The vehicle glance keys - Q, E, or both - put the view back behind the car.
-	//
-	// This is what makes `returnLook = false` liveable in a vehicle rather than merely quiet. With
-	// no automatic return there has to be a deliberate one, and the glance keys are already the
-	// "look somewhere else for a moment" control, so asking them for the default view back costs no
-	// new binding and reads as the same gesture.
-	//
-	// It also fixes something that was broken the moment the hold became indefinite: a glance is the
-	// GAME's own look mechanic - L trigger plus a stick direction, see GlanceDirection - so it moves
-	// the game's camera, and a permanently asserted CameraYaw simply painted over it. The glance
-	// appeared to do nothing. Now it ends the hold: the walk takes the view back to the car's default
-	// bearing and then stops writing, which is both the recentre being asked for and the camera
-	// being handed over so the glance itself works from the position it expects.
-	//
-	// The walk targets the heading directly rather than the game's live yaw - the same
-	// `heading + offset` the on-foot return uses, which is -90 degrees - so it lands on the value
-	// the game agrees with instead of negotiating with a camera that is holding our own number.
-	//
-	// Independent of returnLook: with the return on, this just brings the handback forward from
-	// whenever the hold would have expired. It only MATTERS with it off, because that is the
-	// configuration where nothing else would ever give the camera back.
-	bool recenterOnGlance = true;
+	// Two sections used to sit here - vertical look in vehicles, and handing the camera back to the
+	// game - with eleven settings between them. Both were ways of living with the game's own on-foot
+	// and vehicle cameras while writing their angles, and the chase camera replaced that arrangement
+	// outright: see VCSChaseCam.h, and its settings for everything about framing, collision and the
+	// swing back behind a vehicle. What stays in this struct is what the mouse DOES - how fast it
+	// turns the view, which way up - and everything about aiming.
 
 	// --- Aiming ---
 	//
@@ -1142,35 +933,6 @@ void CameraDiagnostics(u64 *seen, u64 *claimed, u64 *rejectedContext,
 // away from the game's live pitch while holdFrames stays high, we are fighting the game.
 void CameraHoldState(float *desiredYaw, float *desiredPitch, float *anchorPitch,
 		int *holdFrames, const char **contextName);
-
-// Steps left in the handback, or 0 when it is not running. Watch it against the live yaw: the
-// walk is working when the two converge, and pointless when the gap was zero to begin with.
-int CameraReleaseFrames();
-
-// The yaw the handback is currently walking toward, and whether that came from the player's
-// heading (returnBehindPlayer) rather than from the game's own camera. Only meaningful while
-// CameraReleaseFrames() is nonzero.
-float CameraHandbackTargetYaw(bool *behindPlayer);
-
-// What the follow camera's own offset looks like: the value being used (radians, CameraYaw minus
-// PedHeading), the raw instantaneous one for comparison, how many clean samples went into it, and
-// the player's current speed - which is the gate that decides whether a sample counts at all, so
-// seeing it is how you tell "not learning" from "never moving".
-void FollowOffsetState(float *used, float *live, u64 *samples, float *speed);
-
-// The last handback's aftermath: what the camera did on the game frames after we stopped writing,
-// as offsets from the player's heading in radians. `written` is the offset we handed over, `count`
-// how many frames were captured, and `trace` points at them oldest-first.
-//
-// This is the measurement that says WHAT KIND of thing the game does when it gets the camera back.
-// A single frame of movement is a stored value being restored; a slide over several is a spring
-// easing toward a target; no movement at all means the snap is not here and the next place to look
-// is what happens BEFORE we stop, not after.
-void ReleaseTrace(const float **trace, int *count, float *written);
-
-// Why the hold is parked open rather than expiring, or nullptr when it isn't. Distinguishes the two
-// reasons a camera can sit still forever, which look identical from the outside and are not.
-const char *CameraParkedReason();
 
 // How many ticks actually pushed a new yaw into the game, and what the last one was.
 void CameraWriteStats(u64 *writes, u64 *fails, float *lastWritten);

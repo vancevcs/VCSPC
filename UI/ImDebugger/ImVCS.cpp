@@ -30,6 +30,7 @@
 #include "Core/System.h"
 #include "Core/VCS/VCSAddresses.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
@@ -865,101 +866,54 @@ void ImVCSWindow::DrawCamera() {
 	ImGui::Checkbox("Invert X", &s.invertX);
 	ImGui::SameLine();
 	ImGui::Checkbox("Invert Y", &s.invertY);
-	ImGui::Checkbox("Return the view to the game", &s.returnLook);
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Text("Chase camera - on foot, vehicles, aircraft");
+	VCS::VCSChaseCamSettings &cc = VCS::ChaseCamSettings();
+	ImGui::Checkbox("Chase camera", &cc.enabled);
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip(
-			"Off never hands the camera back: the view stays exactly where you leave it,\n"
-			"indefinitely, and everything below stops applying. On foot that means no drift\n"
-			"back behind you; in a vehicle it means no swing back behind the car either.");
+			"The fork's own orbit camera, built inside the game's camera update and pulled in by\n"
+			"the game's own line-of-sight tests. Off puts the game's instructions back, and mouse\n"
+			"look falls back to writing CameraYaw/CameraPitch into the game's cameras.");
 	}
-	if (!s.returnLook) {
-		ImGui::TextDisabled("  the view stays where you leave it - use Q/E in a car to recentre");
-	}
-	ImGui::BeginDisabled(!s.returnLook);
-	ImGui::SliderInt("Hold frames", &s.lookHoldFrames, 5, 300, "%d ticks");
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"Ticks of FULL authority after the last mouse movement, at ~60Hz.\n"
-			"The camera stays exactly where you left it for this long.");
-	}
-	ImGui::SameLine();
-	ImGui::TextDisabled("(%.2f s)", s.lookHoldFrames / 60.0f);
-	ImGui::Checkbox("Keep the view until you move", &s.holdUntilMoving);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"Standing still, never hand the camera back - it stays where you left it.\n"
-			"The handback runs on the first frame you move, which is when the game's own\n"
-			"recentring is running and heading for the same place the walk aims at.");
-	}
+	ImGui::BeginDisabled(!cc.enabled);
+	ImGui::SliderFloat("Foot pivot height", &cc.footPivotHeight, 0.0f, 1.5f, "%.2f");
+	ImGui::SliderFloat("Foot distance", &cc.footDistance, 1.0f, 10.0f, "%.2f");
+	ImGui::SliderFloat("Foot look up", &cc.footLookUp, 0.1f, 1.5f, "%.2f rad");
+	ImGui::SliderFloat("Foot look down", &cc.footLookDown, 0.1f, 1.5f, "%.2f rad");
+	ImGui::Checkbox("Foot: keep out of parked cars", &cc.footCollideVehicles);
+	ImGui::SliderFloat("Vehicle pivot (x box top)", &cc.vehiclePivotScale, 0.0f, 2.0f, "%.2f");
+	ImGui::SliderFloat("Vehicle distance base", &cc.vehicleDistanceBase, 0.0f, 15.0f, "%.2f");
+	ImGui::SliderFloat("  per metre of length", &cc.vehicleDistancePerLength, 0.0f, 3.0f, "%.2f");
+	ImGui::SliderFloat("  zoom near x", &cc.vehicleZoomNear, 0.3f, 1.5f, "%.2f");
+	ImGui::SliderFloat("  zoom far x", &cc.vehicleZoomFar, 0.5f, 3.0f, "%.2f");
+	ImGui::SliderFloat("  overall x", &cc.vehicleDistanceScale, 0.3f, 2.0f, "%.2f");
+	ImGui::SliderFloat("Vehicle look up", &cc.vehicleLookUp, 0.1f, 1.5f, "%.2f rad");
+	ImGui::SliderFloat("Vehicle look down", &cc.vehicleLookDown, 0.1f, 1.5f, "%.2f rad");
+	ImGui::SliderFloat("Vehicle rest pitch", &cc.vehicleRestPitch, -0.8f, 0.3f, "%.2f rad");
+	ImGui::Checkbox("Swing back behind vehicles", &cc.vehicleRecentre);
+	ImGui::SliderFloat("  after", &cc.recentreDelay, 0.0f, 6.0f, "%.1f s");
+	ImGui::SliderFloat("  rate", &cc.recentreRate, 0.2f, 8.0f, "%.1f /s");
+	ImGui::SliderFloat("  above speed", &cc.recentreMinSpeed, 0.0f, 20.0f, "%.1f m/s");
+	ImGui::Checkbox("Glances (Q / E, bumpers)", &cc.glances);
+	ImGui::SliderInt("Rays", &cc.rays, 0, 5);
+	ImGui::SliderFloat("Cone radius", &cc.coneRadius, 0.0f, 1.0f, "%.2f");
+	ImGui::SliderFloat("Collision margin", &cc.collisionMargin, 0.0f, 1.0f, "%.2f");
+	ImGui::SliderFloat("Closest distance", &cc.minDistance, 0.05f, 2.0f, "%.2f");
+	ImGui::SliderFloat("Ease back out", &cc.easeOutRate, 0.2f, 20.0f, "%.1f /s");
+	ImGui::Checkbox("Collide with objects", &cc.collideObjects);
+	ImGui::Checkbox("Lower the near plane when close", &cc.nearClip);
+	ImGui::SliderFloat("  of clearance", &cc.nearClipFactor, 0.1f, 1.0f, "%.2f");
+	ImGui::SliderFloat("  no lower than", &cc.nearClipMin, 0.01f, 0.9f, "%.2f");
+	ImGui::SliderFloat("Body radius", &cc.footBodyRadius, 0.1f, 1.0f, "%.2f");
+	ImGui::SliderFloat("Lift-out margin", &cc.subjectMargin, 0.0f, 0.5f, "%.2f");
+	ImGui::SliderFloat("Vehicle orbit below pivot", &cc.vehicleOrbitUp, -0.3f, 1.0f, "%.2f rad");
+	ImGui::SliderFloat("Blend in", &cc.blendIn, 0.0f, 1.0f, "%.2f s");
+	ImGui::SliderFloat("Blend out", &cc.blendOut, 0.0f, 1.0f, "%.2f s");
+	ImGui::SliderFloat("Pivot settle", &cc.pivotSettleRate, 0.5f, 30.0f, "%.1f /s");
+	ImGui::Checkbox("Keep the game's camera shake", &cc.keepShake);
 	ImGui::EndDisabled();
-
-	// Deliberately OUTSIDE the disabled block. With the automatic return off these are the only
-	// things that still decide anything - the glance is the one remaining way to ask for the
-	// default view, and the two rows below shape the walk it runs.
-	ImGui::Checkbox("Glance keys recentre the view", &s.recenterOnGlance);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"In a car, Q or E - or both - walk the view back behind the car and then\n"
-			"hand the camera over. This is how you ask for the default view when the\n"
-			"automatic return is off, and it also lets the game's own glance work: a\n"
-			"glance is the game moving its camera, which a held view would paint over.");
-	}
-	ImGui::SliderInt("Handback frames", &s.lookReleaseFrames, 0, 300, "%d ticks");
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"How long the camera takes to walk back, whether the return ran on its own\n"
-			"or a glance asked for it. 0 drops it in one frame, which is the snap this\n"
-			"exists to remove. The walk steps once per GAME logic frame, so 45 ticks is\n"
-			"about 22 steps.");
-	}
-	ImGui::SameLine();
-	ImGui::TextDisabled("(%.2f s)", s.lookReleaseFrames / 60.0f);
-	ImGui::Checkbox("Return behind the player", &s.returnBehindPlayer);
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"On foot, walk the camera back to behind the character instead of to\n"
-			"whatever the game's own camera is holding. Off leaves the view wherever\n"
-			"you stopped looking, which is what the game itself does.\n"
-			"Vehicles ignore this: that camera already returns behind the car by itself.");
-	}
-	if (s.returnBehindPlayer) {
-		ImGui::Checkbox("  learn the offset", &s.learnFollowOffset);
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip(
-				"Measures CameraYaw - PedHeading while you WALK IN A STRAIGHT LINE and the\n"
-				"camera is at rest, which is the only moment the game is holding the camera\n"
-				"where it wants it. Off uses the derived quarter turn, which lands 15-35 deg\n"
-				"out. Watch the readout below: 'live' should settle near 'using'.");
-		}
-		ImGui::SliderFloat("  trim (deg)", &s.returnBehindTrimDeg, -45.0f, 45.0f, "%.1f");
-		float used = 0.0f, live = 0.0f, speed = 0.0f;
-		u64 samples = 0;
-		VCS::FollowOffsetState(&used, &live, &samples, &speed);
-		ImGui::Text("  offset: using %.1f deg   live %.1f deg   %llu samples   speed %.3f",
-			used * 57.2957795f, live * 57.2957795f, (unsigned long long)samples, speed);
-		if (samples == 0) {
-			ImGui::SameLine();
-			ImGui::TextDisabled("(walk in a straight line to measure)");
-		}
-	}
-	ImGui::Checkbox("Vertical look in vehicles", &s.pitchInVehicle);
-	if (s.pitchInVehicle) {
-		ImGui::SliderFloat("  look-up band (rad)", &s.pitchVehicleDown, 0.02f, 1.55f, "%.3f");
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("How far UP vehicle pitch may look, from the angle you entered at.\n"
-			                  "1.37 rad reaches about -85 deg; 0.15 is only about -15 deg.\n"
-			                  "Vehicle pitch is spring-controlled and the fight grows with\n"
-			                  "displacement: ~0.02 rad/frame at 0.15, ~0.26 at 0.5-0.75. Raise it\n"
-			                  "until the camera shudders or slams to the roof, then back off.");
-		}
-		ImGui::SameLine();
-		ImGui::TextDisabled("(%.1f deg)", s.pitchVehicleDown * 57.2958f);
-	}
-	if (ImGui::IsItemHovered()) {
-		ImGui::SetTooltip(
-			"Off by default. Driving pitch against the vehicle follow-camera leaves it "
-			"settled steeply downward after releasing. Yaw in vehicles is unaffected.");
-	}
 
 	ImGui::Spacing();
 	ImGui::Separator();
@@ -1346,52 +1300,29 @@ void ImVCSWindow::DrawCamera() {
 		TextUnset();
 	}
 
+	VCS::VCSChaseCamStats cs;
+	VCS::ChaseCamGetStats(&cs);
+	ImGui::Text("Chase camera: %s", cs.status);
+	ImGui::SameLine();
+	ImGui::TextColored(cs.owning ? kGoodColor : kUnsetColor, "%s", cs.owning ? cs.kind : "not owning the view");
+	ImGui::Text("  mode %d   frames %llu   owned %llu   block %08x", cs.mode,
+		(unsigned long long)cs.frames, (unsigned long long)cs.ownedFrames, cs.block);
+	ImGui::Text("  looking yaw %.1f deg  pitch %.1f deg   %.1f s since input%s%s", cs.yaw * 57.2957795f,
+		cs.pitch * 57.2957795f, cs.sinceLook, cs.glancing ? "   glancing" : "",
+		cs.blendingOut ? "   blending out" : "");
+	ImGui::Text("  distance: game %.2f  wanted %.2f  allowed %.2f  now %.2f   hits %d/%d",
+		cs.gameDistance, cs.wantDistance, cs.allowedDistance, cs.distance, cs.hits, cs.rays);
+	ImGui::Text("  pivot %.2f %.2f %.2f   speed %.1f m/s   blend in %.2f", cs.pivot[0], cs.pivot[1],
+		cs.pivot[2], cs.speed, cs.blendIn);
+	ImGui::Text("  clearance from player/car %.2f   near plane %.2f", cs.clearance, cs.nearClip);
+
 	float dYaw = 0.0f, dPitch = 0.0f, aPitch = 0.0f;
 	int holdFrames = 0;
 	const char *ctxName = "";
 	VCS::CameraHoldState(&dYaw, &dPitch, &aPitch, &holdFrames, &ctxName);
-	ImGui::Text("Asserting: yaw %.4f  pitch %.4f   (anchored pitch %.4f)", dYaw, dPitch, aPitch);
-	const int releaseFrames = VCS::CameraReleaseFrames();
-	ImGui::Text("Hold frames left: %d   handback steps left: %d   last context: %s",
-		holdFrames, releaseFrames, ctxName);
-
-	// What the game did with the camera on the frames after the last handback let go, as offsets
-	// from the player's heading. One frame of movement is a stored value being restored; a slide
-	// over several is a spring; no movement means the snap is not in the release at all.
-	const float *trace = nullptr;
-	int traceCount = 0;
-	float traceWritten = 0.0f;
-	VCS::ReleaseTrace(&trace, &traceCount, &traceWritten);
-	const char *parked = VCS::CameraParkedReason();
-	if (parked) {
-		ImGui::TextColored(kGoodColor, "Holding the view: %s", parked);
-	}
-	if (traceCount > 0 && trace) {
-		ImGui::Text("After release (deg from heading), handed over %.1f:", traceWritten * 57.2957795f);
-		char row[160];
-		int used = 0;
-		for (int i = 0; i < traceCount && i < 12 && used < (int)sizeof(row) - 1; i++) {
-			used += snprintf(row + used, sizeof(row) - used, "%.1f ", trace[i] * 57.2957795f);
-		}
-		ImGui::Text("  %s", row);
-		const float moved = trace[traceCount - 1] - traceWritten;
-		ImGui::Text("  moved %.1f deg over %d frames", moved * 57.2957795f, traceCount);
-	}
-	if (releaseFrames > 0 && yaw) {
-		// The gap the walk is actually closing, the short way round. It shrinking to nothing by the
-		// last step is the whole fix - and WHICH target it is closing on matters just as much, so
-		// both are printed: a walk aimed at the game's own value has nothing to do when the game
-		// left our value alone, which is exactly the case behind-the-player exists for.
-		bool behindPlayer = false;
-		const float target = VCS::CameraHandbackTargetYaw(&behindPlayer);
-		float gap = target - *yaw;
-		gap = std::fmod(gap + 3.14159265f, 6.28318531f);
-		if (gap < 0.0f) gap += 6.28318531f;
-		gap -= 3.14159265f;
-		ImGui::Text("Handing back to %s: %.1f deg  (%.1f deg to go)",
-			behindPlayer ? "behind the player" : "the game's own yaw",
-			target * 57.2957795f, gap * 57.2957795f);
-	}
+	ImGui::Text("Asserting (aim, mounted gun, fallback): yaw %.4f  pitch %.4f  (anchored pitch %.4f)",
+		dYaw, dPitch, aPitch);
+	ImGui::Text("Hold frames left: %d   last context: %s", holdFrames, ctxName);
 	if (pitch && holdFrames > 0) {
 		const float drift = dPitch - *pitch;
 		ImGui::Text("Pitch we assert minus game pitch:");
@@ -1429,8 +1360,8 @@ void ImVCSWindow::DrawCamera() {
 
 	ImGui::Spacing();
 	ImGui::TextDisabled(
-		"Pitch limits follow the anchor by +/-0.7 rad, because the game's pitch baseline "
-		"differs per camera: about -0.05 on foot, about -1.55 in a vehicle.");
+		"Aim pitch limits follow the anchor by +/-0.7 rad. Everywhere else the chase camera owns the "
+		"view, and its limits are the look up / look down rows above.");
 }
 
 // Vaulting, and the geometry query underneath it.

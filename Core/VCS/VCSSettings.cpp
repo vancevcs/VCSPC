@@ -25,6 +25,7 @@
 #include "Core/Config.h"
 #include "Core/System.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSGame.h"
@@ -122,6 +123,7 @@ const std::vector<Option> &Options() {
 	static const std::vector<Option> options = [] {
 		VCSCameraSettings &cam = CameraSettings();
 		VCSPadSettings &pad = PadSettings();
+		VCSChaseCamSettings &chase = ChaseCamSettings();
 
 		std::vector<Option> opts;
 
@@ -251,21 +253,16 @@ const std::vector<Option> &Options() {
 		addBool(OptionPage::Mouse, "InvertLookY", "Invert look vertically",
 			"", &cam.invertY);
 
-		// The master switch first, then the two halves of what happens after you stop moving the
-		// mouse. Ticks are the emulator's ~60Hz, which is the unit the camera code counts in; the
-		// help text gives seconds because that is the unit the player is actually judging.
-		addBool(OptionPage::Mouse, "ReturnLook", "Return the view to the game",
-			"Off keeps the view exactly where you leave it and never gives the camera back - "
-			"no drift back behind you on foot, and no swing back behind the car when driving.",
-			&cam.returnLook);
-		// The five rows that used to sit here - hold time, return time, return-behind-you, its trim,
-		// and keep-until-moving - are gone from the menu on purpose. They are the tuning FOR the
-		// switch above, and a page that offers five ways to shape a behaviour the player has most
-		// likely turned off is five rows of noise around the one row that matters.
+		// One row for the chase camera, and it is the one a player has an opinion about: whether the
+		// view swings back behind a vehicle on its own once the mouse is left alone, as San Andreas's
+		// does. On foot it never does, which is also San Andreas. Everything else about the chase
+		// camera is framing and collision tuning, and lives on the debugger's Camera tab.
 		//
-		// The settings themselves are untouched: VCSCameraSettings still owns them, vcs.ini still
-		// persists whatever is in them, and the debugger's Camera tab still binds every one. This
-		// removes them from the PLAYER's page, not from the fork.
+		// It replaces ReturnLook, which switched off the old handback. That key is simply no longer
+		// read - there is nothing left for it to switch.
+		addBool(OptionPage::Mouse, "VehicleRecentre", "Vehicle camera follows",
+			"The view swings back behind a moving vehicle a moment after you stop moving the mouse.",
+			&chase.vehicleRecentre);
 
 		// --- Controller ---
 		//

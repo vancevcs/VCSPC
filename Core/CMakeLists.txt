@@ -459,6 +459,8 @@ add_library(Core STATIC
 	VCS/VCSVault.h
 	VCS/VCSWorld.cpp
 	VCS/VCSWorld.h
+	VCS/VCSChaseCam.cpp
+	VCS/VCSChaseCam.h
 
 	HLE/sceDeflt.cpp
 	HLE/sceDeflt.h

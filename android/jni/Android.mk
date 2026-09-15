@@ -722,6 +722,7 @@ EXEC_AND_LIB_FILES := \
   $(SRC)/Core/VCS/VCSState.cpp.arm \
   $(SRC)/Core/VCS/VCSVault.cpp.arm \
   $(SRC)/Core/VCS/VCSWorld.cpp.arm \
+  $(SRC)/Core/VCS/VCSChaseCam.cpp.arm \
   $(SRC)/Core/VCS/VCSSettings.cpp.arm \
   $(SRC)/Core/HLE/sceDeflt.cpp \
   $(SRC)/Core/HLE/sceDisplay.cpp \

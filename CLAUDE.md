@@ -46,7 +46,10 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
   VCSMemory.h/cpp   std::optional accessors over PSP RAM; a bad address is never fatal
   VCSState.h/cpp    per-frame decoded game state
   VCSInput.h/cpp    input context enum, (context, host key) -> PSP button table, WASD analog
-  VCSCamera.h/cpp   mouse look; writes CameraYaw/CameraPitch directly, not via sceCtrl
+  VCSCamera.h/cpp   mouse and right-stick look; hands the turn to the chase camera, and writes
+                    CameraYaw/CameraPitch directly only for aiming and the mounted gun
+  VCSChaseCam.h/cpp the camera the player looks through on foot, driving and flying - built
+                    inside the game's camera update, pulled in by the game's own line of sight
   VCSFireHook.h/cpp free aim resolved at the fire site, by rewriting the raycast's target
   VCSWorld.h/cpp    calls the game's own collision code, via a program written into PSP memory
   VCSVault.h/cpp    ledge detection and the pull-up, built on that query
@@ -103,92 +106,32 @@ PPSSPP's mapper binds one key to one meaning globally and cannot express it. Sam
 discipline as the buttons: the stick is only touched while a movement key is held, and released
 exactly once when the last one comes up, so a real pad is unaffected.
 
-**`VCSCamera`** is mouse look, horizontal and vertical. It doesn't go through `sceCtrl`, because no PSP input
-can express "rotate by exactly this many radians" — it writes `CameraYaw` directly. It also owns
-the raw mouse-delta buffer for the *aiming* path, which spends the delta on the stick instead —
-see "Aiming is a stick, not a camera" below.
+**`VCSCamera`** turns mouse and right-stick movement into look angles. It doesn't go through `sceCtrl`,
+because no PSP input can express "rotate by exactly this many radians". On foot, driving and flying it
+hands the angles to **`VCSChaseCam`**, which owns those views outright. Everywhere else - aiming, the
+mounted gun, and plain look with the chase camera switched off - it writes `CameraYaw` and
+`CameraPitch` directly, re-asserted every tick while it holds them, because the game eases a one-off
+write straight back (measured: 135 successful writes, zero net rotation). It also owns the raw
+mouse-delta buffer for the *aiming* path, which spends the delta on the stick instead - see "Aiming is
+a stick, not a camera" below.
 
-The non-obvious part is *why it writes every frame*. The game runs its own camera smoothing that
-eases yaw back toward its follow target, so writing only when the mouse moves accomplishes nothing
-— the game undoes each nudge in between (measured: 135 successful writes, zero net rotation).
-`VCSCamera` therefore keeps its own `g_desiredYaw`, anchors it to the game's value when a look
-starts, and re-asserts it every frame for `lookHoldFrames` (~0.75s) after the last movement. That
-outpaces the smoothing while the player is looking around. Don't "simplify" this back into a
-read-modify-write; it will silently stop working.
+**`VCSChaseCam`** is the camera the player looks through, and it is built rather than negotiated: it
+lets the game compute its camera and replaces the result inside the game's own frame, at two points in
+the camera update, with the collision done by the game's own `CWorld::ProcessLineOfSight`. See "The
+chase camera: the view is built, not negotiated" below for how, and for why the angle-writing mouse
+look it replaced could never have been made to work in a vehicle.
 
-**Releasing that override is its own problem, and used to be a cliff.** The game goes on computing
-its own camera underneath ours the whole time - mode 15 builds Beta from the player's heading and
-never reads a look axis - so the tick the hold expired handed the player, in one frame, however far
-the two had diverged. Reported as *"about a second after I stop, it snaps back to roughly where it
-started"*, and the "roughly" was the game's follow logic having drifted meanwhile. The hold now
-fades out instead: across `lookReleaseFrames` the written value walks to the game's live value on a
-smoothstep, stepping once per **game logic frame**, and the last step writes exactly what it read -
-so the tick we stop writing is a non-event by construction. The walk is deliberately blind to *why*
-the two differ, which is what makes it correct without having to settle whether the follow camera
-had adopted our value: if it had, every step is a no-op and the camera just stays put. The proper
-fix, once mode 15's follow TARGET is identified, is to write that instead and never need a handback.
-
-**Pitch and yaw do not come back the same way, and the asymmetry decides where the walk aims.**
-Reported in play once the fade was in: pitch always returns to -4.6 deg, yaw does not return behind
-the player at all. So the game springs pitch back to a baseline by itself and simply keeps whatever
-yaw it finds - which means a walk toward the game's *live* yaw is a walk toward the value we
-ourselves last wrote, and correctly does nothing. Yaw therefore gets an explicit target instead:
-`PedHeading - PI/2`, the inverse of the `heading = camYaw + PI/2` that `PedAimTick` already ships
-(`returnBehindPlayer`, on by default). **On foot only** - a vehicle returns behind the car on its
-own, `PedHeading` there belongs to someone sitting in a seat, and that camera is the spring this
-fork spent a long time learning not to fight. Pitch keeps fading to the game's live value, because
-that is the half the game was already getting right.
-
-**The quarter turn was right, and the thing it is right about is narrower than assumed.** Aiming the
-walk at `PedHeading - PI/2` still left a 15-35 degree snap, which looked like a wrong constant - the
-known `Beta`-to-`Front` gap is only 4.42 degrees, so it could not be that, and the range was too wide
-for one constant slightly off. So a learner went in to measure the offset instead of deriving it:
-`CameraYaw - PedHeading`, sampled only while the player walks in a straight line with the camera at
-rest and mouse look not driving, low-passed (`learnFollowOffset`, with `returnBehindTrimDeg` as a
-hand override). All three sampling gates earn their place - standing still would measure where the
-player last left the view rather than where the camera wants to be, and a mid-turn sample would
-measure the camera's trailing lag.
-
-**It settled on exactly -90.000 degrees over 1671 samples.** The derived value was correct, and the
-hypothesis that sent the learner in was wrong. What the same session measured is the finding:
-standing still after the walk, the camera sat at **-59.2 degrees** off the heading - 30.8 degrees
-from where the handback had just put it, which is the whole of the reported snap. So there is no
-single "behind the player": the follow camera holds `heading - 90` **while walking** and something
-else entirely once the player stops, and no value handed over at a standstill is the one it wants.
-
-Hence `holdUntilMoving` (on by default): standing still, the handback simply does not run and the
-view stays where the player left it, which is what San Andreas does anyway. The walk fires on the
-first frame of movement, when the game's own recentring is live and provably heading for the same
-`-90` the walk aims at. The proper fix remains mode 15's own stored Beta - write that and the
-handback stops being a negotiation. `ReleaseTrace` on the Camera tab is the instrument for
-identifying it: it records the camera's offset from the heading for 24 game frames after we let go,
-which separates a stored value being restored (one frame) from a spring easing somewhere (several).
-
-**And above all of it, `returnLook` - now OFF by default.** One switch that says never hand the
-camera back at all: the hold does not expire, the view stays where the player left it indefinitely,
-and the automatic return stops applying. It is the honest end of the road the three changes above
-were walking down. The handback exists to give the game its camera back politely, and once the
-measurements showed the game has no single resting position to hand it back TO, a player who would
-rather it never took the camera back has nothing left to be polite about. The write discipline is
-unchanged, which is what keeps an indefinite hold from being a longer exposure to the vehicle pitch
-runaway - pitch is still asserted once per game logic frame and still clamped to the anchor window.
-
-**With no automatic return there has to be a deliberate one**, so the vehicle glance keys - Q, E, or
-both - walk the view back behind the car and then hand the camera over (`recenterOnGlance`, on). That
-also repairs something the indefinite hold broke: a glance is *the game's own* look mechanic, L
-trigger plus a stick direction, so a permanently asserted `CameraYaw` painted straight over it and
-the glance appeared to do nothing. Ending the hold gives it the camera back from the position it
-expects to start at. The walk targets `heading + offset` directly rather than the game's live yaw,
-for the reason the on-foot return does - it lands on a value the game agrees with instead of
-negotiating with a camera that is holding our own number. Note the one thing NOT measured here:
-whether `PedHeading` tracks the car while driving. The Camera tab's live offset now updates in every
-context so it can be checked - drive straight with the view behind and it should read -90.
-
-**The transferable part is the shape of the error, which this file has now recorded four times.** The
-measurement said "15-35 degrees off", the inference said "so the constant is wrong", and the constant
-was exactly right - the offset was measured against a state (walking) that did not hold at the moment
-that mattered (standing still). A quantity that is only valid in some states is not a constant, and
-asking *when* it was measured is a different question from asking whether it was measured correctly.
+**What four builds of handing the camera back taught, kept short.** The old mouse look wrote the
+on-foot and vehicle cameras' angles and had to give them back when the player stopped - a fade, a
+target behind the player, a learner that measured the follow camera's offset, a hold until the player
+moved. Every version hit the same wall: mode 4 holds one resting position while walking and another
+at a standstill, so a handback at rest is a value the game will always disagree with. The vehicle
+pitch runaway was the same shape from the other side - a second writer of one field, at a different
+rate from the game's own integrator. Both argue for the design that replaced them: when the game's
+camera does the wrong thing with a number you hand it, stop handing it numbers and replace what it
+produces. The general lesson from the learner is the one this file has recorded four times: a
+quantity that is only valid in some states is not a constant, and asking *when* it was measured is a
+different question from asking whether it was measured correctly.
 
 **Two FOV reference constants, on purpose.** `AimAxisStep` scales by `FOV / 80` and `FOVLookScale`
 scales by `FOV / 70`, and the difference is not an oversight to be tidied away. The 80 is *the
@@ -1410,9 +1353,10 @@ written again. The buttonless check is what keeps it from firing mid-drag on a v
   testable was a car spawner - see "Spawning special vehicles" below.
 - **WASD movement**, confirmed in play, on foot and driving. Analog on foot; in a vehicle A/D
   steer the stick while W/S stay buttons.
-- **Mouse look.** Yaw on foot and in vehicles; pitch on both as of 2026-08-17 - vertical look while
-  driving is now on by default, with one known residual (see the pitch section below).
-  Not during free aim — there the mouse is the reticle instead.
+- **Mouse look, through the chase camera** (2026-09-15). Yaw and pitch on foot, driving and flying,
+  with the camera pulled in by the game's own collision instead of fighting it. Measured over the
+  debugger on foot and on a motorbike; not yet played by hand, and aircraft untested. See "The chase
+  camera: the view is built, not negotiated". Not during free aim - there the mouse is the reticle.
 - **Lock-on aiming**, which is how every ordinary weapon in VCS aims. Holding the aim key gives
   the aim bindings (Q/E cycle targets), WASD strafes, and the mouse keeps driving the camera.
 
@@ -2591,7 +2535,178 @@ are separate questions — see the inverse Escape trap.
 testing, where holding it visibly produced lock-on. It is not the L *trigger* (not to be confused
 with the keyboard `L`, which since 2026-08-17 toggles the fork's own lock-on mode for melee).
 
+### The chase camera: the view is built, not negotiated
+
+**Status: built 2026-09-15, measured on foot and on a motorbike over the WebSocket debugger, NOT yet
+played by hand.** Aircraft, boats and the glance keys have not been run at all - there is no
+helicopter fixture, and the glances are keyboard-only.
+
+Mouse look used to write the game's orbit angles and let the game's own camera modes build the view
+from them. Three reported faults came straight out of that arrangement, and none of them was tuning:
+
+| | what the game's mode did with a written angle |
+|---|---|
+| on foot, mode 4 | held its distance and steered round walls - so the camera sat on the ground when you looked up, the player left the frame, and it would not turn toward a wall you stood beside |
+| driving, mode 18 | integrated pitch, and a written pitch wound the integrator up until the view pinned to the roof - on a pitch change, or just driving up and down hills |
+| flying, mode 18 | followed the aircraft's own pitch, so tipping a helicopter forward tipped the view down into the rotor |
+
+So the chase camera does not write into those modes. It lets the game compute its camera and
+**replaces the result inside the game's own frame**, at two points in the camera update
+(`0x08a225a4`, `$s0` = CCamera):
+
+```
+08a2262c  addiu $fp, $sp, 0x50      Source      the three vectors every later stage works on
+08a22630  addiu $s6, $sp, 0x70      Up
+08a22634  addiu $s7, $sp, 0x60      Front
+...
+08a23a60  lwc1  $f12, 0xb38($s0)    <- PREPARE (HOOKENTER): the game's camera, before shake
+...                                    shake
+08a23be8  jal   0x08a1a5dc          <- redirected to a program in PSP memory, then the matrix build
+```
+
+The prepare hook reads the game's three vectors, works out the pivot (the player, or the vehicle),
+the direction the player is looking and how far back the camera wants to be, and writes a fan of up
+to five rays into a block of PSP memory. The patched `jal` lands in a ~50 instruction program in the
+same block that calls the game's own `CWorld::ProcessLineOfSight` once per ray, reaches a second
+HOOKENTER - the finish hook - which pulls the camera in to the nearest hit and writes Source, Front
+and Up over the game's, and then tail-calls the cross product the `jal` was for. From the game's side
+the `jal` did what it always did.
+
+Three properties fall out of doing it there, and each is one of the old bugs gone by construction:
+
+- **The collision is the game's.** Buildings, objects and (on foot) vehicles, with see-through
+  surfaces ignored - the flags the camera update's own clip passes at `0x08a239dc`.
+- **The timing is the game's.** One pass per logic frame, inside it. Nothing is written at vblank,
+  so there is no double write for an integrator to wind up on - and in a vehicle nothing is written
+  into the game's angles at all.
+- **Everything downstream sees it.** The matrix, and therefore the renderer, the frustum, the
+  streamer and the radar, all take the camera the player sees.
+
+**What it is modelled on is San Andreas on PC.** The camera orbits a point above the character and
+looks at it from where the mouse put it; when something is in the way it moves IN along that line
+rather than somewhere else. Look up and it comes down behind the player's legs; stand between two
+walls and it comes in close instead of refusing to turn. Pulling in is immediate and easing back out
+is not (`easeOutRate`), or the view pumps past every railing.
+
+**What it leaves to the game** is every other mode - aiming, scopes, cutscenes, first person, the
+mounted gun, the drive-by. Handing a view over is a short blend each way.
+
+**How far back is its own, and the first build got that wrong in an instructive way.** It learned
+the distance from the game's camera, on the reasoning that VCS already knows how to frame a player
+and a bus. It sat at **2.29** for a whole session on a street where VCS frames the player at 4.5.
+The game's own camera starts every frame from the one the finish hook wrote - the active cam's Source
+reads back within a few centimetres of the matrix - and mode 4 is a camera on a string: it only
+enforces a band, so asked what distance it wants it answers with the one it was handed, and the boot
+load had handed it a close one. A value read back from a system you are driving is your own value.
+
+So on foot the distance is a setting, 4.5 - where VCS sits in the open (4.63 from the player in
+`ULUS10160_1.03_1.ppst`). A vehicle is framed from its collision box, which is the data mode 18
+itself reads (`[[gp+0x18] + model*4] + 0x14`): the pivot at 0.95 of the box's top, and the distance
+`5.0 + 0.65 * length` at the middle zoom level, fitted to the motorbike fixture - a box 1.98 long,
+framed at 6.26 by its own camera - and scaled by 0.8 and 1.35 at the near and far levels Select picks
+(`CCamera+0x798`).
+
+**On foot the game's angles still follow the view.** `CameraYaw = yaw + PI` and a clamped
+`CameraPitch` are written from the finish hook, because they are where the aim camera starts from and
+where the walk direction comes from. Never in a vehicle.
+
+**Vehicles swing back behind the car** a moment after the mouse is left alone, once the vehicle is
+moving (`vehicleRecentre`, the one row on the player's Mouse page). The glance keys look left, right
+and behind relative to the car, and letting go asks for the default view back. Aircraft yaw with Q/E,
+so there the glances stand down.
+
+**Loading a savestate takes the patch away**, and this is handled rather than hoped about: every
+tick the install reads back the magic word, the `jal`, and both hooks. The hooks sit on branch
+targets, which is where the JIT starts a block, so they are read through `Memory::Read_Instruction` -
+the first build read them raw, found a block marker, and reinstalled everything on every tick. A
+state taken WITH the patch brings back a `jal` into a block this session has no record of, and the
+install adopts that block by its magic instead of refusing.
+
+**Testing it needs a look input a script can send**, and there is none - the debugger's analog
+injection goes straight to the PSP stick. So the block takes a look command: write yaw at `+0x30`,
+pitch at `+0x34`, then flags at `+0x2c` (bit 0 yaw, bit 1 pitch) with `memory.write_u32`. The block's
+address is in the install's log line. `VCS_CAM_TRACE=1` in the environment writes one NOTICE line a
+game second with the mode, the game's distance, the wanted, allowed and actual distance, and the hits.
+
+**Measured**, with look commands and `peek` reading CCamera's matrix back:
+
+| where | asked for | camera from the player | hits |
+|---|---|---|---|
+| street, level | pitch -0.1 | 4.57 - 4.60 | 0/5 |
+| street, look up | pitch 0.9 | 1.40, just above the pavement, view 51.6 deg up | 5/5 |
+| street, look up | pitch 1.15 | 1.04, view 65.9 deg up | 5/5 |
+| street, back to level | pitch -0.1 | eased back out to 4.60 | 0/5 |
+| street, look down | pitch -1.2 | 5.06, view 68.8 deg down | 0/5 |
+| interior corner, 16 yaws | full circle | 4.60 away from the walls, 1.87 / 1.30 / 0.72 turning into them | 5/5 at the wall |
+| motorbike, level | - | 6.39, wanting 6.29 against the game's own 6.26 | 0/5 |
+| motorbike, look up | pitch 0.6 | 1.49, low behind the bike | 5/5 |
+| motorbike, look down | pitch -0.9 | 6.80 above and behind | 0/5 |
+
+And the sequences: the view set to the bike's side, throttle held, and 1.5 s after the last command it
+swung round behind - yaw 1.57, 1.46, 0.08, -0.26 against a heading of -0.32, pitch settling to -0.12.
+The bike then ran into two police officers and threw the player off, and the handover to on foot eased
+the distance 5.18, 4.53, 4.50 without a cut. Loading savestate slot 3 on foot reinstalled both hooks
+into a fresh block and took the vehicle view on the next frame.
+
+**Reported from play once it went in: the view showed the inside of the character and of the car.**
+Everything else about it was, in the player's word, perfect - and the cause was the one thing the
+chase camera had not taken over from the game: the near clip plane.
+
+`RwCamera+0x78` (the scene camera is `[gp+0x22c0]`) reads **0.9** - set for a camera VCS keeps four to
+six metres out. The chase camera comes in to a metre or less when the ground or a wall is behind it,
+and anything nearer the lens than 0.9 is not drawn, so the front of the player or the car was cut away
+and the far side seen from inside. In a vehicle a second cause stacked on it: looking up swung the
+camera's position down below the pivot, toward and into the bodywork.
+
+Three changes, in the order they matter:
+
+- **The near plane follows the clearance.** The finish hook works out how far the camera is from the
+  player's body (a capsule, `footBodyRadius` about his axis, feet to just over the head) or the car's
+  collision box, and asks for `clearance * nearClipFactor`, clamped to `nearClipMin` and never above
+  the game's own value that frame. The program calls the game's `RwCameraSetNearClipPlane`
+  (`0x08890798`) with it after the hook returns - a function rather than a write, because the setter
+  resyncs the camera. It lasts one frame by construction: the prologue sets 0.9 at `0x08a227d8` every
+  frame and mode 18's own close-camera lowering at `0x0899f688` runs before the hook too, so the smaller
+  value wins and nothing has to be put back.
+- **In a vehicle the position stops 0.35 rad below the pivot** (`vehicleOrbitUp`). Looking further up
+  tilts the view instead: Front comes from the look pitch, the position and the rays from the capped
+  orbit pitch. **0.08 was tried first and was too tight** - the bike was off the bottom of the screen
+  by a 0.6 look-up. At 0.35 the ground still stops a car's camera ~1.6 past its rear bumper.
+- **A camera that ends up inside anyway is lifted out over the top** (`subjectMargin`): out of the
+  capsule to just over the player's head, or out of the box along world up. The view keeps looking
+  where the player asked. This is the backed-into-a-corner case, which used to leave the camera at the
+  back of the player's neck. **Not yet exercised** - no run so far stood the player in a corner.
+
+Measured on the Release build:
+
+| where | look | camera | clearance | near plane |
+|---|---|---|---|---|
+| on foot, open pavement | level | 4.50 from the pivot | 4.13 | 0.90 (the game's) |
+| on foot, looking up | pitch 1.15 | 1.55, ground behind | 0.29 | **0.17** |
+| motorbike | level | 6.29 | 5.13 | 0.90 |
+| motorbike | pitch 0.3 | 3.31, ground behind | 2.02 | 0.90 |
+| motorbike | pitch 0.6 and 1.0 | 2.88, held at the orbit cap | 1.58 | 0.90 |
+
+On foot looking up, the player's arm and back now read solid from below. On the bike at 0.6 the rider is
+framed against the sky at the bottom of the screen; at 1.0 the bike has slid out of frame, which is the
+San Andreas tilt rather than a camera inside it. The clearance and the near plane are on the Camera tab
+and in the `VCS_CAM_TRACE` line.
+
+**What the old arrangement taught, kept short.** Four builds went into handing the on-foot camera
+back to the game - a fade, a heading target, a learner, an idle hold - and every one landed on the
+same wall: mode 4 has one resting position while walking and another at a standstill, so a handback
+at rest is a value the game will always disagree with. The vehicle pitch runaway was the same shape
+from the other end: a second writer of one field, at a different rate from the game's own. Both are
+arguments for the same design: when the game's camera does the wrong thing with a number you give
+it, stop giving it numbers and replace what it produces.
+
 ### Camera pitch: limits must be anchor-relative, and vehicles are excluded
+
+**Superseded 2026-09-15 for vehicles and aircraft, and for looking around on foot.** Nothing writes
+`CameraPitch` into mode 18 any more: the chase camera replaces that camera's output instead of
+feeding it an angle - see "The chase camera: the view is built, not negotiated". What follows still
+applies to the one path that writes pitch directly, aiming, and it is the record of why the vehicle
+camera could not be driven by its angles.
 
 Two things here were learned expensively.
 
@@ -3342,10 +3457,9 @@ the pause menu and trapped the player in the game. `P` is used for the PSP Start
 - **Direct weapon selection.** `WeaponIndex` now exists, so this is unblocked; it still probably
   wants a memory write rather than a button press, since the PSP only exposes
   cycle-next/cycle-previous.
-- **Vertical look while driving.** ON by default now (`pitchInVehicle`), asserted once per game logic
-  frame. One residual: forcing pitch down through the entry and onward can still run away. See the
-  pitch section above.
-  Unresolved, not abandoned. `InAircraft` is gated by the same setting, for the same reason.
+- **Aircraft under the chase camera.** Helicopters and planes are expected to run camera mode 18 as in
+  Vice City, which is what the chase camera owns - but no aircraft has been flown since it went in. If
+  the view still tips with the nose, the Camera tab's mode readout is the first thing to look at.
 - **Boat-specific bindings.** Boats run the car set on purpose - see the aircraft section - but
   nobody has held each button in one, so "Space does nothing" is inference rather than a
   measurement.
@@ -5497,6 +5611,16 @@ samples. The commit that made the partition conditional already said this; it is
 because the failure does not look like a savestate problem, it looks like whatever else changed in
 that build. **Choose the fixture and `World memory` together, and pass both to the runner** rather
 than inheriting whichever is in the file.
+
+**The vault's world query could also crash a load, at the right partition size.** Measured
+2026-09-15: loading slot 3 at `World memory` 1, on foot, died as `Bad Execution Address` with the PC
+inside the world query's old block and `RA 08000038` - the return of an enqueued call. The vault
+probes nearly every frame on foot, so a request is almost always waiting; `WorldQueryDispatch` sent
+it on the game's first syscall after the load, into whatever the state held at that address, a
+vblank before `InstallWorldQuery` could notice the block had gone. It checks the block's magic before
+enqueueing now. Worth suspecting that the `0x0bffecc0` crash above - top of a 64MB partition, which is
+where that block is allocated - was this too, rather than the partition alone; it has not been re-run
+to find out.
 
 **Mouse look randomises the camera.** `VCSCamera` writes yaw directly, from host state a savestate
 does not restore, so the same slot came back facing a hotel in one run and the downtown skyline in

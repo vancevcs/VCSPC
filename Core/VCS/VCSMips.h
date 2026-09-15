@@ -35,6 +35,9 @@ inline constexpr u32 kRegA1 = 5;
 inline constexpr u32 kRegT0 = 8;
 inline constexpr u32 kRegT1 = 9;
 inline constexpr u32 kRegT2 = 10;
+inline constexpr u32 kRegT3 = 11;
+inline constexpr u32 kRegT4 = 12;
+inline constexpr u32 kRegT5 = 13;
 inline constexpr u32 kRegV0 = 2;
 inline constexpr u32 kRegA2 = 6;
 inline constexpr u32 kRegA3 = 7;
@@ -66,7 +69,13 @@ inline constexpr u32 Addu(u32 rd, u32 rs, u32 rt) {
 }
 inline constexpr u32 Move(u32 rd, u32 rs) { return Addu(rd, rs, kRegZero); }
 inline constexpr u32 Sll(u32 rd, u32 rt, u32 sa) { return (rt << 16) | (rd << 11) | (sa << 6); }
+inline constexpr u32 Lui(u32 rt, u32 imm) { return (0x0fu << 26) | (rt << 16) | (imm & 0xffffu); }
+// Zero-extended, unlike Addiu - which is what lets Lui + Ori load any 32-bit constant.
+inline constexpr u32 Ori(u32 rt, u32 rs, u32 imm) {
+	return (0x0du << 26) | (rs << 21) | (rt << 16) | (imm & 0xffffu);
+}
 inline constexpr u32 Jal(u32 target) { return (0x03u << 26) | ((target >> 2) & 0x03ffffffu); }
+inline constexpr u32 J(u32 target) { return (0x02u << 26) | ((target >> 2) & 0x03ffffffu); }
 inline constexpr u32 Jr(u32 rs) { return (rs << 21) | 0x08; }
 inline constexpr u32 Nop() { return 0; }
 

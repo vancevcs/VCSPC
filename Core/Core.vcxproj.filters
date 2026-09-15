@@ -276,6 +276,9 @@
     <ClCompile Include="VCS\VCSWorld.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
+    <ClCompile Include="VCS\VCSChaseCam.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
     <ClCompile Include="HLE\sceDisplay.cpp">
       <Filter>HLE\Libraries</Filter>
     </ClCompile>
@@ -1618,6 +1621,9 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSWorld.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSChaseCam.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="HLE\sceDisplay.h">

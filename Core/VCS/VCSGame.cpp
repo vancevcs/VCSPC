@@ -30,6 +30,7 @@
 #include "Core/System.h"
 #include "Core/Util/PathUtil.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSRadar.h"
@@ -268,6 +269,7 @@ void Shutdown() {
 	// Put the game's own instruction back before anything else tears down.
 	RemoveFireHook();
 	RemoveClimbSplashHook();
+	RemoveChaseCam();
 	VaultReset();
 	RemoveWorldQuery();
 
@@ -310,6 +312,11 @@ void Tick() {
 	// module loader. It self-guards on already-installed and on finding the expected instruction,
 	// so retrying every tick until the code exists costs a single compare.
 	InstallFireHook();
+
+	// The chase camera's two hooks into the game's camera update, on the same terms: installed once
+	// the code exists, re-checked every tick because a savestate can take them away, and taken back
+	// out when the setting is switched off.
+	InstallChaseCam();
 
 	// The world query, installed on the same terms and for the same reason - it writes a small
 	// program into PSP memory, which cannot happen before there is a game to write it next to.

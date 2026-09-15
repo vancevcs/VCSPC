@@ -232,6 +232,90 @@ inline constexpr u32 kVCSCamSourceOffset = 0x020;
 inline constexpr u32 kVCSCamUpOffset = 0x060;
 inline constexpr u32 kVCSCamFOVOffset = 0x128;
 
+// --- The camera update, and the two points the chase camera takes the view over at ---
+//
+// 0x08a225a4 is the game's per-frame camera update, with $s0 = CCamera. It copies the active
+// CCam's Source, Front and Up into three stack vectors - the prologue fixes the registers:
+//
+//     08a2262c  addiu $fp, $sp, 0x50       Source
+//     08a22630  addiu $s6, $sp, 0x70       Up
+//     08a22634  addiu $s7, $sp, 0x60       Front
+//
+// and every later stage works on those three: CCam::Process's output, the game's own clip, the
+// camera shake. Then it builds CCamera's matrix out of them - +0x00 right, +0x10 Front, +0x20 Up,
+// +0x30 Source - which the frustum, the streamer and the renderer all take from.
+//
+//     08a23a60  lwc1  $f12, 0xb38($s0)     shake strength: the three vectors before shake
+//     ...                                  shake, when +0xb38 > 0
+//     08a23be8  jal   0x08a1a5dc           right = Up x Front, the first read of the final three
+//
+// Both points are on every path. The one branch that jumps ahead in this function (0x08a22c50)
+// lands at 0x08a2399c, which still falls through 0x08a23a60. Read with Tools/vcsstatic.py out of
+// ULUS10160_1.03_2.ppst (on foot) and _3 (on a motorbike), and identical in both.
+inline constexpr u32 kVCSCCamera = 0x08BC7E30;
+inline constexpr u32 kVCSCCameraActiveCamOffset = 0x050;  // u8, which of the cams below is live
+inline constexpr u32 kVCSCCameraCamsOffset = 0x070;       // CCam m_asCams[3]
+inline constexpr u32 kVCSCamStride = 0x260;
+// The vehicle zoom level Select cycles, as a float: read 2.0 on the motorbike fixture. The chase
+// camera watches it only to know when the game's framing changed on purpose.
+inline constexpr u32 kVCSCCameraCarZoomOffset = 0x798;
+inline constexpr u32 kVCSCamPreShake = 0x08A23A60;
+inline constexpr u32 kVCSCamPreShakeOp = 0xC60C0B38;      // lwc1 $f12, 0xb38($s0)
+inline constexpr u32 kVCSCamBasisCall = 0x08A23BE8;
+inline constexpr u32 kVCSCamBasisCallOp = 0x0E286977;     // jal 0x08a1a5dc
+inline constexpr u32 kVCSCamBasisFunc = 0x08A1A5DC;
+// The same function's own camera clip calls ProcessLineOfSight here. Checked before installing,
+// as a fingerprint of the build the two points above were read from.
+inline constexpr u32 kVCSCamClipLosCall = 0x08A23A18;
+inline constexpr u32 kVCSCamClipLosCallOp = 0x0E225E1B;   // jal 0x0889786c
+
+// CWorld::ProcessLineOfSight. Thirteen arguments in this build, and the convention is copied from
+// the camera clip that calls it at 0x08a239dc rather than assumed:
+//
+//     $a0 &start   $a1 &end   $a2 &CColPoint (point at +0x00)   $a3 &CEntity* out
+//     $t0 buildings   $t1 vehicles   $t2 peds   $t3 objects
+//     0($sp) 0   4($sp) 1   8($sp) 1   0xc($sp) 0   0x10($sp) 0      -> $v0 hit
+//
+// The on-foot camera (mode 4) calls it with buildings alone and all five stack words zero, at
+// 0x0899e2bc. Both callers leave 0x20 bytes for the colpoint.
+inline constexpr u32 kVCSProcessLineOfSight = 0x0889786C;
+
+// Camera modes as CCam+0x00 holds them. The jump table at 0x08b7ed88 is indexed by mode - 1: mode 4
+// runs 0x0899dfe4 and modes 18 and 22 both run 0x0899f9ec. Measured: 4 on foot, 18 on a motorbike.
+// Aircraft are expected on 18 as in Vice City, and are not measured.
+inline constexpr u16 kVCSCamModeFollowPed = 4;
+inline constexpr u16 kVCSCamModeOnAString = 18;
+inline constexpr u16 kVCSCamModeBehindBoat = 22;
+
+// A vehicle's collision model, which is where mode 18 gets its idea of the car's size from:
+// [[gp + 0x18] + model * 4] is the model info (0x0899fb0c), +0x14 its collision model (0x0899fb1c),
+// and the camera code reads the box's max.z and |min.y| out of that (0x0899fcec). On the motorbike:
+// sphere (0.001, -0.219, 0.165) r 1.40, box min (-0.35, -1.21, -0.61), max (0.35, 0.77, 0.67) - and
+// the game's own look-at sat 0.64 above the bike, which is 0.95 of max.z.
+inline constexpr u32 kVCSModelInfoTablePtr = 0x08BB1D78;  // gp + 0x18
+inline constexpr u32 kVCSModelInfoColModelOffset = 0x14;
+inline constexpr u32 kVCSColModelBoxMinOffset = 0x10;
+inline constexpr u32 kVCSColModelBoxMaxOffset = 0x20;
+
+// An entity's matrix rows: +0x00 right, +0x10 forward, +0x20 up, +0x30 position. Forward checked on
+// the motorbike fixture, where it pointed along the bike and the camera sat behind it.
+inline constexpr u32 kVCSEntityRightOffset = 0x00;
+inline constexpr u32 kVCSEntityForwardOffset = 0x10;
+inline constexpr u32 kVCSEntityUpOffset = 0x20;
+
+// The RenderWare camera the world is drawn through - [gp + 0x22c0], 0x09a28c00 in both fixtures - and
+// RwCameraSetNearClipPlane, which stores +0x78 and resyncs the camera. The near plane reads 0.9 there,
+// tuned for a camera four metres out: the chase camera comes in far closer, and 0.9 then slices
+// through the player's body and the car's panels.
+//
+// The camera update calls the setter with 0.9 in its prologue every frame (0x08a227d8), and mode 18
+// lowers it when its OWN camera is within 1.2 of the car (0x0899f688, max(d - 0.3, 0.05)). Both run
+// before 0x08a23be8, so a value set from the chase camera's program lasts exactly the frame it is for.
+inline constexpr u32 kVCSSceneCameraPtr = 0x08BB4020;
+inline constexpr u32 kVCSRwCameraNearOffset = 0x78;
+inline constexpr u32 kVCSRwCameraSetNearClip = 0x08890798;
+inline constexpr u32 kVCSRwCameraSetNearClipOp = 0xE60C0078;  // +0x14: swc1 $f12, 0x78($s0)
+
 // The weapon's range, which is what the length of a redirected shot ray has to be.
 //
 // CWeaponInfo::GetWeaponInfo is 0x08b1fd70, and it is three instructions:
