@@ -127,13 +127,7 @@ static bool PlayerPosition(Vec3 *out) {
 //
 // Nothing here is reconstructed from an angle, which is the point - see the long note in the
 // header for why the reconstruction was 4.42 degrees out and why that error moved.
-static bool CameraRay(Vec3 *source, Vec3 *dir, VCSFireHookTrace *trace) {
-	Vec3 front, up, camPos;
-	if (!ReadVec3(kVCSCam0 + kVCSCamFrontOffset, &front) ||
-	    !ReadVec3(kVCSCam0 + kVCSCamUpOffset, &up) ||
-	    !ReadVec3(kVCSCam0 + kVCSCamSourceOffset, &camPos)) {
-		return false;
-	}
+static bool CrosshairRay(Vec3 front, Vec3 up, float *fovOut, Vec3 *dir) {
 	// A stale or half-written basis is a real possibility during a camera transition, and the
 	// cheapest way to reject one is that it is no longer a unit vector.
 	if (!Normalise(&front) || !Normalise(&up))
@@ -166,9 +160,28 @@ static bool CameraRay(Vec3 *source, Vec3 *dir, VCSFireHookTrace *trace) {
 		d = Vec3{d.x * ca - d.y * sa, d.x * sa + d.y * ca, d.z};
 	}
 
+	*fovOut = fov;
+	*dir = d;
+	return true;
+}
+
+static bool CameraRay(Vec3 *source, Vec3 *dir, VCSFireHookTrace *trace) {
+	Vec3 front, up, camPos;
+	if (!ReadVec3(kVCSCam0 + kVCSCamFrontOffset, &front) ||
+	    !ReadVec3(kVCSCam0 + kVCSCamUpOffset, &up) ||
+	    !ReadVec3(kVCSCam0 + kVCSCamSourceOffset, &camPos)) {
+		return false;
+	}
+	float fov = 0.0f;
+	Vec3 d;
+	if (!CrosshairRay(front, up, &fov, &d))
+		return false;
+
 	*source = camPos;
 	*dir = d;
 	if (trace) {
+		Normalise(&front);
+		Normalise(&up);
 		trace->haveBasis = true;
 		StoreVec3(trace->front, front);
 		StoreVec3(trace->up, up);
@@ -183,6 +196,27 @@ bool SolveAimRay(float origin[3], float dir[3]) {
 	if (!CameraRay(&source, &d, nullptr))
 		return false;
 	StoreVec3(origin, source);
+	StoreVec3(dir, d);
+	return true;
+}
+
+bool SolveAimRayAlong(const float frontIn[3], float origin[3], float dir[3]) {
+	Vec3 camPos;
+	if (!ReadVec3(kVCSCam0 + kVCSCamSourceOffset, &camPos))
+		return false;
+	Vec3 front{frontIn[0], frontIn[1], frontIn[2]};
+	if (!Normalise(&front))
+		return false;
+	// Up for a camera with no roll: world Z with Front's share taken out. It only matters when
+	// crosshairX/Y are off centre, and building it here keeps this ray free of anything the game
+	// derived from the Front it exists to replace. Straight up or down leaves nothing to normalise,
+	// and CrosshairRay refuses it - the caller falls back to the live ray for that frame.
+	const Vec3 up{-front.z * front.x, -front.z * front.y, 1.0f - front.z * front.z};
+	float fov = 0.0f;
+	Vec3 d;
+	if (!CrosshairRay(front, up, &fov, &d))
+		return false;
+	StoreVec3(origin, camPos);
 	StoreVec3(dir, d);
 	return true;
 }

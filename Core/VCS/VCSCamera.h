@@ -704,7 +704,17 @@ struct VCSCameraSettings {
 	// Too small and the delay comes back; too large and the aim overshoots slightly before settling,
 	// because the lead is larger than the gap it is cancelling. Set to 0 to go back to driving
 	// CameraPitch directly.
-	float aimPitchDeadband = 0.165f;
+	//
+	// ZERO NOW, and the paragraph above is a correct measurement of the wrong thing. Read out of the
+	// game on 2026-09-15: there is no deadband. While the ped has a gun target, the free-aim camera
+	// turns Beta and Alpha toward the angles that frame that target by at most [gp-0x3584] * TimeStep
+	// = 0.1 * 1.668 = 0.1668 rad a frame (0x0899d14c..0x0899d278). The "9.4 degrees" is that rate:
+	// with the target left behind, every write is stepped back toward it by exactly one rate. The
+	// lead only ever worked by dragging the edge of that step across a stale target - and it is the
+	// pitch half of the drift, since a lead parked on the side the target walks toward gets crossed.
+	// With the target placed along the asserted aim (AimIntentRay) the step never binds, and a lead
+	// is simply an offset. Kept switchable, not deleted, so the measurement above stays readable.
+	float aimPitchDeadband = 0.0f;
 
 	// ZERO, settled in play, and the most useful negative result of the lot: YAW DOES NOT NEED THE
 	// LEAD. Only pitch does.
@@ -754,7 +764,16 @@ struct VCSCameraSettings {
 	// crossing in the middle of a steady stroke.
 	//
 	// Set to 0 to go back to driving CameraYaw with the plain accumulator.
-	float aimYawKick = 0.166f;
+	//
+	// ZERO NOW. The 9.56 degrees is real and it is not stiction: it is the free-aim camera's turn rate
+	// toward the gun target, 0.1 * TimeStep a frame - see aimPitchDeadband for the addresses. And the
+	// kick was the yaw half of the reported drift, measured with the drift trace on 2026-09-15: the
+	// camera chases its own crosshair offset in one direction only, so a kick parked on the far side
+	// of a rightward stroke was crossed, a full window, after the mouse had stopped - while after a
+	// leftward stroke the chase was already pinned against it, which is why left always felt right.
+	// The target is placed along the asserted aim now (AimIntentRay), the rate never binds, and there
+	// is nothing left for a kick to break loose.
+	float aimYawKick = 0.0f;
 
 	// How far, in radians of intent, the mouse must travel AGAINST the current lead before it moves
 	// to the other side.

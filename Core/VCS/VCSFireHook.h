@@ -100,6 +100,11 @@ const VCSFireHookTrace &FireHookLastTrace();
 // than aim at a default. Emu thread only.
 bool SolveAimRay(float origin[3], float dir[3]);
 
+// The same ray, built from a forward vector the caller supplies instead of the camera's live one.
+// For placing the gun's aim point along where the player is ASKING to aim - see AimIntentRay in
+// VCSCamera.cpp for why the live Front cannot be used for that. Emu thread only.
+bool SolveAimRayAlong(const float front[3], float origin[3], float dir[3]);
+
 struct VCSFireHookSettings {
 	// ON. It was opt-in while the shot direction was still wrong often enough to matter; it is the
 	// whole feature now, and having to tick it every session was pure friction.

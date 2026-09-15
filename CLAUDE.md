@@ -1442,10 +1442,70 @@ written again. The buttonless check is what keeps it from firing mid-drag on a v
   | vertical | a deadband lead on pitch, because the aim camera will not move until the angle leads it |
 
   **The settled configuration**, which is now the default: crosshair 0.5/0.5, yaw trim 0,
-  camera-origin ray on, weapon range on, `aimPitchDeadband` **0.165**, `aimYawKick` **0.166**,
+  camera-origin ray on, weapon range on, `aimPitchDeadband` **0**, `aimYawKick` **0**,
   `aimYawDeadband` **0**, everything else off. `pedFollowAim` off - the game turns the character
-  itself. The `vertical` row above is now only half the story: both axes stall, and each gets its
-  lead by a different route - see the section below for why the difference is structural.
+  itself. The `vertical` row above is superseded: neither axis stalls once the gun target is placed
+  along the asserted aim - see "There was never a deadband" below. Until 2026-09-15 this line read
+  0.165 and 0.166, and those two leads were the rightward free-aim drift.
+
+### There was never a deadband: the free-aim camera turns toward the gun target
+
+**Status: fixed 2026-09-15, confirmed in play. Supersedes the three sections below** - the deadband
+lead, the yaw kick and every argument about stiction. They are kept because the measurements in them
+are real; what they measured was this.
+
+Reported as "software stick drift": after a flick, an aim press or a shot, the crosshair went on moving
+with the mouse still - and narrowed down in play to **strokes to the right, never to the left**. A
+temporary per-game-frame recorder in `CameraTick` settled it in one session. In every one of fourteen
+captures the game's `CameraYaw` sat within **±0.1669 rad** of the value we wrote: exactly that far
+behind the lever while a stroke was moving, pinned at that distance after a leftward stroke, and after
+a rightward one walking the whole window - up to 19 degrees - before stopping at the far edge.
+
+**The mechanism, read out of the game.** While the ped has a gun target (`CPed+0x81C`, which in free
+aim is always the placeholder `pedAimGun` moves), the free-aim camera does not integrate a look axis at
+all. Around `0x0899cd10` it works out the yaw and pitch that frame the target, adds the crosshair
+offsets (`0x0899d0e8`), and at `0x0899d14c..0x0899d278` turns Beta and Alpha toward the result by at
+most `[gp-0x3584] * TimeStep` - **0.1 * 1.668 = 0.1668 rad a frame**. That rate is the "9.5 degree
+deadband": we write the angle, the game steps back toward the target by up to one rate.
+
+`PedAimGunTick` put the target down the camera's **live Front**, which closed a loop through that step.
+The game turns by the crosshair offset to frame the target, Front turns with it, the target moves with
+Front, and the game turns again - until the step hits the edge of the window around our write. The
+offsets have a fixed sign, so the walk only ever went one way. The yaw kick decided how much of the
+window was left to walk: after a rightward stroke it was parked on the far side, after a leftward one
+the walk was already at its end. Pitch did the same through its own lead.
+
+**The fix is to break the loop, not to tune anything:**
+
+- `AimIntentRay` builds the target's ray from the angles this tick asserted rather than from the live
+  Front, so nothing the game does can move the target. Front is exactly
+  `(cos(Beta - PI), sin(Beta - PI)) * cos(Alpha), sin(Alpha)` - the recorder read `frontYaw == CameraYaw
+  - PI` and `frontPitch == CameraPitch` to four decimals. `SolveAimRayAlong` reuses the fire hook's
+  crosshair maths on that vector. Mounted guns keep the live ray: there `CameraYaw` is an offset from
+  the vehicle's nose, and the attached branch never reads the target.
+- `aimYawKick` and `aimPitchDeadband` are 0. With the target where the aim is, the step never binds,
+  and a lead is only an offset.
+- Free aim is asserted from its first frame - a zero-length stroke on entering Aiming, re-taken once if
+  the camera mode changes before the mouse moves - and the hold is parked for as long as aim is held.
+  Both close the gaps where nothing was asserted and the target fell back onto the live camera.
+
+Verified from the fixed session's capture, not only by feel: every still period starts within 0.04 rad
+of the lever and settles to within 0.02, with no walk in either direction.
+
+**The lesson is the one this file keeps recording, one level further in.** Every measurement of the
+"deadband" was correct: 9.4 degrees on pitch, 9.56 on yaw, symmetric, "releasing the instant the view
+breaks loose", "Front moved one deadband while the camera angle moved two". So were the contradictory
+readings - "converges onto the lever" and "a held lead is perfect" - because they were the two
+directions of one walk. What was never done was reading the code that consumes `CameraYaw` in this
+mode. It had been assumed to be mode 45's `Process`, whose unattached path builds Front straight from
+Beta and Alpha and has no deadband in it at all. **When a fitted model needs a new setting every few
+builds, stop fitting and find the code.** Reading the code that writes the field, and whatever it
+reads alongside it, took a morning.
+
+A tooling note: the camera-mode jump table at `0x08b7ed88` holds eight-instruction stubs rather than
+functions, each with its `jal` at +0x10, and the stub a mode index lands on is not obviously the one
+you would pick by counting. Scanning RAM for writes to `+0x7c` near reads of `+0x81c` found the right
+function without resolving the table at all.
 
 ### Both axes need a deadband lead. Only one of them survives being given it closed-loop
 

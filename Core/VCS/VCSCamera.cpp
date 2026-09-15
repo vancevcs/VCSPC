@@ -1538,8 +1538,34 @@ void CameraTick(VCSInputContext context) {
 	// moving, it just accumulates. Tried, and it made aiming unusable.
 	//
 	// Whatever fixes the snap has to retract the lead ONCE, not re-apply it in a loop.
-	if (dx != 0.0f || (dy != 0.0f && havePitch)) {
+	// Free aim is asserted from its first frame, not from the first mouse count - the RMB half of the
+	// drift. With nothing asserted, the gun's aim point comes off the live camera (see AimIntentRay),
+	// which is exactly the loop that walks the view, so pressing aim and leaving the mouse alone walked
+	// it as well. A zero-length stroke anchors to wherever the game has the camera and starts the hold;
+	// with no step and no kick in it, it writes back exactly what it read.
+	//
+	// Re-taken once if the camera MODE changes before the mouse has moved. Pressing aim hands the
+	// follow camera to the aim camera over a couple of frames - measured in the trace: mode 4 to 11,
+	// yaw moving 0.1 rad across two frames - and an anchor taken mid-handover would hold the view
+	// where the old camera left it.
+	static bool s_aimAnchorOnly = false;
+	static u32 s_aimAnchorCamMode = 0;
+	const std::optional<u32> camModeNow = ReadAddrAsU32(VCSAddr::CamMode);
+	if (context == VCSInputContext::Aiming && s_aimAnchorOnly && g_holdFrames > 0 &&
+			camModeNow && *camModeNow != s_aimAnchorCamMode) {
+		g_holdFrames = 0;
+	}
+	const bool aimAnchor = context == VCSInputContext::Aiming && g_holdFrames == 0 &&
+		g_releaseFrames == 0;
+	if (dx != 0.0f || (dy != 0.0f && havePitch) || aimAnchor) {
+		if (dx != 0.0f || dy != 0.0f) {
+			s_aimAnchorOnly = false;
+		}
 		if (g_holdFrames == 0) {
+			if (dx == 0.0f && dy == 0.0f) {
+				s_aimAnchorOnly = true;
+				s_aimAnchorCamMode = camModeNow.value_or(0);
+			}
 			// Starting a fresh look - anchor to wherever the game currently has the camera, so
 			// we never snap from a stale value.
 			//
@@ -2031,6 +2057,11 @@ void CameraTick(VCSInputContext context) {
 				context == VCSInputContext::InVehicle && GlanceButtonMask(context) != 0;
 			if (glanceRecentre) {
 				g_parkedReason = nullptr;
+			} else if (context == VCSInputContext::Aiming) {
+				// Never handed back while aim is held, whatever returnLook says. The moment this stops
+				// asserting, the gun's aim point comes off the live camera again - see AimIntentRay -
+				// and that is the loop that walks the view.
+				g_parkedReason = "aim is held";
 			} else if (!g_settings.returnLook) {
 				g_parkedReason = "the return is switched off";
 			} else if (g_settings.holdUntilMoving && context == VCSInputContext::OnFoot &&
@@ -2162,6 +2193,48 @@ static bool CanMoveAimTarget(int type) {
 	       type != kVCSEntityTypeBuilding && type != 0;
 }
 
+// Where to put the gun's aim point: along the aim the player has ASKED for, not along the camera's
+// live Front. This is the whole of the free-aim drift.
+//
+// Measured with the drift trace on 2026-09-15, then read out of the game. While the ped has a gun
+// target - and in free aim it always has, the placeholder this file moves - the free-aim camera does
+// not integrate anything. Every game frame it works out the angles that would frame that target,
+// adds the crosshair offsets to them (0x0899d0e8), and turns Beta and Alpha toward the result by at
+// most [gp-0x3584] * TimeStep = 0.1 * 1.668 = 0.1668 rad (0x0899d14c..0x0899d278). That rate is the
+// "9.5 degree deadband" the yaw kick and the pitch lead were built for: in every capture the game's
+// angle sat exactly 0.1668 from the one we wrote, on whichever side the target was.
+//
+// Put the target down the live Front and a loop closes through that step. The game turns by the
+// crosshair offset to frame the target, Front turns with it, the target moves with Front, and the
+// game turns again - a walk that only stops at the far edge of the 0.1668 window. The offsets have a
+// fixed sign, so it only ever walks one way: right, never left, in all fourteen captures. A rightward
+// stroke left the kick parked on the far side, so the walk crossed the whole window - up to 19
+// degrees - after the mouse had stopped. A leftward one left the walk already pinned at its end.
+//
+// Built from the angles this tick asserted, nothing the game does can move the target, so there is
+// no loop: the game lands within one frame on the intent plus a small constant (the crosshair offset,
+// and parallax between the camera and the point the game measures from) and stays there. Front is
+// exactly (cos(Beta - PI), sin(Beta - PI)) * cos(Alpha), sin(Alpha): the trace read frontYaw ==
+// CameraYaw - PI and frontPitch == CameraPitch to four decimals.
+//
+// Only on ticks that asserted both angles. Before the first assert, mid-handback, and on a mounted gun
+// - where CameraYaw is an offset from the vehicle's nose rather than a heading, and the camera's
+// attached branch never reads the target - the live ray is the one to use.
+static bool AimIntentRay(float origin[3], float dir[3]) {
+	if (!g_driving || g_wasAttachedGun || !g_haveAnchorPitch || g_releaseFrames > 0) {
+		return false;
+	}
+	const float yaw = g_desiredYaw - kTwoPi * 0.5f;
+	const float cosPitch = std::cos(g_desiredPitch);
+	const float front[3] = { std::cos(yaw) * cosPitch, std::sin(yaw) * cosPitch, std::sin(g_desiredPitch) };
+	static bool announced = false;
+	if (!announced) {
+		announced = true;
+		NOTICE_LOG(Log::System, "VCS: the gun's aim point is placed along the asserted aim, not the live camera");
+	}
+	return SolveAimRayAlong(front, origin, dir);
+}
+
 static void PedAimGunTick() {
 	g_pedGunTarget = 0;
 	g_pedGunTargetType = -1;
@@ -2181,10 +2254,10 @@ static void PedAimGunTick() {
 	if (!CanMoveAimTarget(g_pedGunTargetType))
 		return;
 
-	// The same ray the bullet takes, deliberately - see SolveAimRay. Two separate solves would
-	// drift, and a gun pointing somewhere other than the shot is the failure this started from.
+	// The crosshair ray the bullet takes - but built along the aim we assert rather than the live
+	// Front, wherever that is possible. See AimIntentRay: the live Front here is the drift.
 	float origin[3], dir[3];
-	if (!SolveAimRay(origin, dir))
+	if (!AimIntentRay(origin, dir) && !SolveAimRay(origin, dir))
 		return;
 
 	const float d = g_settings.pedAimGunDistance;
