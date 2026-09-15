@@ -66,6 +66,7 @@ SDLJoystick *joystick = NULL;
 #include "Core/Core.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
+#include "Core/VCS/VCSGame.h"
 #include "SDLGLGraphicsContext.h"
 #include "SDLUtil.h"
 
@@ -836,6 +837,11 @@ bool System_MakeRequest(SystemRequestType type, int requestId, const std::string
 	{
 		std::lock_guard<std::mutex> guard(g_mutexWindow);
 		const char *app_name = System_GetPropertyBool(SYSPROP_APP_GOLD) ? "PPSSPP Gold" : "PPSSPP";
+		// Fork-specific: the game's name rather than the emulator's, for the moment before the
+		// title has been read off the disc - the same as the Windows build.
+		if (VCS::PresentAsGame()) {
+			app_name = "Grand Theft Auto: Vice City Stories";
+		}
 		g_windowState.title = param1.empty() ? app_name : param1;
 		g_windowState.update = true;
 		return true;
@@ -2050,8 +2056,20 @@ int main(int argc, char *argv[]) {
 	SDL_GetWindowSizeInPixels(window, &initialPixelWidth, &initialPixelHeight);
 	Native_UpdateScreenScale(initialPixelWidth, initialPixelHeight, UIScaleFactorToMultiplier(g_Config.iUIScaleFactor));
 
-	SDL_SetWindowTitle(window, (app_name_nice + " " + PPSSPP_GIT_VERSION).c_str());
+	// Fork-specific: in the game build the window belongs to the game, as it does on Windows.
+	if (VCS::PresentAsGame()) {
+		SDL_SetWindowTitle(window, "Grand Theft Auto: Vice City Stories");
+	} else {
+		SDL_SetWindowTitle(window, (app_name_nice + " " + PPSSPP_GIT_VERSION).c_str());
+	}
 
+#if PPSSPP_PLATFORM(MAC)
+	// On macOS the window icon IS the Dock icon, and setting one replaces the bundle's - which in the
+	// game build is the game's.
+	const bool setWindowIcon = !VCS::IsGameBuild();
+#else
+	const bool setWindowIcon = true;
+#endif
 	char iconPath[PATH_MAX];
 #if defined(ASSETS_DIR)
 	snprintf(iconPath, PATH_MAX, "%sui_images/icon.png", ASSETS_DIR);
@@ -2062,7 +2080,7 @@ int main(int argc, char *argv[]) {
 #endif
 	int width = 0, height = 0;
 	unsigned char *imageData;
-	if (pngLoad(iconPath, &width, &height, &imageData) == 1) {
+	if (setWindowIcon && pngLoad(iconPath, &width, &height, &imageData) == 1) {
 		SDL_Surface *surface = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_RGBA32);
 		if (surface) {
 			if (surface->pitch == width * 4) {

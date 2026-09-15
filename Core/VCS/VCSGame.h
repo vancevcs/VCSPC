@@ -20,6 +20,7 @@
 #include <string>
 
 #include "Common/CommonTypes.h"
+#include "Common/File/Path.h"
 // For kVCSVolumeMax, which is the range the two volume settings below are expressed in.
 #include "Core/VCS/VCSAddresses.h"
 
@@ -94,6 +95,11 @@ bool PresentAsGame();
 // put those on the only screen they have to use, purely because it has not been told where their
 // disc is yet. Measured on a packaged build: the first screen offered a Debug menu.
 bool IsGameBuild();
+
+// The folder the player put the game in, which is where a disc image and the memory stick are
+// looked for. On Windows that is the exe's own folder, as it always was. On macOS the executable
+// sits inside its .app bundle, and the folder the player can see is the one holding the bundle.
+const Path &GameFolder();
 
 // Presentation settings this module owns, as opposed to the ones that belong to a mechanic.
 //

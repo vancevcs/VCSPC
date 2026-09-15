@@ -1628,13 +1628,15 @@ UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending) {
 // the second run goes straight to the disc through GamePath above and never reaches this.
 static Path DiscBesideExe() {
 	std::vector<File::FileInfo> files;
-	if (!File::GetFilesInDir(File::GetExeDirectory(), &files, "iso:cso:chd:pbp:")) {
+	if (!File::GetFilesInDir(VCS::GameFolder(), &files, "iso:cso:chd:pbp:")) {
 		return Path();
 	}
 	Path found;
 	int count = 0;
 	for (const File::FileInfo &f : files) {
-		if (f.isDirectory) {
+		// GetFilesInDir lets a file with no extension past any filter. On macOS the exe directory
+		// is the bundle's Contents/MacOS, where the one such file is the executable itself.
+		if (f.isDirectory || f.fullName.GetFileExtension().empty()) {
 			continue;
 		}
 		if (++count > 1) {
@@ -1655,7 +1657,7 @@ static const char *kArchiveExtensions[] = { ".7z", ".zip", ".rar", ".gz", ".tar"
 
 static std::string ArchiveBesideExe() {
 	std::vector<File::FileInfo> files;
-	if (!File::GetFilesInDir(File::GetExeDirectory(), &files)) {
+	if (!File::GetFilesInDir(VCS::GameFolder(), &files)) {
 		return std::string();
 	}
 	for (const File::FileInfo &f : files) {
