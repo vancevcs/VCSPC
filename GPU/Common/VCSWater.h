@@ -367,6 +367,10 @@ void DryNow();
 void Init();
 void Shutdown();
 
+// Releases the GPU objects and nothing else, for when the draw context is going away. Each one is
+// created on first use, so a restored device simply builds them again.
+void DeviceLost();
+
 // Per-host-frame. Publishes last frame's counts, rebuilds the road mask if the camera has moved
 // far enough to need it, and flushes the probe. Renders nothing.
 void BeginFrame(Draw::DrawContext *draw);

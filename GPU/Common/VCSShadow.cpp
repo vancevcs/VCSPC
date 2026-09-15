@@ -3174,6 +3174,13 @@ void Shutdown() {
 	s_blobCandidateCount = 0;
 }
 
+void DeviceLost() {
+	ReleaseResources();
+	ReleaseMaskResources();
+	ReleaseCompositeResources();
+	ReleaseCutoutResources();
+}
+
 void BeginFrame(Draw::DrawContext *draw) {
 	if (!g_active) {
 		return;

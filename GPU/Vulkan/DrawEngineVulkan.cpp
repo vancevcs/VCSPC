@@ -139,6 +139,11 @@ void DrawEngineVulkan::DestroyDeviceObjects() {
 void DrawEngineVulkan::DeviceLost() {
 	DestroyDeviceObjects();
 	DirtyAllUBOs();
+	// Fork-specific: the VCS passes own pipelines and framebuffers too, and they have to go now,
+	// while the Vulkan context still exists. Left to the destructor, the SDL build released them
+	// after it had deleted the context, into a delete queue that was already freed - the crash on quit.
+	VCSShadow::DeviceLost();
+	VCSWater::DeviceLost();
 	draw_ = nullptr;
 }
 

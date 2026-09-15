@@ -2361,6 +2361,12 @@ void Shutdown() {
 	memset(&s_published, 0, sizeof(s_published));
 }
 
+void DeviceLost() {
+	ReleasePipelines();
+	ReleaseSizedResources();
+	ReleaseRoadTexture();
+}
+
 // The lag between rain and wet roads, and the step that skips it.
 //
 // Linear rather than exponential on purpose: "thirty seconds to soak" is a sentence a player can

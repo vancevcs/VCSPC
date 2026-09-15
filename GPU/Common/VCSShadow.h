@@ -646,6 +646,10 @@ bool IsEnabled();
 void Init();
 void Shutdown();
 
+// Releases the GPU objects and nothing else, for when the draw context is going away. Each one is
+// created on first use, so a restored device simply builds them again.
+void DeviceLost();
+
 // Per-frame publish and reset. Nothing renders from here.
 //
 // An earlier version DID render from here, against the frame that had just ended, to keep the
