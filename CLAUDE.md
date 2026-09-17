@@ -3953,6 +3953,25 @@ afternoon later. An earlier version of this note said the opposite, on the stren
 samples that all happened to fall within half an hour of game time. A constant is not established
 by measuring it repeatedly at the same moment.
 
+**Only channel 0 is the sun, and the street lamps are why.** Reported as some palm trees behaving
+strangely while driving from about 21:00 until morning. VCS lights the things that move with its
+time-of-day directional on channel 0, and near street lamps it adds per-object directionals on
+channels 1-3, each pointing from its lamp to that object - full white, a different direction for every
+object, sweeping as you ride past. The pick took the brightest light, so after dark a lamp beat the
+dim moon and every shadow swung towards the nearest lamp; the palms along the road showed it most. A
+temporary jump log on a night ride settled it: 35 jumps in about twenty seconds, every one to channel 1
+or 2, while channel 0 held the setting sun and then the moon. The other channels are still recorded
+for the Shadows tab; they just never win.
+
+**The sunset swap is eased rather than snapped.** When the sun sinks under the horizon it is replaced
+by the mirrored moon, lifted to 0.35 - the same log measured that as a 16-degree jump in one frame -
+and the strength changed from the sun's luminance to `moonStrength` in that frame too. The game also
+moves its sun in 2.7-degree steps every half second at dusk. `TurnTowardsSun` turns the cast direction
+towards the pick at 8 degrees a second, which keeps up with the game's 5.4, and `EaseShadowStrength`
+moves the strength at 0.35 a second. A change over 60 degrees - a save loaded at another hour - still
+snaps. Both log when they act. Confirmed in play, along with the lamp fix above: the palms hold still
+at night and sunset no longer jumps. The jump log that found both was temporary and is gone.
+
 #### Three things the first working version got wrong
 
 Reported from play, and each one is a different kind of mistake.
@@ -4426,6 +4445,7 @@ to recognise it first. Off means no sprites as well - that was the decision, not
 | `00000000f695bda8ad66d582` | 64x64 | `Misc/vcs_no_shadow_64x64.png` - a soft noisy square |
 | `00000000122f0bca04a78a03` | 64x64 | `Misc/vcs_no_shadow_64x64.png` |
 | `00000000f5df92ec0336c0b3` | 128x128 | `Misc/vcs_no_shadow_128x128.png` - the car's |
+| `0000000022d2a1e9eb997d9a` | 128x128 | `Misc/vcs_no_shadow_128x128.png` - the motorcycle's |
 
 The car's was the one no scan of the dump could find, because it was never dumped: the pack already
 mapped it, to `Particles/00000000f5df92ec0336c0b3.dds`, filed among the particles. It was found with
@@ -4433,6 +4453,8 @@ the Debug build's ImGui **Textures** window, which the fork extends to list only
 last couple of frames (with a size cap) and to show the selected one's key as `textures.ini` spells it,
 with Copy key and Copy as empty buttons. Stand next to the thing, filter, click - that is the tool for
 the next one of these. Its empty PNG matches the size of the replacement it displaces, 128x128.
+The motorcycle's was the same case - `Particles/0000000022d2a1e9eb997d9a.dds`, also 128x128 - and
+was found in play the same way.
 
 The last three were picked by eye in play from a gallery of every transparent texture in the dump,
 which is the fastest way to finish this list: a page of checkerboard cards, sprite-like ones first,

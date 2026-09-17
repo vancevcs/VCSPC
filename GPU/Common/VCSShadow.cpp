@@ -552,6 +552,97 @@ static float s_heldSunDiffuse[3];
 static bool s_heldSunIsMoon;
 static int s_framesOnHeldSun;
 
+// At sunset the game's light sinks below the horizon and the pick swaps it for the mirrored moon,
+// lifted to at least 0.35 - measured as a 16-degree jump in one frame, with every shadow on screen
+// swinging through it, and sunrise is the same jump backwards. The game also moves its sun in steps
+// of about 2.7 degrees every half second at dusk. So the direction the shadows are cast along turns
+// towards the pick at a limited rate instead of snapping to it. A change too big for the clock to
+// have made - a save loaded at another hour - still snaps, rather than sweeping across the sky.
+static const float kSunTurnDegreesPerSecond = 8.0f;
+static const float kSunSnapDegrees = 60.0f;
+static bool s_haveSmoothSun;
+static float s_smoothSunDir[3];
+static double s_lastSunTurnTime;
+
+static void TurnTowardsSun(float dir[3]) {
+	const double now = time_now_d();
+	float dt = s_lastSunTurnTime > 0.0 ? (float)(now - s_lastSunTurnTime) : 0.0f;
+	s_lastSunTurnTime = now;
+	// A load, a pause or a breakpoint leaves an arbitrary gap, and letting it through would snap.
+	if (dt < 0.0f) dt = 0.0f;
+	if (dt > 0.25f) dt = 0.25f;
+
+	static const float kRadians = 3.14159265f / 180.0f;
+	float cosAngle = 1.0f;
+	if (s_haveSmoothSun) {
+		cosAngle = s_smoothSunDir[0] * dir[0] + s_smoothSunDir[1] * dir[1] + s_smoothSunDir[2] * dir[2];
+		if (cosAngle > 1.0f) cosAngle = 1.0f;
+		if (cosAngle < -1.0f) cosAngle = -1.0f;
+	}
+	const float angle = acosf(cosAngle);
+	const float maxStep = kSunTurnDegreesPerSecond * kRadians * dt;
+
+	// Said when a turn starts and when a change is snapped, so a log shows the transition happened
+	// the way it was meant to rather than leaving that to a screenshot.
+	static bool s_turning = false;
+	static int s_turnLogs = 0;
+	if (!s_haveSmoothSun || angle <= maxStep || angle > kSunSnapDegrees * kRadians) {
+		if (s_haveSmoothSun && angle > kSunSnapDegrees * kRadians && s_turnLogs < 32) {
+			s_turnLogs++;
+			NOTICE_LOG(Log::G3D, "VCS shadows: the sun moved %.0f degrees at once - snapped rather than turned", angle / kRadians);
+		}
+		memcpy(s_smoothSunDir, dir, sizeof(s_smoothSunDir));
+		s_haveSmoothSun = true;
+		s_turning = false;
+		return;
+	}
+	if (!s_turning && angle > 3.0f * kRadians && s_turnLogs < 32) {
+		s_turnLogs++;
+		NOTICE_LOG(Log::G3D, "VCS shadows: turning the shadows through %.1f degrees over %.1f s instead of jumping",
+			angle / kRadians, angle / (kSunTurnDegreesPerSecond * kRadians));
+	}
+	s_turning = true;
+
+	// Spherical interpolation by a fixed angle, so the rate is the same however far there is to go.
+	const float t = maxStep / angle;
+	const float sinAngle = sinf(angle);
+	const float a = sinf((1.0f - t) * angle) / sinAngle;
+	const float b = sinf(t * angle) / sinAngle;
+	for (int c = 0; c < 3; c++) {
+		s_smoothSunDir[c] = a * s_smoothSunDir[c] + b * dir[c];
+	}
+	Normalize(s_smoothSunDir);
+	memcpy(dir, s_smoothSunDir, sizeof(s_smoothSunDir));
+}
+
+// The strength has the same seam: the sun's is its own brightness and the moon's is moonStrength, so
+// the swap at sunset changed how dark every shadow is in the same frame as their direction. Eased at a
+// rate that crosses the default strength in about two seconds.
+static const float kStrengthPerSecond = 0.35f;
+static bool s_haveEasedStrength;
+static float s_easedStrength;
+static double s_lastStrengthTime;
+
+static float EaseShadowStrength(float target) {
+	const double now = time_now_d();
+	float dt = s_lastStrengthTime > 0.0 ? (float)(now - s_lastStrengthTime) : 0.0f;
+	s_lastStrengthTime = now;
+	if (dt < 0.0f) dt = 0.0f;
+	if (dt > 0.25f) dt = 0.25f;
+	if (!s_haveEasedStrength) {
+		s_easedStrength = target;
+		s_haveEasedStrength = true;
+		return target;
+	}
+	const float step = kStrengthPerSecond * dt;
+	if (s_easedStrength < target) {
+		s_easedStrength = std::min(s_easedStrength + step, target);
+	} else {
+		s_easedStrength = std::max(s_easedStrength - step, target);
+	}
+	return s_easedStrength;
+}
+
 // Recomputes where the shadow projection is looking, from the view matrix and sun direction the
 // frame has left behind by the time it turns to 2D.
 static void ComputeShadowView(FrameStats stats) {
@@ -586,6 +677,8 @@ static void ComputeShadowView(FrameStats stats) {
 			s_view.viewResidual[c] = p[0] * m[c] + p[1] * m[3 + c] + p[2] * m[6 + c] + m[9 + c];
 		}
 	}
+
+	TurnTowardsSun(stats.sunDir);
 
 	// The sun vector points towards the light; light travels the other way.
 	s_view.lightDir[0] = -stats.sunDir[0];
@@ -2978,11 +3071,8 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 		// shadows visible; moonStrength is what keeps them from looking like noon.
 		const bool moon = live ? s_current.sunIsMoon
 			: (s_haveHeldSun ? s_heldSunIsMoon : s_published.sunIsMoon);
-		if (moon) {
-			ub.tint[3] = s_settings.strength * s_settings.moonStrength;
-		} else {
-			ub.tint[3] = s_settings.strength * luminance;
-		}
+		ub.tint[3] = EaseShadowStrength(moon ? s_settings.strength * s_settings.moonStrength
+			: s_settings.strength * luminance);
 		// And the weather's share - see hideInRain. Zero never gets this far; OnFlush skips it.
 		ub.tint[3] *= s_weatherFade;
 	}
@@ -3107,6 +3197,10 @@ void Init() {
 	s_weatherFade = 1.0f;
 	s_weatherWetness = 0.0f;
 	s_lastWeatherTime = 0.0;
+	s_haveSmoothSun = false;
+	s_lastSunTurnTime = 0.0;
+	s_haveEasedStrength = false;
+	s_lastStrengthTime = 0.0;
 
 	// The flag is only set for ULUS10160 in compat.ini, so this is the disc-ID check as well.
 	RefreshAvailability();
@@ -3297,9 +3391,9 @@ void BeginFrame(Draw::DrawContext *draw) {
 	s_cutPending = false;
 }
 
-// Finds the sun among the four GE light channels. GTA hands the hardware a directional light for
-// the sun and, depending on the scene, dimmer directional fills alongside it; brightness is what
-// tells them apart, so the brightest wins and the rest are ignored.
+// Finds the sun among the four GE light channels. GTA hands the hardware its time-of-day directional
+// on channel 0 and, near street lamps, per-object lamp directionals on the others - which are as
+// bright or brighter, so the channel decides, not brightness. See the channel test below.
 static void NoteLights() {
 	if (!gstate.isLightingEnabled()) {
 		return;
@@ -3355,6 +3449,17 @@ static void NoteLights() {
 			candidate.aboveHorizon = candidate.dir[2] > kMinSunElevation;
 		}
 
+		// Only channel 0 is the sun. VCS lights the things that move with its time-of-day directional
+		// on channel 0 and adds the street lamps near each object as extra directionals on channels 1
+		// to 3, each pointing from its lamp to that object: full white, a different direction for every
+		// object, sweeping as you ride past. Picked by brightness they beat a dim moon every time, and
+		// every shadow on screen swung towards whichever lamp was nearest. Measured on a night ride:
+		// 35 jumps in 20 seconds, every one to channel 1 or 2, while channel 0 held the setting sun
+		// (moving 2.7 degrees at a time) and then the moon. Still recorded above, for the panel.
+		if (i != 0) {
+			continue;
+		}
+
 		float unit[3] = { dir[0] * invLength, dir[1] * invLength, dir[2] * invLength };
 
 		// An axis-aligned channel at full white is what a channel holds when nobody has set it,
@@ -3405,9 +3510,12 @@ static void NoteLights() {
 	}
 
 	if (s_current.sunValid) {
-		s_captureLightDir[0] = -s_current.sunDir[0];
-		s_captureLightDir[1] = -s_current.sunDir[1];
-		s_captureLightDir[2] = -s_current.sunDir[2];
+		// The eased direction once there is one, so faces are chosen against the same light the map
+		// is projected along - see TurnTowardsSun.
+		const float *sun = s_haveSmoothSun ? s_smoothSunDir : s_current.sunDir;
+		s_captureLightDir[0] = -sun[0];
+		s_captureLightDir[1] = -sun[1];
+		s_captureLightDir[2] = -sun[2];
 		s_haveCaptureLightDir = true;
 	}
 }
