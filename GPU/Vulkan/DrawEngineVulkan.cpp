@@ -217,7 +217,8 @@ void DrawEngineVulkan::Flush() {
 	// own back afterwards rather than being left to notice.
 	if (VCSShadow::IsActive()) {
 		VirtualFramebuffer *vfb = framebufferManager_->GetCurrentRenderVFB();
-		if (VCSShadow::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr, textureCache_)) {
+		if (VCSShadow::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr,
+				vfb ? vfb->bufferWidth : 0, vfb ? vfb->bufferHeight : 0, textureCache_)) {
 			framebufferManager_->RebindFramebuffer("vcs_shadow_done");
 		}
 	}
@@ -228,7 +229,8 @@ void DrawEngineVulkan::Flush() {
 	// shadow mask being laid over the top of new water.
 	if (VCSWater::IsActive()) {
 		VirtualFramebuffer *vfb = framebufferManager_->GetCurrentRenderVFB();
-		if (VCSWater::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr)) {
+		if (VCSWater::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr,
+				vfb ? vfb->bufferWidth : 0, vfb ? vfb->bufferHeight : 0)) {
 			framebufferManager_->RebindFramebuffer("vcs_water_done");
 		}
 	}

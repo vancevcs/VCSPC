@@ -667,10 +667,13 @@ void BeginFrame(Draw::DrawContext *draw);
 // into. Returns true if anything was drawn, which is the caller's cue to rebind its own render
 // target; false is the ordinary case and costs one bool test.
 //
+// `bufferWidth` and `bufferHeight` are the size of `target` in PSP pixels, which can be larger than
+// the part the game draws into - see DrawnArea.
+//
 // `textureCache` is how remembered cut-out casters find their textures again - see
 // ResolveCutoutTexture. Null costs only those.
 bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
-	TextureCacheCommon *textureCache);
+	int bufferWidth, int bufferHeight, TextureCacheCommon *textureCache);
 
 // The depth target, for the debugger to preview. Null until the pass has run once.
 Draw::Framebuffer *ShadowMap();

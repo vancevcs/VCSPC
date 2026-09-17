@@ -386,6 +386,7 @@ void NoteDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount,
 // The first 2D batch of a frame that has captured any 3D is the seam between the world and the
 // HUD, and that is when all four passes run. Returns true if anything was drawn, which is the
 // caller's cue to rebind its own render target.
-bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target);
+bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
+	int bufferWidth, int bufferHeight);
 
 }  // namespace VCSWater

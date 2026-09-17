@@ -141,7 +141,6 @@ struct ViewportCapture {
 	float offset[3];
 	float rasterOffset[2];
 	float rtWidth, rtHeight;
-	int rtRenderWidth, rtRenderHeight;
 	int rtOffsetX, rtOffsetY;
 };
 
@@ -1083,8 +1082,6 @@ void NoteDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount,
 		s_frameViewport.rasterOffset[1] = gstate.getOffsetY();
 		s_frameViewport.rtWidth = (float)gstate_c.curRTWidth;
 		s_frameViewport.rtHeight = (float)gstate_c.curRTHeight;
-		s_frameViewport.rtRenderWidth = (int)gstate_c.curRTRenderWidth;
-		s_frameViewport.rtRenderHeight = (int)gstate_c.curRTRenderHeight;
 		s_frameViewport.rtOffsetX = gstate_c.curRTOffsetX;
 		s_frameViewport.rtOffsetY = gstate_c.curRTOffsetY;
 
@@ -1944,7 +1941,7 @@ static void FillUniforms(WaterUB *ub, bool isWaterPass) {
 }
 
 static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
-	int width, int height, int viewW, int viewH) {
+	int width, int height, int viewW, int viewH, int drawnW, int drawnH) {
 	s_shadeRendered = false;
 	if (!EnsurePipelines(draw) || !EnsureSizedResources(draw, width, height)) {
 		return;
@@ -1954,9 +1951,10 @@ static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
 
 	// 1. The frame as it stands, so the shading can read the colour it is about to change. This
 	// is what the reflection samples and what keeps the sea's own time-of-day tint.
-	int fbWidth = 0, fbHeight = 0;
-	draw->GetFramebufferDimensions(target, &fbWidth, &fbHeight);
-	draw->BlitFramebuffer(target, 0, 0, fbWidth, fbHeight, s_sceneFbo, 0, 0, width, height,
+	//
+	// Only the part the game draws into, stretched over the whole copy: the shader samples it at the
+	// pixel's position across the game's viewport, and 0..1 there has to mean 0..1 here.
+	draw->BlitFramebuffer(target, 0, 0, drawnW, drawnH, s_sceneFbo, 0, 0, width, height,
 		Aspect::COLOR_BIT, FB_BLIT_LINEAR, "vcs_water_scene_copy");
 
 	// 2. Depth, over everything captured. Occlusion comes entirely from this: a pier in front of
@@ -2058,7 +2056,23 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target,
 
 static void MeasureReflection();
 
-bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target) {
+// How much of the render target the game actually draws into, in the target's own pixels. The same
+// question as VCSShadow's DrawnArea, answered the same way - see there for why it is not simply the
+// whole target.
+static void DrawnArea(const ViewportCapture &vp, int bufferWidth, int bufferHeight,
+	int fbWidth, int fbHeight, int *drawnW, int *drawnH) {
+	*drawnW = fbWidth;
+	*drawnH = fbHeight;
+	if (bufferWidth > 0 && bufferHeight > 0 && vp.rtWidth > 0.0f && vp.rtHeight > 0.0f) {
+		*drawnW = std::min(fbWidth, (int)(vp.rtWidth * (float)fbWidth / (float)bufferWidth + 0.5f));
+		*drawnH = std::min(fbHeight, (int)(vp.rtHeight * (float)fbHeight / (float)bufferHeight + 0.5f));
+	}
+	if (*drawnW <= 0) *drawnW = fbWidth;
+	if (*drawnH <= 0) *drawnH = fbHeight;
+}
+
+bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
+	int bufferWidth, int bufferHeight) {
 	if (!g_active || s_frameShaded || !through || !draw || !target) {
 		return false;
 	}
@@ -2113,12 +2127,14 @@ bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target) {
 	// The surface buffer's viewport has to cover the same fraction of it that the game's viewport
 	// covers of its render target, or the composite - which maps the whole buffer over the whole
 	// target - lands offset.
-	int viewW = (int)((float)s_frameViewport.rtRenderWidth * scale + 0.5f);
-	int viewH = (int)((float)s_frameViewport.rtRenderHeight * scale + 0.5f);
+	int drawnW = fbWidth, drawnH = fbHeight;
+	DrawnArea(s_frameViewport, bufferWidth, bufferHeight, fbWidth, fbHeight, &drawnW, &drawnH);
+	int viewW = (int)((float)drawnW * scale + 0.5f);
+	int viewH = (int)((float)drawnH * scale + 0.5f);
 	if (viewW <= 0 || viewW > width) viewW = width;
 	if (viewH <= 0 || viewH > height) viewH = height;
 
-	RenderSurface(draw, target, width, height, viewW, viewH);
+	RenderSurface(draw, target, width, height, viewW, viewH, drawnW, drawnH);
 	RenderComposite(draw, target, fbWidth, fbHeight);
 	return true;
 }

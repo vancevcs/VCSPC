@@ -136,7 +136,6 @@ struct ViewportCapture {
 	float offset[3];
 	float rasterOffset[2];
 	float rtWidth, rtHeight;          // PSP pixels
-	int rtRenderWidth, rtRenderHeight;  // ...and the same thing at the internal resolution
 	int rtOffsetX, rtOffsetY;
 };
 static ViewportCapture s_frameViewport;
@@ -3094,8 +3093,35 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 	s_capture.composited = true;
 }
 
+// How much of the render target the game actually draws into, in the target's own pixels.
+//
+// The size the game draws at, over the size the framebuffer IS, times the pixels in it - which is
+// exactly how PPSSPP sizes its own viewport (ConvertViewportAndScissor). This used to be the whole
+// render target, and that is the same number only for as long as the two sizes agree. They stop
+// agreeing for good the first time the framebuffer grows: PPSSPP enlarges a buffer as soon as
+// something draws past its edge, and shrinks one only once it has more than halved.
+static void DrawnArea(const ViewportCapture &vp, int bufferWidth, int bufferHeight,
+	int fbWidth, int fbHeight, int *drawnW, int *drawnH) {
+	*drawnW = fbWidth;
+	*drawnH = fbHeight;
+	if (bufferWidth > 0 && bufferHeight > 0 && vp.rtWidth > 0.0f && vp.rtHeight > 0.0f) {
+		*drawnW = std::min(fbWidth, (int)(vp.rtWidth * (float)fbWidth / (float)bufferWidth + 0.5f));
+		*drawnH = std::min(fbHeight, (int)(vp.rtHeight * (float)fbHeight / (float)bufferHeight + 0.5f));
+	}
+
+	static int s_lastLogged[4] = { -1, -1, -1, -1 };
+	static int s_logs = 0;
+	const int now[4] = { (int)vp.rtWidth, (int)vp.rtHeight, bufferWidth, bufferHeight };
+	if (memcmp(now, s_lastLogged, sizeof(now)) != 0 && s_logs < 16) {
+		memcpy(s_lastLogged, now, sizeof(now));
+		s_logs++;
+		NOTICE_LOG(Log::G3D, "VCS shadows: the game draws %dx%d into a %dx%d framebuffer (%dx%d pixels) - the mask covers %dx%d",
+			now[0], now[1], bufferWidth, bufferHeight, fbWidth, fbHeight, *drawnW, *drawnH);
+	}
+}
+
 bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
-	TextureCacheCommon *textureCache) {
+	int bufferWidth, int bufferHeight, TextureCacheCommon *textureCache) {
 	if (!g_active || s_frameComposited || !through || !draw || !target) {
 		return false;
 	}
@@ -3152,9 +3178,11 @@ bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
 
 	// The mask's viewport has to cover the same fraction of the mask that the game's viewport
 	// covers of its render target, or the composite - which maps the whole mask over the whole
-	// target - lands offset.
-	int viewW = (int)((float)s_frameViewport.rtRenderWidth * scale + 0.5f);
-	int viewH = (int)((float)s_frameViewport.rtRenderHeight * scale + 0.5f);
+	// target - lands offset. See DrawnArea for why that is not simply the whole target.
+	int drawnW = fbWidth, drawnH = fbHeight;
+	DrawnArea(s_frameViewport, bufferWidth, bufferHeight, fbWidth, fbHeight, &drawnW, &drawnH);
+	int viewW = (int)((float)drawnW * scale + 0.5f);
+	int viewH = (int)((float)drawnH * scale + 0.5f);
 	if (viewW <= 0 || viewW > maskW) viewW = maskW;
 	if (viewH <= 0 || viewH > maskH) viewH = maskH;
 
@@ -3960,8 +3988,6 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 		s_frameViewport.rasterOffset[1] = gstate.getOffsetY();
 		s_frameViewport.rtWidth = (float)gstate_c.curRTWidth;
 		s_frameViewport.rtHeight = (float)gstate_c.curRTHeight;
-		s_frameViewport.rtRenderWidth = (int)gstate_c.curRTRenderWidth;
-		s_frameViewport.rtRenderHeight = (int)gstate_c.curRTRenderHeight;
 		s_frameViewport.rtOffsetX = gstate_c.curRTOffsetX;
 		s_frameViewport.rtOffsetY = gstate_c.curRTOffsetY;
 		{

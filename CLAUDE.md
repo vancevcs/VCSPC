@@ -3794,6 +3794,33 @@ mapping verbatim makes the FARTHEST surface win every pixel of the mask. Nothing
 which way camera depth runs, because the shadow comparison happens in light space, so
 `BuildPostProjMatrix` inverts it when the Z scale is negative and stops there.
 
+#### Opening the map broke the shadows until a restart, because the framebuffer grew
+
+Reported as shadows "acting weird" after MAP, never after BRIEF or STATS, and a settings toggle did
+not bring them back. Nothing in the shadow pass was wrong with its own state; the framebuffer under
+it had changed size. Measured from PPSSPP's own FrameBuf log with the map opened over the debugger:
+
+| | game draws | framebuffer |
+|---|---|---|
+| before the map | 512x320 | 512x320 |
+| after the map | 512x320 | **512x401** |
+
+The chrome fix stretches `Map_AE` to `backdropHeight` rows, the map draws down to row 400, and PPSSPP
+enlarges a framebuffer as soon as something draws past its edge - and shrinks one again only once it
+has more than halved (`FramebufferManagerCommon`, the `newHeight * 2 < bufferHeight` test). So one
+visit to the map leaves the rest of the session drawing 320 rows into a 401-row buffer. BRIEF and
+STATS have no widget stretched past the edge, which is the whole difference.
+
+Both passes sized their viewport from `curRTRenderWidth/Height`, which is the whole BUFFER, while the
+post-projection matrix maps into `curRTWidth/Height`, the part the game DRAWS - the same number until
+a buffer grows. After the map the mask was spread over 2406 pixel rows instead of 1920, and every
+shadow slid 1.25x down the screen. `DrawnArea` now sizes it the way PPSSPP sizes its own viewport
+(`ConvertViewportAndScissor`): drawn size, times render pixels over buffer size. The water pass had
+the same maths and also copied the whole buffer for its reflection, so it copies only the drawn part.
+
+The log says `the game draws WxH into a WxH framebuffer ... the mask covers WxH` whenever the sizes
+change. Two different framebuffer sizes in that line is this mechanism engaging, not a fault.
+
 #### The game draws full-screen overlays as world geometry, and they own the mask
 
 The single hardest bug here, and it looks like nothing else. With the depth direction fixed, the
