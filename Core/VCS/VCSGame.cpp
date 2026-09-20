@@ -40,6 +40,7 @@ void CFRelease(const void *cf);
 #include "Common/File/Path.h"
 #include "Common/Log.h"
 #include "Common/TimeUtil.h"
+#include "Common/System/Display.h"
 #include "Core/Config.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/sceCtrl.h"
@@ -184,10 +185,49 @@ static void ApplyGamePrefs() {
 	ApplyPref(VCSAddr::RadioVolumePref, settings.radioVolume);
 }
 
+// The radar's corner, patched before the game runs for the reason the pool reserve is: these are
+// immediates inside functions the game calls every frame, and by the time a frame has been drawn
+// the JIT has a block over them - see the trap in AGENTS.md.
+static void PatchRadarCorner() {
+	if (!GameSettings().radarTopLeft) {
+		return;
+	}
+	struct Site { u32 address; u32 stock; };
+	const Site sites[] = {
+		{ kVCSRadarTopWide, kVCSRadarTopWideOp },
+		{ kVCSRadarTopNarrow, kVCSRadarTopNarrowOp },
+	};
+	for (const Site &site : sites) {
+		if (!Memory::IsValid4AlignedAddress(site.address)) {
+			continue;
+		}
+		// Checked against what the instruction should BE rather than against a flag of our own,
+		// so a build that does not hold this constant is left alone instead of corrupted.
+		if (Memory::ReadUnchecked_U32(site.address) != site.stock) {
+			WARN_LOG(Log::System, "VCS: %08x does not hold the radar's top edge on this build - "
+				"leaving the radar where the game put it", site.address);
+			return;
+		}
+	}
+	for (const Site &site : sites) {
+		Memory::WriteUnchecked_U32(kVCSRadarTopMoved, site.address);
+	}
+	// The route line this fork draws over the radar, and the touch zone that opens the menu when
+	// the radar is tapped, both work from these - so they move when the radar does rather than
+	// carrying a second copy of the same decision.
+	VCSRadarSettings &radar = RadarSettings();
+	radar.centreX = kVCSRadarLeft + kVCSRadarSize * 0.5f;
+	radar.centreY = kVCSRadarTopMovedY + kVCSRadarSize * 0.5f;
+	radar.radius = kVCSRadarSize * 0.5f;
+	INFO_LOG(Log::System, "VCS: the radar moves to the top-left corner, centred on (%.1f, %.1f)",
+		radar.centreX, radar.centreY);
+}
+
 void PatchLoadedModule() {
 	if (!IsActive()) {
 		return;
 	}
+	PatchRadarCorner();
 	const float wanted = GameSettings().worldMemory;
 	if (!(wanted > 1.0f) || !Memory::IsValid4AlignedAddress(kVCSMainPoolReserve)) {
 		return;
@@ -420,6 +460,16 @@ void Tick() {
 	// Also after CameraTick, and for the same reason: it turns the character to the camera's yaw
 	// and wants the value CameraTick just wrote, not the one from before it ran.
 	PedAimTick(context);
+
+	// The widescreen factor, which depends on the SCREEN rather than on the game - so a rotation
+	// or a resized window changes it with nothing to tell us. A few float operations once a frame
+	// is cheaper than finding every place the display can change shape.
+	RefreshWidescreen();
+
+	// What the touch overlay is allowed to know, published last so it describes the frame that
+	// just ran. It reads this and never PSP memory, which keeps the emu-thread rule intact
+	// through a feature whose whole output is drawn by the UI.
+	PublishTouchState(context);
 }
 
 bool IsActive() {
@@ -475,8 +525,14 @@ static std::string UntranslocatedPath(const std::string &path) {
 }
 #endif
 
+static Path g_gameFolder;
+
+void SetGameFolder(const Path &path) {
+	g_gameFolder = path;
+}
+
 const Path &GameFolder() {
-	static Path folder;
+	Path &folder = g_gameFolder;
 	if (!folder.empty()) {
 		return folder;
 	}
@@ -624,6 +680,89 @@ void PatchDiscRead(u64 positionOnIso, u8 *data, size_t bytes) {
 		const u64 from = std::max(positionOnIso, patch.offset);
 		const u64 to = std::min(positionOnIso + bytes, patchEnd);
 		memcpy(data + (from - positionOnIso), state.data.data() + (from - patch.offset), (size_t)(to - from));
+	}
+}
+
+// --- Widescreen ----------------------------------------------------------------------------------
+//
+// See the section at the bottom of VCSGame.h for what this is and why it is done in the renderer
+// rather than in the game.
+
+float g_widescreenSquash = 1.0f;
+bool g_widescreenSquashesHud = false;
+bool g_widescreenSquashedDraw = false;
+
+void WidenProjection(float *matrix16) {
+	if (!WidescreenActive()) {
+		return;
+	}
+	if (GameSettings().widescreen == (int)WidescreenMode::Wider) {
+		// HOR+: scale the x row down, which brings more of the world inside the clip box.
+		matrix16[0] *= g_widescreenSquash;
+		matrix16[4] *= g_widescreenSquash;
+		matrix16[8] *= g_widescreenSquash;
+		matrix16[12] *= g_widescreenSquash;
+		return;
+	}
+	// VERT-: scale the y row UP instead, which pushes the top and bottom of the old view outside
+	// the clip box. Same resulting aspect and the same stretched frame; the difference is that
+	// nothing enters the view that the game was not already drawing, so nothing can pop.
+	const float crop = 1.0f / g_widescreenSquash;
+	matrix16[1] *= crop;
+	matrix16[5] *= crop;
+	matrix16[9] *= crop;
+	matrix16[13] *= crop;
+}
+
+void ApplyHudSquash(float *x, float *width) {
+	if (!g_widescreenSquashesHud || !WidescreenActive()) {
+		return;
+	}
+	const float centre = *x + *width * 0.5f;
+	*width *= g_widescreenSquash;
+	*x = centre - *width * 0.5f;
+}
+
+void RefreshWidescreen() {
+	g_widescreenSquash = 1.0f;
+	g_widescreenSquashesHud = false;
+
+	const int mode = GameSettings().widescreen;
+	const float screenW = (float)g_display.pixel_xres;
+	const float screenH = (float)g_display.pixel_yres;
+	if (g_active && mode != (int)WidescreenMode::Off && screenW >= 1.0f && screenH >= 1.0f) {
+		// 480x272 rather than the framebuffer the game happens to draw into: this is about the
+		// shape of the PSP's SCREEN, which is what the frame is stretched from.
+		const float squash = (480.0f / 272.0f) / (screenW / screenH);
+		// A screen NARROWER than the PSP's would need the opposite correction - letterboxing
+		// rather than pillarboxing - and PPSSPP already does the right thing there by keeping the
+		// aspect. Refusing is better than squeezing the view into a shape nobody asked for.
+		if (squash < 0.999f) {
+			g_widescreenSquash = squash;
+			// Both modes stretch the frame horizontally, so both want the HUD squashed to keep
+			// its shape - the choice between them is about the WORLD, not about the panel.
+			g_widescreenSquashesHud = true;
+		}
+	}
+
+	// The frame has to be STRETCHED to fill for any of this to look right - the 3D is rendered
+	// pre-squashed, so a pillarboxed presentation would show a narrow, squeezed picture.
+	//
+	// Set here, in the function that runs every tick, rather than only when the row is moved.
+	// The row's own onChange fires before a game has booted, where g_active is false and there is
+	// nothing to decide yet; without this the first boot after switching it on would widen the
+	// view and never stretch the frame - which is worse than either half alone.
+	//
+	// Only while a VCS game is running, so this fork's binary pointed at some other game never
+	// rewrites the player's own display setting. And only on a disagreement, which is the same
+	// discipline ApplyPref follows and for the same reason.
+	if (g_active) {
+		DisplayLayoutConfig &display =
+			g_Config.GetDisplayLayoutConfig(g_display.GetDeviceOrientation());
+		const bool want = WidescreenActive();
+		if (display.bDisplayStretch != want) {
+			display.bDisplayStretch = want;
+		}
 	}
 }
 

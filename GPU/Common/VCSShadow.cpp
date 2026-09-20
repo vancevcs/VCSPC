@@ -28,6 +28,7 @@
 #include "Common/GPU/ShaderWriter.h"
 #include "Core/MemMap.h"
 #include "Core/System.h"
+#include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSMemory.h"
 #include "Core/VCS/VCSState.h"
 #include "GPU/GPU.h"
@@ -3977,6 +3978,10 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 	if (!s_haveViewMatrix) {
 		memcpy(s_frameViewMatrix, gstate.viewMatrix, sizeof(s_frameViewMatrix));
 		memcpy(s_frameProjMatrix, gstate.projMatrix, sizeof(s_frameProjMatrix));
+		// The same widening the shader upload applies, or this pass's screen-space
+		// mask is built from a projection the frame was not drawn with and slides across
+		// the picture. See the Widescreen section in Core/VCS/VCSGame.h.
+		VCS::WidenProjection(s_frameProjMatrix);
 		s_frameViewInvValid = Invert3x3(s_frameViewMatrix, s_frameViewInvR);
 		s_frameViewport.scale[0] = gstate.getViewportXScale();
 		s_frameViewport.scale[1] = gstate.getViewportYScale();

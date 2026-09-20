@@ -193,6 +193,47 @@ inline constexpr u32 kVCSProcessVerticalLine = 0x08891DD4;
 // worth on a machine that cannot measure, and it is the best evidence of what the game really
 // needs: MainMemoryManager wants 12.65MB and no more, so on a PSP-2000 partition everything
 // past that is slack it absorbs unless this reserve grows to match.
+// --- The radar's own corner ---------------------------------------------------------------------
+//
+// VCS draws the radar bottom-left, which on a phone is exactly where the left thumb lives. The
+// phone ports of the trilogy all put it top-left, and so does this one.
+//
+// The rect is not stored anywhere to be written: it comes out of four functions that return
+// layout CONSTANTS, picked by a byte at gp-0x1ba8 (a display-mode flag; both branches are patched
+// so it cannot matter which is live). Read out of the blip transform at 0x0880eb64, whose else
+// path assembles the rect and then places a blip in it:
+//
+//     x0 = f_089baa88()        12.0        centre = x0 + w * 0.5
+//     w  = f_089baad0()        65.7        screenX = centre + radarX * w * 0.5
+//     y0 = f_089baaa8()        196.0       and the same again vertically
+//     h  = f_089baafc()        65.7
+//
+// So the retail radar is (12, 196, 65.7, 65.7) in the PSP's 480x272 screen, centred on
+// (44.85, 228.85) - which is within half a pixel of the (44.1, 228.6) this fork measured by eye
+// for its route overlay, and was confirmed a third way by measuring a frame: the green disc came
+// out centred on (42.5, 228.6) with a radius of 28.8 inside a ring of 33.
+//
+// Only the TOP is patched. The left edge is already 12, and mirroring 196 to 12 puts the radar
+// the same distance from the top as it was from the bottom, so the move needs one constant per
+// branch and nothing has to be re-measured.
+//
+// These are `lui` immediates inside the functions, patched before the game runs - see
+// PatchLoadedModule. Patching them live is what the JIT-marker trap in AGENTS.md is about: a
+// plain read of 0x089baac0 during play came back 0x68298a0c, a RUNBLOCK marker rather than the
+// game's instruction, and writing through it took the emulator down.
+inline constexpr u32 kVCSRadarTopWide = 0x089BAAB4;         // lui $a0, 0x432A   (170.0)
+inline constexpr u32 kVCSRadarTopWideOp = 0x3C04432A;
+inline constexpr u32 kVCSRadarTopNarrow = 0x089BAAC0;       // lui $a0, 0x4344   (196.0)
+inline constexpr u32 kVCSRadarTopNarrowOp = 0x3C044344;
+// 12.0, the same distance from the top as the left edge is from the side.
+inline constexpr u32 kVCSRadarTopMoved = 0x3C044140;
+// Where the radar ends up in the PSP's 480x272 screen once it has, for the overlay that draws a
+// route line on it and the touch zone that opens the menu.
+inline constexpr float kVCSRadarLeft = 12.0f;
+inline constexpr float kVCSRadarSize = 65.7f;
+inline constexpr float kVCSRadarTopRetail = 196.0f;
+inline constexpr float kVCSRadarTopMovedY = 12.0f;
+
 inline constexpr u32 kVCSMainPoolReserve = 0x08ABFEB4;      // lui $a0, 0x53
 inline constexpr u32 kVCSMainPoolReserveOp = 0x3C040053;
 inline constexpr u32 kVCSMainPoolReserveStock = 0x00530000;

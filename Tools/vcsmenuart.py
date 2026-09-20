@@ -13,6 +13,7 @@ Writes into assets/vcs/, which ships with the build and is read through g_VFS at
 
 import math
 import os
+import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -61,11 +62,15 @@ TITLES = {
     "keybindings": "Key Bindings",
     "audiosetup": "Audio Setup",
     "displaysetup": "Display Setup",
+    "touch": "Touch Controls",
 }
 
 # Brush Script MT is the closest thing Windows ships to the logo script. Freestyle Script is the
 # fallback; both are stock, so no font is redistributed with the build - only the rendered pixels.
+# The Mac ships the same face under its own name, which is what makes a title generated here
+# match the ones generated on Windows rather than quietly using a different script.
 FONT_CANDIDATES = [
+    "/System/Library/Fonts/Supplemental/Brush Script.ttf",
     "C:/Windows/Fonts/BRUSHSCI.TTF",
     "C:/Windows/Fonts/FRSCRIPT.TTF",
     "C:/Windows/Fonts/segoesc.ttf",
@@ -189,6 +194,10 @@ def make_title(key, text, size=96):
 
 
 def main():
+    # One title, for adding a page without re-rendering every other heading - the fonts are stock
+    # but not identical across machines, and a full re-run on the wrong one would leave the menu
+    # in two different hands.
+    only = sys.argv[1] if len(sys.argv) > 1 else None
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # make_background() is deliberately not called: the menu draws a flat fill in the backdrop's
@@ -198,6 +207,8 @@ def main():
 
     used_font = None
     for key, text in sorted(TITLES.items()):
+        if only and key != only:
+            continue
         path, size, used_font = make_title(key, text)
         print("%-34s %dx%d  %r" % (os.path.relpath(path, os.path.dirname(HERE)),
                                    size[0], size[1], text))

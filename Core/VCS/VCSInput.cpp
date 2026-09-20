@@ -34,6 +34,7 @@
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
+#include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSVault.h"
 
 namespace VCS {
@@ -50,6 +51,12 @@ namespace VCS {
 // pair could break: a frame that saw a new X against an old Y would aim a fraction of a degree
 // wrong, once. The held set has no such luxury - a missed insert leaves a button stuck.
 static std::set<InputKeyCode> g_heldPadButtons;
+// The overlay's controls, kept apart from the pad's so each device answers to its own switch and
+// so a physical pad's release cannot clear a thumb's press. Both are read through the one
+// question below, because everything downstream cares what is HELD, not what is holding it.
+static std::set<InputKeyCode> g_heldTouchButtons;
+static std::atomic<float> g_touchStickX{0.0f};
+static std::atomic<float> g_touchStickY{0.0f};
 static std::atomic<float> g_padLeftX{0.0f};
 static std::atomic<float> g_padLeftY{0.0f};
 static std::atomic<float> g_padRightX{0.0f};
@@ -78,6 +85,16 @@ static u32 g_lastAppliedMask = 0;
 
 // Buttons forced down by the debugger's tester, independent of the mapping table.
 static u32 g_forcedButtons = 0;
+
+// A cutscene skip asked for by the phone's SKIP button, counted down in ApplyMapping.
+//
+// Held for several frames rather than pressed for one, for the reason the intro skip is: the
+// game samples the pad at its own 30Hz logic rate while this runs at vblank, so a one-tick press
+// is a press the game may never see. Applied from ApplyMapping rather than by writing sceCtrl
+// here, so it inherits that function's release discipline instead of growing a second copy - the
+// same argument VCSCheats already makes for pressing nothing itself.
+static int g_cutsceneSkipFrames = 0;
+static constexpr int kCutsceneSkipHoldFrames = 8;
 
 // Whether we are currently driving the analog stick, and where we put it. Emu thread only.
 static bool g_analogHeld = false;
@@ -1165,17 +1182,91 @@ static bool IsHostKeyDownLocked(InputKeyCode key) {
 // difference between a clean switch and a stuck one: HandleHostAxis stops recording when the
 // scheme goes off, so a trigger held across that moment would otherwise stay in the set forever -
 // and the aim trigger holding means the Aiming context never ends.
-static bool IsPadButtonDownLocked(InputKeyCode button) {
+// Whether the PAD itself holds this button, ignoring the overlay. Only the trigger edge detector
+// wants this: a touch control holding R2 while a real trigger is pulled would otherwise read as
+// "already down" and swallow the trigger's own press.
+static bool IsPadOnlyButtonDownLocked(InputKeyCode button) {
 	if (!PadSettings().enabled) {
 		return false;
 	}
 	return g_heldPadButtons.find(button) != g_heldPadButtons.end();
 }
 
+static bool IsTouchButtonDownLocked(InputKeyCode button) {
+	if (!TouchSettings().enabled) {
+		return false;
+	}
+	return g_heldTouchButtons.find(button) != g_heldTouchButtons.end();
+}
+
+// Whether a pad-SHAPED control is held, by either the pad or the overlay.
+//
+// One question rather than two, which is the rule this file already learned the hard way: a
+// question asked of one device is a bug waiting for the other. Every intent built on this -
+// JumpHeld, RecruitHeld, LockOnModeActive, the glances, ComputeButtonMask - gets the thumb for
+// free, and the day the two need to differ there is exactly one place to look.
+static bool IsPadButtonDownLocked(InputKeyCode button) {
+	return IsPadOnlyButtonDownLocked(button) || IsTouchButtonDownLocked(button);
+}
+
 bool IsPadButtonDown(InputKeyCode button) {
 	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 	return IsPadButtonDownLocked(button);
 }
+
+VCSTouchSettings &TouchSettings() {
+	static VCSTouchSettings settings;
+	return settings;
+}
+
+void SetTouchButton(InputKeyCode padButton, bool down) {
+	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+	if (down) {
+		g_heldTouchButtons.insert(padButton);
+	} else {
+		g_heldTouchButtons.erase(padButton);
+	}
+}
+
+bool IsTouchButtonDown(InputKeyCode padButton) {
+	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+	return IsTouchButtonDownLocked(padButton);
+}
+
+void SetTouchStick(float x, float y) {
+	g_touchStickX.store(x, std::memory_order_relaxed);
+	g_touchStickY.store(y, std::memory_order_relaxed);
+}
+
+void GetTouchStick(float *x, float *y) {
+	*x = g_touchStickX.load(std::memory_order_relaxed);
+	*y = g_touchStickY.load(std::memory_order_relaxed);
+}
+
+void AddTouchLook(float dx, float dy) {
+	if (!TouchSettings().enabled) {
+		return;
+	}
+	const VCSTouchSettings &touch = TouchSettings();
+	// A drag is a DISPLACEMENT, exactly like a mouse - which is why this goes straight into the
+	// accumulator with a scale and nothing else, where the pad's stick has to be squared and
+	// integrated first. Everything behind it was written for a mouse and needs no second copy.
+	float ddy = dy * touch.lookSpeed;
+	if (touch.invertLookY) {
+		ddy = -ddy;
+	}
+	AddLookDelta(dx * touch.lookSpeed, ddy);
+}
+
+void ResetTouchInput() {
+	{
+		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
+		g_heldTouchButtons.clear();
+	}
+	g_touchStickX.store(0.0f, std::memory_order_relaxed);
+	g_touchStickY.store(0.0f, std::memory_order_relaxed);
+}
+
 
 // Assumes g_hostKeyMutex is held. Whether this context maps this key at all.
 static bool ContextMapsKeyLocked(VCSInputContext context, InputKeyCode key) {
@@ -1398,7 +1489,7 @@ static bool PadContextMapsButton(VCSInputContext context, InputKeyCode button) {
 // the two decisions, which is more than any trigger's jitter and less than any player's hold.
 static void SetPadTrigger(InputKeyCode button, float value) {
 	std::lock_guard<std::mutex> guard(g_hostKeyMutex);
-	const bool wasDown = IsPadButtonDownLocked(button);
+	const bool wasDown = IsPadOnlyButtonDownLocked(button);
 	const bool nowDown = wasDown ? value > PadSettings().triggerRelease
 	                             : value > PadSettings().triggerPress;
 	if (nowDown == wasDown) {
@@ -1947,6 +2038,13 @@ u32 ApplyMapping(VCSInputContext context) {
 		}
 	}
 
+	// The cutscene skip. Here rather than anywhere earlier so it cannot run while a vault, a
+	// cheat combination or the front-end bridge owns the pad - all three return before this.
+	if (g_cutsceneSkipFrames > 0) {
+		g_cutsceneSkipFrames--;
+		setMask |= CTRL_CROSS;
+	}
+
 	// Release only what WE pressed last frame - never the whole set of buttons this context
 	// could produce.
 	//
@@ -1982,7 +2080,7 @@ void ApplyAnalog(VCSInputContext context) {
 	// the branches below and spent after the normalisation, which is the only place the scale can
 	// go - see kVCSWalkDeflection.
 	bool walkHeld = false;
-	bool fromPad = false;
+	bool fromStick = false;
 
 	// The stick goes with the buttons during a vault - see ApplyMapping. A held W would otherwise
 	// walk the player forward through the wall he is being lifted over.
@@ -2154,8 +2252,19 @@ void ApplyAnalog(VCSInputContext context) {
 		// requested, and holding W with a centred stick would be indistinguishable from holding
 		// both. Whichever device is actually being moved is the one that answers.
 		float padX = 0.0f, padY = 0.0f;
-		if (PadLeftStick(&padX, &padY)) {
-			fromPad = true;
+		// The overlay's stick stands in for the pad's, because that is what it is: an analog
+		// deflection with a magnitude, from a device that owns the stick outright while it is
+		// being touched. Taken first so a thumb beats a resting pad rather than the other way
+		// round - the pad is at rest whenever nobody is holding it, and glass is not.
+		float touchX = 0.0f, touchY = 0.0f;
+		GetTouchStick(&touchX, &touchY);
+		const bool touchStick = TouchSettings().enabled && (touchX != 0.0f || touchY != 0.0f);
+		if (touchStick) {
+			padX = touchX;
+			padY = touchY;
+		}
+		if (touchStick || PadLeftStick(&padX, &padY)) {
+			fromStick = true;
 			switch (context) {
 			case VCSInputContext::OnFoot:
 			// Aiming without free aim is lock-on, where the stick strafes around the target -
@@ -2248,7 +2357,7 @@ void ApplyAnalog(VCSInputContext context) {
 		// The context gate is the two that move a person. Steering a car has no walk, and neither
 		// has an aircraft - there the same scale would be a quieter bank and pitch, which is a
 		// different control that nobody asked for.
-		if (walkHeld && !fromPad &&
+		if (walkHeld && !fromStick &&
 				(context == VCSInputContext::OnFoot || context == VCSInputContext::Aiming)) {
 			x *= kVCSWalkDeflection;
 			y *= kVCSWalkDeflection;
@@ -2558,6 +2667,86 @@ bool LockOnModeActive() {
 	// Same shape as the MeleeEquipped rule in FreeAimActive: an automatic, weapon-driven exception
 	// beside the manual toggle.
 	return !ScopedWeaponActive();
+}
+
+// The overlay's view of the game, published by VCSGame::Tick and read by the UI. Plain values
+// under a lock rather than the live state, because the overlay must not read PSP memory - and
+// because the answers it wants are several functions' worth of gating, not one field.
+static std::mutex g_touchStateMutex;
+static VCSTouchState g_touchState;
+
+VCSTouchState TouchState() {
+	std::lock_guard<std::mutex> guard(g_touchStateMutex);
+	return g_touchState;
+}
+
+std::map<std::string, VCSTouchOffset> &TouchLayoutOffsets() {
+	static std::map<std::string, VCSTouchOffset> offsets;
+	return offsets;
+}
+
+static uint32_t g_touchLayoutGeneration = 0;
+
+uint32_t TouchLayoutGeneration() {
+	return g_touchLayoutGeneration;
+}
+
+VCSTouchOffset TouchOffsetFor(const char *id) {
+	const std::map<std::string, VCSTouchOffset> &offsets = TouchLayoutOffsets();
+	auto iter = offsets.find(id);
+	return iter == offsets.end() ? VCSTouchOffset{} : iter->second;
+}
+
+void SetTouchOffset(const char *id, float dx, float dy) {
+	// A control dragged back to where it started is ERASED rather than stored as a zero, so a
+	// layout somebody has reset by hand leaves no trace in the file - and so the ini says only
+	// what was actually changed.
+	g_touchLayoutGeneration++;
+	if (dx == 0.0f && dy == 0.0f) {
+		TouchLayoutOffsets().erase(id);
+		return;
+	}
+	VCSTouchOffset &offset = TouchLayoutOffsets()[id];
+	offset.dx = dx;
+	offset.dy = dy;
+}
+
+void ClearTouchLayout() {
+	g_touchLayoutGeneration++;
+	TouchLayoutOffsets().clear();
+}
+
+void RequestCutsceneSkip() {
+	g_cutsceneSkipFrames = kCutsceneSkipHoldFrames;
+}
+
+void PublishTouchState(VCSInputContext context) {
+	VCSTouchState snap;
+	snap.active = IsActive() && context != VCSInputContext::Unknown;
+	snap.context = context;
+
+	const VCSState &state = GetState();
+	snap.vehicleClass = state.vehicleClass;
+	snap.melee = MeleeEquipped();
+	snap.scoped = ScopedWeaponActive();
+	// Something that shoots: a weapon slot that is not fists and not one of the items you only
+	// look through. The slot alone cannot say that - see WeaponSlotIsMelee.
+	snap.armed = state.weaponIndex.has_value() && *state.weaponIndex != 0 && !snap.melee;
+	snap.lockedOn = state.isAiming.value_or(false);
+	snap.ledgeAhead = VaultDebugState().armed;
+	snap.driveBy = DriveByAimActive(context);
+
+	// The cutscene. Three things have to be true at once, and the two guards are what make a
+	// soft signal safe to hang the whole overlay on - see the note on the field.
+	//
+	// The Menu context is excluded because the game takes its own HUD away there too, so
+	// without it every visit to the map would read as a cutscene. Unknown is excluded for the
+	// reason everything else here is: no context means nothing decoded.
+	snap.cutscene = TouchSettings().hideInCutscene && GameSettings().hud && snap.active &&
+		context != VCSInputContext::Menu && !RadarOnScreen();
+
+	std::lock_guard<std::mutex> guard(g_touchStateMutex);
+	g_touchState = snap;
 }
 
 }  // namespace VCS

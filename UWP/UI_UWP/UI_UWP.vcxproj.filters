@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
@@ -38,6 +38,9 @@
       <Filter>ImDebugger</Filter>
     </ClCompile>
     <ClCompile Include="..\..\UI\VCSMenuScreen.cpp">
+      <Filter>Screens</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\UI\VCSTouchControls.cpp">
       <Filter>Screens</Filter>
     </ClCompile>
     <ClCompile Include="..\..\UI\ChatScreen.cpp">
@@ -187,6 +190,9 @@
       <Filter>ImDebugger</Filter>
     </ClInclude>
     <ClInclude Include="..\..\UI\VCSMenuScreen.h">
+      <Filter>Screens</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\UI\VCSTouchControls.h">
       <Filter>Screens</Filter>
     </ClInclude>
     <ClInclude Include="..\..\UI\ChatScreen.h">

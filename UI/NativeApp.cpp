@@ -510,6 +510,27 @@ static void ClearFailedGPUBackends() {
 	File::Delete(failedBackendsFile);
 }
 
+#if PPSSPP_PLATFORM(ANDROID)
+// Fork-specific: the packaged layout on a phone. /sdcard/GTAVCS holds memstick/ and the disc, the
+// way the folder beside the exe does on Windows. Unlike there it is used even before it exists,
+// so this app never shares /sdcard/PSP - and its ppsspp.ini - with a real PPSSPP on the same phone.
+//
+// Called twice: from NativeInit, and again when storage permission arrives. On a first run the
+// permission is not granted yet at NativeInit, so nothing under /sdcard can be created or read
+// until the grant.
+static void UseVCSGameFolderMemstick() {
+	if (System_GetPropertyBool(SYSPROP_ANDROID_SCOPED_STORAGE)) {
+		// Only the vcs flavor keeps plain paths (targetSdk 29). A scoped build has no business
+		// guessing at /sdcard, and keeps PPSSPP's own memstick choice.
+		return;
+	}
+	const Path memstick = VCS::GameFolder() / "memstick";
+	File::CreateFullPath(memstick);
+	g_Config.memStickDirectory = memstick;
+	INFO_LOG(Log::System, "VCS: memstick is '%s'", memstick.c_str());
+}
+#endif
+
 void NativeInit(int argc, const char *argv[], const CommandLineOptions &cmdLineOptions, const char *savegame_dir, const char *external_dir, const char *cache_dir) {
 	net::Init();  // This needs to happen before we load the config. So on Windows we also run it in Main. It's fine to call multiple times.
 
@@ -627,6 +648,11 @@ void NativeInit(int argc, const char *argv[], const CommandLineOptions &cmdLineO
 	} else {
 		INFO_LOG(Log::System, "No memstick directory file found (tried to open '%s')", memstickDirFile.c_str());
 	}
+
+	// Fork-specific: after memstick_dir.txt, so the game's folder wins over a location picked in
+	// PPSSPP's own memstick screen - which the game build never shows anyway.
+	VCS::SetGameFolder(Path(external_dir) / "GTAVCS");
+	UseVCSGameFolderMemstick();
 
 	// Attempt to create directories after reading the path.
 	if (!System_GetPropertyBool(SYSPROP_ANDROID_SCOPED_STORAGE)) {
@@ -1440,6 +1466,10 @@ bool HandleGlobalMessage(UIMessage message, const std::string &value) {
 		return true;
 	}
 	else if (message == UIMessage::PERMISSION_GRANTED && value == "storage") {
+#if PPSSPP_PLATFORM(ANDROID)
+		// Fork-specific: the folder could not be created before the grant. See the note there.
+		UseVCSGameFolderMemstick();
+#endif
 		CreateSysDirectories();
 		// We must have failed to load the config before, so load it now to avoid overwriting the old config
 		// with a freshly generated one.

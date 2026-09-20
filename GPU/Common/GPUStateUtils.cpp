@@ -25,6 +25,7 @@
 #include "Core/Reporting.h"
 
 #include "GPU/ge_constants.h"
+#include "Core/VCS/VCSGame.h"
 #include "GPU/GPUState.h"
 #include "GPU/Math3D.h"
 #include "GPU/Common/PresentationCommon.h"
@@ -518,6 +519,25 @@ ReplaceBlendType ReplaceBlendWithShader(GEBufferFormat bufferFormat) {
 }
 
 // Viewport and scissor really could be treated entirely separately, but the non-buffered case is nicer by doing them "together".
+// Fork-specific: move the scissor with the 2D vertices the widescreen fix squashed.
+//
+// Same axis and the same factor, because they describe one thing: the radar's map is drawn
+// clipped to its own circle, and squashing the content while the clip stayed put slid the map
+// sideways inside the ring. Nothing happens for any other game, nor for a draw the transform
+// left alone - see VCS::g_widescreenSquashedDraw for why that is a per-draw answer.
+static void VCSSquashScissor(ViewportAndScissor &out, float frameWidth, float frameOriginX = 0.0f) {
+	if (!VCS::g_widescreenSquashedDraw || !VCS::WidescreenActive()) {
+		return;
+	}
+	const float centre = frameOriginX + frameWidth * 0.5f;
+	// Rounded outward rather than truncated: the clip is in whole pixels and the content it is
+	// following is not, so losing a fraction off each edge would shave the HUD's own border.
+	const float right = centre + (out.scissorX + out.scissorW - centre) * VCS::g_widescreenSquash;
+	const float left = centre + (out.scissorX - centre) * VCS::g_widescreenSquash;
+	out.scissorX = (int)floorf(left);
+	out.scissorW = std::max(0, (int)ceilf(right) - out.scissorX);
+}
+
 void ConvertViewportAndScissor(const DisplayLayoutConfig &config, bool useBufferedRendering, float renderWidth, float renderHeight, int bufferWidth, int bufferHeight, ViewportAndScissor &out) {
 	// Scissor. The scissor needs to be offset by the framebuffer offset.
 	const int scissorX1 = gstate.getScissorX1();
@@ -545,6 +565,9 @@ void ConvertViewportAndScissor(const DisplayLayoutConfig &config, bool useBuffer
 		out.viewportY = 0.0f;
 		out.viewportW = gstate_c.curRTWidth * renderWidthFactor;
 		out.viewportH = gstate_c.curRTHeight * renderHeightFactor;
+		// Fork-specific: the widescreen fix squashed this draw's 2D vertices about the frame's
+		// centre, so the clip has to come with them - see VCS::g_widescreenSquashedDraw.
+		VCSSquashScissor(out, gstate_c.curRTWidth * renderWidthFactor);
 	} else {
 		// Hacky path for non-buffered rendering.
 		float pixelW = PSP_CoreParameter().pixelWidth;
@@ -575,6 +598,7 @@ void ConvertViewportAndScissor(const DisplayLayoutConfig &config, bool useBuffer
 		out.viewportY = displayOffsetY;
 		out.viewportW = gstate_c.curRTWidth * renderWidthFactor;
 		out.viewportH = gstate_c.curRTHeight * renderHeightFactor;
+		VCSSquashScissor(out, gstate_c.curRTWidth * renderWidthFactor, displayOffsetX);
 	}
 }
 

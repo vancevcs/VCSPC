@@ -24,6 +24,7 @@
 #include "Common/Math/CrossSIMD.h"
 #include "Core/Config.h"
 #include "Core/System.h"
+#include "Core/VCS/VCSGame.h"
 #include "GPU/GPUState.h"
 #include "GPU/Math3D.h"
 #include "GPU/GPUDefinitions.h"
@@ -173,6 +174,54 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 
 			// Ignore color1 and fog, never used in throughmode anyway.
 			// The w of uv is also never used (hardcoded to 1.0.)
+		}
+
+		// Fork-specific: the widescreen fix's 2D half.
+		//
+		// The 3D has been rendered pre-squashed so that stretching the frame to a wide screen
+		// comes out correct; 2D never touches u_proj, so without this it would be left stretched
+		// and the radar would come out an ellipse. Squashing it about the frame's centre by the
+		// same factor keeps its proportions exactly, at the cost of it sitting inside the middle
+		// 16:9 band rather than reaching the screen's own corners.
+		//
+		// FULL-WIDTH DRAWS ARE EXEMPT, and that is the whole of why this is here rather than in
+		// the viewport: a fade to black, the game's own menu backdrop and anything else that
+		// covers the screen must go on covering it, or the sides keep showing the world. The
+		// extent is only known once the positions have been read, which is exactly here.
+		//
+		// The clear detection below still sees full-width rects unsquashed, so a screen clear is
+		// still recognised as one.
+		bool squashed = false;
+		if (VCS::g_widescreenSquashesHud && VCS::WidescreenActive() && numDecodedVerts > 0) {
+			const float full = (float)gstate_c.curRTWidth;
+			// ONLY INTO A FULL-SIZE TARGET. A game that renders part of its HUD to a texture
+			// first - which is how a round radar is usually masked - would otherwise have that
+			// texture's own contents squashed about the texture's centre, which is not a place
+			// that means anything. The main framebuffer is the only one whose centre is the
+			// screen's.
+			if (full >= 480.0f && gstate_c.curRTHeight >= 272) {
+				float minX = transformed[0].x;
+				float maxX = transformed[0].x;
+				for (int index = 1; index < numDecodedVerts; index++) {
+					minX = std::min(minX, transformed[index].x);
+					maxX = std::max(maxX, transformed[index].x);
+				}
+				if ((maxX - minX) < full * 0.9f) {
+					const float centre = full * 0.5f;
+					for (int index = 0; index < numDecodedVerts; index++) {
+						transformed[index].x =
+							centre + (transformed[index].x - centre) * VCS::g_widescreenSquash;
+					}
+					squashed = true;
+				}
+			}
+		}
+		// The clip has to move with the content, and only the state conversion can move it - so
+		// the decision is handed forward, and a change in it dirties the scissor so the next draw
+		// cannot inherit the last one's. See VCS::g_widescreenSquashedDraw.
+		if (squashed != VCS::g_widescreenSquashedDraw) {
+			VCS::g_widescreenSquashedDraw = squashed;
+			gstate_c.Dirty(DIRTY_VIEWPORTSCISSOR_STATE);
 		}
 
 		// Here's the best opportunity to try to detect rectangles used to clear the screen, and

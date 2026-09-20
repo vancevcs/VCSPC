@@ -57,6 +57,8 @@ enum class VCSMenuPage {
 	Mouse,
 	Controller,
 	Aiming,
+	// The phone's own controls. Reached from Controls, and only built there on a phone.
+	Touch,
 	Audio,
 	Graphics,
 	// What this port adds to the game, each row a switch that hands one of them back.
@@ -121,6 +123,15 @@ public:
 	// table; an action row - a cheat, a page jump - has nowhere else to carry one.
 	void SetHelp(std::string_view help) { help_ = help; }
 
+	// The vertical line this row is laid out around: the label is right-aligned to it and the
+	// value starts one gap past it, which is what gives a settings page its two-column look.
+	//
+	// It is the SCREEN's centre unless somebody says otherwise, and that default is deliberate -
+	// see ScreenCenterX for the bug that came of using the row's own bounds instead. What says
+	// otherwise is the phone's two-pane settings screen, where the rows occupy a column down the
+	// right and centring them on the screen would push every label under the category list.
+	void SetCenterX(float x) { centerX_ = x; }
+
 	// Start the label at a fixed x instead of centring it on its own length.
 	//
 	// For rows that are a LIST OF NAMES rather than a menu of verbs - the save slots. Eight
@@ -130,30 +141,42 @@ public:
 	void SetLeftAligned(float x) { leftAlignX_ = x; }
 
 protected:
-	// A toggle row flips its value on click. Float rows are edited through the bar and the
-	// arrow keys instead, so this leaves them alone.
+	// A click moves a settings row's value on by one, wrapping at the end - see Cycle. The block
+	// strip is still draggable for the values worth aiming at rather than stepping through.
 	void ClickInternal() override;
+
+	// The box the pointer actually has to be inside, which is NOT bounds_ for an ordinary row -
+	// see the definition. Virtual because a TILE's hit box is simply its own rectangle: it is
+	// laid out at the size it is drawn, so the measure-the-glyphs dance that a full-width row
+	// needs would only make it harder to hit.
+	virtual Bounds HitBounds() const;
+
+	// Focus this row in the one way that survives the press. See the definition.
+	void ClaimFocus();
+
+	// See SetCenterX. Negative means the screen's own centre.
+	float CenterX() const;
+	// Where the block strip sits.
+	Bounds BlockStripBounds() const;
+
+	std::string label_;
+	std::string help_;
+	float centerX_ = -1.0f;
 
 private:
 	// direction is -1 or +1; a bool flips either way, a float moves one step of its range.
 	void Adjust(int direction);
-	// Focus this row on a press, in the one way that survives the press. See the definition.
-	void ClaimFocus();
+	// One step onwards, wrapping at the end - what a tap does, on any kind of row. See the
+	// definition for why a tap wraps where an arrow key stops.
+	void Cycle();
 	// Where along the row's value bar x falls, 0..1. Only meaningful for float options.
 	float ValueFractionAt(float x) const;
 
-	// The box the pointer actually has to be inside, which is NOT bounds_. Rows are laid out at
-	// the full screen width so that the two-column settings layout can align on the screen's
-	// centre line; using that for hit-testing made every row a full-width band, so anything at
-	// the same height counted as a hit no matter how far from the text it was. Measured during
-	// Draw, which is the only place with a UIContext to measure text with, and falls back to the
-	// row until the first frame has been drawn.
-	Bounds HitBounds() const;
+	// Measured during Draw, which is the only place with a UIContext to measure text with, and
+	// falls back to the row until the first frame has been drawn. See HitBounds.
 	mutable Bounds hitBounds_;
 	mutable bool hitBoundsValid_ = false;
 
-	std::string label_;
-	std::string help_;
 	// Negative means centred, which is what every row that is not a save slot wants.
 	float leftAlignX_ = -1.0f;
 	const VCS::Option *option_ = nullptr;
@@ -258,7 +281,14 @@ private:
 	static bool IsOptionPage(VCSMenuPage page);
 	static VCS::OptionPage ToOptionPage(VCSMenuPage page);
 
+	// Back, as the menu means it: up one page, and out to the world from the root. Shared by the
+	// key handler and - on a phone - by the one control in the corner, because a thumb has no
+	// Escape and no B button and had to scroll to the bottom of a page to find the BACK row.
+	// Returns false when nothing was done, which is only the main menu declining to close.
+	bool GoBack();
+
 	void OnResume(UI::EventParams &e);
+	void OnBack(UI::EventParams &e);
 	void OnLoadGame(UI::EventParams &e);
 	void OnExitGame(UI::EventParams &e);
 	// Asks first, then hands the game its own NEW GAME. The confirmation is ours because the row
@@ -344,6 +374,12 @@ public:
 	// here rather than in the destructor - the same rule, and the same bug, as VCSMenuScreen's.
 	void deviceLost() override;
 	void deviceRestored(Draw::DrawContext *draw) override;
+
+	// Looks again when storage permission arrives or the app comes back to the front. On a phone
+	// this screen is what a first run meets before the permission is granted - nothing under
+	// /sdcard could be read yet - and the disc is usually copied in from a computer while the app
+	// is in the background.
+	void sendMessage(UIMessage message, const char *value) override;
 
 protected:
 	void CreateViews() override;

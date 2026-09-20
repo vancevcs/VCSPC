@@ -60,6 +60,10 @@ enum class OptionPage {
 	// that reaches a setting the game already has but keeps somewhere this fork's menu offers no
 	// way into. Nothing else does.
 	Gameplay,
+
+	// The phone's own controls. Only reachable on a phone, because every row on it describes
+	// something a mouse and a pad do not have.
+	Touch,
 };
 
 struct Option {
@@ -100,6 +104,16 @@ struct Option {
 	// worse than one that is visibly unavailable. PPSSPP's own settings screen greys the same
 	// row against the same flag.
 	bool *enabledBy;
+
+	// A setting that is kept and saved but NOT offered on a page.
+	//
+	// It exists because "remove this row" and "remove this setting" are different requests, and
+	// the touch page was the case that needed telling apart: four of its nine rows were clutter
+	// on a screen that shows five and a half, and none of the four was something to stop
+	// supporting. Hidden ones load, save, and go on doing their jobs at whatever value the file
+	// holds - they are simply not something a player has to scroll past to reach the row they
+	// came for, and vcs.ini is still there for anyone who wants one back.
+	bool hidden;
 
 	// How the value reads, for the one case a label or a format string cannot say it. Resolution
 	// is that case: "2x" is the setting and "(960x544)" is what it produces, and the second half

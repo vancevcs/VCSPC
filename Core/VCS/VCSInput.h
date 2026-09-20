@@ -18,6 +18,7 @@
 #pragma once
 
 #include <optional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,152 @@ extern const InputKeyCode kVCSPadJumpButton;
 // that has a precondition; the definition in the .cpp lists the other thirteen.
 extern const InputKeyCode kVCSSubMissionKey;
 extern const InputKeyCode kVCSPadSubMissionButton;
+
+// --- Touch ------------------------------------------------------------------------------------
+//
+// The phone's controls: a THIRD device beside the keyboard and the pad, not a scheme of its own.
+// Every touch control is named after the PAD control it stands for and goes into the same
+// kVCSPadMappings table, so lock-on aiming, the scoped zoom rows, vaulting, the glances and the
+// Menu context all apply to a thumb without being taught that one exists.
+//
+// That is also why there is no touch mapping table: a table would be a second copy of a scheme
+// that already exists, free to drift from it. What the overlay decides is which controls are on
+// SCREEN in a given context, which is a question about layout rather than about meaning.
+//
+// Threading: the overlay runs on the UI thread, which is the same thread as the emu loop (see
+// AGENTS.md), but the held set is shared with the keyboard's and guarded by the same mutex
+// regardless - a pad on Windows really does arrive on another thread.
+struct VCSTouchSettings {
+	// Off hands the screen back to PPSSPP's own on-screen PSP pad.
+	bool enabled = true;
+
+	// How big the controls are, and how far from the edges they sit - one number, because those
+	// two cannot sensibly disagree: a bigger button that stayed where it was would overlap its
+	// neighbour. Everything in the layout table is multiplied by this, so the whole cluster grows
+	// inward from the corner it is anchored to.
+	float scale = 1.0f;
+
+	// Drag-to-look, in the virtual mouse counts VCSCamera measures everything in, per dp of
+	// finger travel. Expressed in mouse counts for the reason VCSPadSettings::lookSpeed is: the
+	// delta goes into the accumulator the mouse fills, so the sensitivity, the FOV scale and the
+	// free-aim solver are the code that was measured against a mouse rather than a copy of it.
+	float lookSpeed = 2.0f;
+	bool invertLookY = false;
+
+	// How far the thumb travels for full deflection, in dp, and whether the stick appears where
+	// the thumb lands (the phone ports' behaviour) or stays where it is drawn.
+	float stickRadius = 62.0f;
+	bool floatingStick = true;
+
+	// Below this the stick reads as centred, as a fraction of the radius. A thumb resting on
+	// glass is never quite still.
+	float stickDeadzone = 0.12f;
+
+	// What steers in a vehicle: 0 the arrows, 1 the stick. The arrows are the default because
+	// that is what the trilogy's phone ports put there, and because a thumb on a stick cannot
+	// feel the centre. Tilt is not built yet.
+	int steering = 0;
+
+	// During a cutscene the controls come off and two of our own go up: skip, and pause. A
+	// switch rather than a fact, because the signal underneath it is a correlation rather than a
+	// gate anyone has read in the game's code - see the note over VCSTouchState::cutscene.
+	bool hideInCutscene = true;
+
+	bool haptics = true;
+};
+
+VCSTouchSettings &TouchSettings();
+
+// --- Where the player has moved the controls to --------------------------------------------------
+//
+// The layout table in UI/VCSTouchControls.cpp says where a control STARTS; this says how far the
+// player has dragged it since, in dp, keyed by that row's `id`. Empty means "as designed", which
+// is also what Reset puts back - a control with no entry here is not stored, so a fresh install
+// and a reset layout are the same file.
+//
+// It lives in Core rather than beside the layout for one reason: vcs.ini is written here, and a
+// setting the UI owns but Core persists is a setting with two homes. See SaveSettings.
+struct VCSTouchOffset {
+	float dx = 0.0f;
+	float dy = 0.0f;
+};
+
+// Keyed by control id. Read when the overlay is built and when the editor draws; written only by
+// the editor. UI thread throughout - the same thread the overlay itself runs on.
+std::map<std::string, VCSTouchOffset> &TouchLayoutOffsets();
+
+// What the layout uses: the saved offset, or nothing.
+VCSTouchOffset TouchOffsetFor(const char *id);
+void SetTouchOffset(const char *id, float dx, float dy);
+void ClearTouchLayout();
+
+// Bumped by every change above.
+//
+// It exists because there are TWO overlays at once while the editor is open - the game's, behind
+// the paused screen, and the editor's - and the game's has no way of being told that the other
+// one moved something. Watching a counter is how it finds out, and it costs one integer compare
+// per frame against plumbing a notification between two screens that do not know about each
+// other.
+uint32_t TouchLayoutGeneration();
+
+// A touch control going down or up. `padButton` is the pad's own keycode - see kVCSPadMappings.
+void SetTouchButton(InputKeyCode padButton, bool down);
+bool IsTouchButtonDown(InputKeyCode padButton);
+
+// The movement stick, -1..1 with positive Y AWAY from the player, which is the convention the
+// PSP's nub and this layer's pad path both use.
+void SetTouchStick(float x, float y);
+void GetTouchStick(float *x, float *y);
+
+// A look drag, in dp. Pushed into the accumulator the mouse and the right stick share.
+void AddTouchLook(float dx, float dy);
+
+// Let go of everything. Called when the overlay goes away - our own menu, a loading curtain - for
+// the reason ResetHostKeys is called there: a control whose release is never delivered is held
+// forever, and a held aim control latches the Aiming context for the rest of the session.
+void ResetTouchInput();
+
+// What the overlay needs to know to decide which controls to show. Published once a tick by
+// VCSGame::Tick, which is the only place allowed to read PSP memory; the overlay reads this
+// snapshot and never the game.
+struct VCSTouchState {
+	bool active = false;                 // the layer is live and a context resolved
+	VCSInputContext context = VCSInputContext::Unknown;
+	VehicleClass vehicleClass = VehicleClass::Unknown;
+	bool armed = false;                  // something that shoots is in hand
+	bool melee = false;                  // fists or a melee weapon
+	bool scoped = false;                 // a scope, the binoculars or the camera is up
+	bool lockedOn = false;               // the game has a target
+	bool ledgeAhead = false;             // the vault probe has something to climb
+	bool driveBy = false;                // riding shotgun with a weapon out
+
+	// The game is playing a cutscene, so the player has no control and the controls should not
+	// be sitting on top of it. Skip and pause go up instead.
+	//
+	// WHAT THIS RESTS ON, because it is softer than anything else in this struct. The signal is
+	// the HUD going away (RadarOnScreen), and inside that the one field that was found by
+	// diffing the whole HUD object across a cutscene rather than by reading the code that gates
+	// it - see kVCSHudCutscene. So a build where that correlation stops holding hides the
+	// controls during ordinary play, which is why hideInCutscene exists to turn it off and why
+	// the PAUSE button is on screen whenever this is: a player who loses their controls to a bad
+	// read must still be able to reach the menu.
+	//
+	// It is also why the player's own HUD setting is consulted before believing it at all. A
+	// player who turned the panel off has a screen that looks exactly like a cutscene to this.
+	bool cutscene = false;
+};
+
+VCSTouchState TouchState();
+void PublishTouchState(VCSInputContext context);
+
+// Skip a cutscene: hold the game's own skip control for a few frames.
+//
+// Cross, because that is what was MEASURED to skip the credits - see UpdateBootPhase - and
+// because it is the harmless guess if in-game cutscenes turn out to want something else. A
+// wrong Cross does nothing; a wrong Start would open the game's own pause menu on top of the
+// scene. Unverified against an in-game cutscene: nobody has had the disc and a controller in the
+// same room since this went in, and it is one constant to change if it turns out to be Start.
+void RequestCutsceneSkip();
 
 // Which page of the read-only controls listing a row appears on, if any.
 //

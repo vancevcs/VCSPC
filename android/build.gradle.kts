@@ -185,6 +185,9 @@ android {
 		create("legacy") {
 			res.directories.add("legacy/res")
 		}
+		create("vcs") {
+			res.directories.add("vcs/res")
+		}
 	}
 	productFlavors {
 		create("normal") {
@@ -270,6 +273,33 @@ android {
 				abiFilters.addAll(listOf("arm64-v8a"))
 			}
 		}
+		// Fork-specific: GTA: Vice City Stories as a sideloaded app of its own. Its own id, so it
+		// installs beside a normal PPSSPP instead of over it. targetSdk 29 for the same reason the
+		// legacy flavor has it: plain file paths, so the game reads /sdcard/GTAVCS/ directly instead
+		// of through the storage framework - thousands of texture files make that difference felt.
+		// Signed with the debug keystore on every build type, because it is never going to a store
+		// and a release build nobody can install is no use.
+		create("vcs") {
+			applicationId = "io.github.vancevcs.vcsmobile"  // beside the Mac build's io.github.vancevcs.vcspc
+			dimension = "variant"
+			targetSdk = 29
+			signingConfig = signingConfigs.getByName("debug")
+			externalNativeBuild {
+				cmake {
+					arguments.addAll(listOf(
+						"-DANDROID=true",
+						"-DANDROID_PLATFORM=android-21",
+						"-DANDROID_TOOLCHAIN=clang",
+						"-DANDROID_CPP_FEATURES=",
+						"-DANDROID_STL=c++_shared",
+						"-DANDROID_LEGACY=TRUE"
+					))
+				}
+			}
+			ndk {
+				abiFilters.addAll(listOf("arm64-v8a"))
+			}
+		}
 	}
 	buildFeatures {
 		aidl = true
@@ -283,7 +313,8 @@ androidComponents {
 			"normalDebug", "normalOptimized", "normalRelease",
 			"goldDebug", "goldRelease",
 			"vrDebug", "vrOptimized", "vrRelease",
-			"legacyDebug", "legacyOptimized", "legacyRelease"
+			"legacyDebug", "legacyOptimized", "legacyRelease",
+			"vcsDebug", "vcsRelease"
 		)
 		variantBuilder.enable = variantBuilder.name in enabledVariants
 	}

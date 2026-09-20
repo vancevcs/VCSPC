@@ -19,6 +19,7 @@
 
 #include <string>
 
+#include "ppsspp_config.h"
 #include "Common/CommonTypes.h"
 #include "Common/File/Path.h"
 // For kVCSVolumeMax, which is the range the two volume settings below are expressed in.
@@ -99,7 +100,10 @@ bool IsGameBuild();
 // The folder the player put the game in, which is where a disc image and the memory stick are
 // looked for. On Windows that is the exe's own folder, as it always was. On macOS the executable
 // sits inside its .app bundle, and the folder the player can see is the one holding the bundle.
+// On Android there is no exe folder the player can see, so NativeInit names one with
+// SetGameFolder before anything asks - GTAVCS at the root of storage.
 const Path &GameFolder();
+void SetGameFolder(const Path &path);
 
 // Presentation settings this module owns, as opposed to the ones that belong to a mechanic.
 //
@@ -133,6 +137,24 @@ inline constexpr int kVCSWaterOff = 0;
 inline constexpr int kVCSWaterSea = 1;
 inline constexpr int kVCSWaterSeaAndRoads = 2;
 
+// Where both rows start, and what "restore defaults" puts back - one constant each, so the struct
+// below and the option row cannot disagree. They used to: the struct started shadows at HIGH and
+// the row restored MEDIUM.
+//
+// A phone starts at the cheap end. Both passes capture and transform the scene on the CPU every
+// frame, and a phone's CPU is what a PSP emulator runs short of first. Measure there, then raise.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+inline constexpr int kVCSShadowsDefault = kVCSShadowsOff;
+inline constexpr int kVCSWaterDefault = kVCSWaterSea;
+// A phone's screen is always wider than the PSP's, so the fix has something to do from the first
+// boot. Off on a desktop, where the window is usually 16:9 and the player chose its shape.
+inline constexpr int kVCSWidescreenDefault = 1;  // WidescreenMode::Crop
+#else
+inline constexpr int kVCSShadowsDefault = kVCSShadowsProps;
+inline constexpr int kVCSWaterDefault = kVCSWaterSeaAndRoads;
+inline constexpr int kVCSWidescreenDefault = 0;
+#endif
+
 struct VCSGameSettings {
 	bool showFps = false;
 
@@ -146,7 +168,7 @@ struct VCSGameSettings {
 	// and a player choosing between them is making a single decision. It was a bool plus
 	// a choice, which meant a mode row that greyed out and a saved mode that went on
 	// existing while the feature was off.
-	int shadows = kVCSShadowsProps;
+	int shadows = kVCSShadowsDefault;
 
 	// Better water, and rain on the roads. Ours rather than the game's - see
 	// GPU/Common/VCSWater.cpp - so like `shadows` it reaches the renderer through an onChange in
@@ -156,7 +178,19 @@ struct VCSGameSettings {
 	// not a reason to split it into its own row: a player who turns water up wants the weather to
 	// look right when it arrives, and a row that appears to do nothing when you move it is worse
 	// than one whose effect waits for the rain.
-	int water = kVCSWaterSeaAndRoads;
+	int water = kVCSWaterDefault;
+
+	// The radar in the top-left corner instead of the bottom-left, where the phone ports of the
+	// trilogy have always put it - and where, on a phone, the left thumb is not sitting on it.
+	//
+	// A code patch rather than a write, because the rect is four compiled-in constants; see
+	// kVCSRadarTopNarrow. It is applied once before the game runs, so changing it takes effect on
+	// the next boot, exactly like World memory above.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+	bool radarTopLeft = true;
+#else
+	bool radarTopLeft = false;
+#endif
 
 	// How many times the retail 4.75MB of resident world to keep. This is the whole of how
 	// far VCS can see - four distance mechanisms were patched and measured and none of them
@@ -182,6 +216,11 @@ struct VCSGameSettings {
 	// after that uses what they set here.
 	int sfxVolume = kVCSVolumeMax;
 	int radioVolume = kVCSVolumeMax;
+
+	// A wider view on a screen wider than the PSP's - see the Widescreen section at the bottom of
+	// this file for what the three positions do. On a phone, where the screen always IS wider,
+	// the default is the one that keeps the HUD's shape.
+	int widescreen = kVCSWidescreenDefault;
 };
 
 VCSGameSettings &GameSettings();
@@ -210,5 +249,88 @@ const std::string &GetDiscID();
 // is genuinely useful while bringing the module up - a frozen counter means the vblank hook
 // isn't wired.
 u64 GetTickCount();
+
+// --- Widescreen ----------------------------------------------------------------------------------
+//
+// THE PROBLEM. The PSP's screen is 480x272, which is 16:9.06. A modern phone is 19.5:9 or wider.
+// PPSSPP can do one of two things with that and neither is right: keep the aspect and leave black
+// bars down both sides, or stretch the frame to fill and make everything 20% wide.
+//
+// THE FIX, which is what every GTA widescreen mod does. The frame is stretched to fill, and the
+// 3D is rendered PRE-SQUASHED by the same factor so that it comes out correct - which means the
+// projection now covers a wider field of view, so about 20% more of the world is visible. Nothing
+// is distorted and nothing is cropped; you simply see more, which is what the extra glass is for.
+//
+// WHY IT IS DONE HERE RATHER THAN IN THE GAME. A real widescreen mod patches the game's own FOV,
+// and that would be the better answer for everything downstream - the game would know. It needs
+// an address hunt this fork has not done, and the renderer can reach the same place without one:
+// PPSSPP's through-mode (2D) draws never touch `u_proj`, so the 3D projection can be widened on
+// its own with the HUD untouched. The two places that ALSO read `gstate.projMatrix` - the shadow
+// and water passes - are this fork's own, and apply the same widening to stay aligned.
+//
+// TWO WAYS TO FILL THE SCREEN, and the row offers both because they trade against each other.
+//
+// HOR+ keeps the vertical field of view and widens the horizontal one, so about 20% more of the
+// world is visible. That is the generous reading of "widescreen" and it has a cost this fork can
+// see and cannot fix from here: the game culls and streams against ITS OWN idea of the view, so
+// the strip of world either side that it never expected to show is a strip where objects appear
+// and vanish as you turn. Reported from play, in those words.
+//
+// VERT- keeps the horizontal field of view and narrows the vertical one instead - the frame is
+// filled by cropping the top and bottom rather than by revealing anything new. Nothing enters the
+// frustum that was not already in it, so there is nothing to pop, whatever the culling mechanism
+// turns out to be. That argument holds without knowing what it is, which is why this is the
+// default: four distance mechanisms have been found, patched and measured inert for this game
+// (see "The hunt for the visibility function"), so the one that is really deciding is still
+// unidentified and cannot be widened to match.
+//
+// The HUD is squashed in both, because the frame is stretched horizontally in both.
+
+enum class WidescreenMode {
+	Off = 0,
+	Crop = 1,   // VERT-: fill the screen by cropping top and bottom. Nothing new, nothing pops.
+	Wider = 2,  // HOR+: fill it by showing ~20% more world, and accept the pop-in at the edges.
+};
+
+// How far the frame is squashed horizontally before it is stretched back out: the PSP's aspect
+// over the device's, so 0.836 on a 19.5:9 phone and 1.0 whenever this is off.
+//
+// A plain variable rather than a call into Core because it is read once per DRAW CALL, which is
+// the same reason VCSShadow::g_active is one. Never above 1: a screen narrower than the PSP's
+// would need the opposite correction, and pillarboxing it is already right.
+extern float g_widescreenSquash;
+// Whether the 2D half is squashed with it - `Full` rather than `ThreeD`. Read per draw too.
+extern bool g_widescreenSquashesHud;
+
+// Whether the draw being set up right now had its 2D vertices squashed.
+//
+// Set by the software transform, which is the only place that knows - the decision is per draw,
+// because anything covering the screen is exempt - and read moments later when the scissor is
+// converted, which happens after it in the same Flush.
+//
+// IT EXISTS BECAUSE THE FIRST BUILD MOVED THE VERTICES AND NOT THE CLIP. The radar's map is
+// drawn clipped to its own circle; squashing the content while the scissor stayed put slid the
+// map sideways inside the ring, which is exactly how it was reported - "the minimap content is
+// displaced by one half".
+extern bool g_widescreenSquashedDraw;
+
+inline bool WidescreenActive() { return g_widescreenSquash < 0.999f; }
+
+// Correct a PSP projection matrix for the device's aspect, whichever way the row asks for. Both
+// the shader upload and the two passes that capture the same matrix go through this, so none of
+// them can end up describing a different view from the others.
+//
+// gstate's 16 floats become a column-major mat4 and the shader does `u_proj * viewPos`, so the x
+// row of the product is elements 0, 4, 8 and 12 and the y row is 1, 5, 9 and 13 - not the first
+// four and the second four, which is the mistake this comment exists to stop somebody making.
+void WidenProjection(float *matrix16);
+
+// Move a horizontal screen span into the band the HUD is squashed into. A no-op unless the HUD
+// half is on. Everything this fork draws ON the game's HUD - the route line, the map cursor, the
+// radar and weapon tap zones - has to ask, or it lands beside what it is meant to sit on.
+void ApplyHudSquash(float *x, float *width);
+
+// Recompute from the setting and the current display. Called when either might have changed.
+void RefreshWidescreen();
 
 }  // namespace VCS

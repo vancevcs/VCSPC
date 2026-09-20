@@ -56,6 +56,7 @@
     <ClCompile Include="ImDebugger\ImJitViewer.cpp" />
     <ClCompile Include="ImDebugger\ImVCS.cpp" />
     <ClCompile Include="VCSMenuScreen.cpp" />
+    <ClCompile Include="VCSTouchControls.cpp" />
     <ClCompile Include="ImDebugger\ImMemView.cpp" />
     <ClCompile Include="ImDebugger\ImStructViewer.cpp" />
     <ClCompile Include="JitCompareScreen.cpp" />
@@ -118,6 +119,7 @@
     <ClInclude Include="ImDebugger\ImJitViewer.h" />
     <ClInclude Include="ImDebugger\ImVCS.h" />
     <ClInclude Include="VCSMenuScreen.h" />
+    <ClInclude Include="VCSTouchControls.h" />
     <ClInclude Include="ImDebugger\ImMemView.h" />
     <ClInclude Include="ImDebugger\ImStructViewer.h" />
     <ClInclude Include="JitCompareScreen.h" />

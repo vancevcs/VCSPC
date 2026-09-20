@@ -117,17 +117,23 @@ SYSTEM_SKIP_NAMES = {"vcs_autosaves.txt"}     # a ledger of which of THIS machin
 SYSTEM_SKIP_DIRS = {"CACHE", "DUMP"}
 
 
-def sanitise_vcs_ini(text):
+def sanitise_vcs_ini(text, force=None):
+    force = force or {}
     out = []
     for line in text.splitlines():
-        if line.strip().split("=", 1)[0].strip() == "GamePath":
+        key = line.strip().split("=", 1)[0].strip()
+        if key == "GamePath":
             out.append("GamePath = ")
+            continue
+        if key in force:
+            out.append(f"{key} = {force[key]}")
             continue
         out.append(line)
     return "\n".join(out).rstrip() + "\n"
 
 
-def sanitise_ini(text):
+def sanitise_ini(text, extra_force=None):
+    forced = dict(INI_FORCE, **(extra_force or {}))
     out = []
     section = None
     for line in text.splitlines():
@@ -139,8 +145,8 @@ def sanitise_ini(text):
         key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
         if key in INI_DROP_KEYS:
             continue
-        if key in INI_FORCE:
-            out.append(f"{key} = {INI_FORCE[key]}")
+        if key in forced:
+            out.append(f"{key} = {forced[key]}")
             continue
         out.append(line)
     return "\n".join(out).rstrip() + "\n"
@@ -334,11 +340,20 @@ def build(out_dir, make_zip, with_textures):
 
 # The memory stick is the same on every platform, and so is everything said about it above: the
 # keyboard text, the tuned settings with this machine taken out of them, and the HD pack.
-def stage_memstick(out_dir, with_textures):
-    gxt = ROOT / "memstick" / "PSP" / "VCS" / "ENGLISH.GXT"
-    vcs_dir = out_dir / "memstick" / "PSP" / "VCS"
-    vcs_dir.mkdir(parents=True)
-    shutil.copy2(gxt, vcs_dir / "ENGLISH.GXT")
+# The converted pack, if Tools/vcsktx2.py has been run. A phone cannot read the .dds pack at all
+# - see that script - so on Android this is the only pack worth shipping, and its absence is worth
+# saying out loud rather than quietly shipping 748MB the GPU will skip.
+KTX2_PACK = ROOT / "dist" / "textures-ktx2" / "ULUS10160"
+
+
+def stage_memstick(out_dir, with_textures, android=False):
+    # The keyboard text names keys - LEFT MOUSE, WASD - which on a phone is worse than the PSP's
+    # own button names the game falls back to without it. A touch vocabulary replaces it later.
+    if not android:
+        gxt = ROOT / "memstick" / "PSP" / "VCS" / "ENGLISH.GXT"
+        vcs_dir = out_dir / "memstick" / "PSP" / "VCS"
+        vcs_dir.mkdir(parents=True)
+        shutil.copy2(gxt, vcs_dir / "ENGLISH.GXT")
 
     system = out_dir / "memstick" / "PSP" / "SYSTEM"
     system.mkdir(parents=True)
@@ -346,7 +361,8 @@ def stage_memstick(out_dir, with_textures):
     if not dev_ini.is_file():
         fail("memstick/PSP/SYSTEM/ppsspp.ini is missing - it is what the package ships")
     (system / "ppsspp.ini").write_text(
-        sanitise_ini(dev_ini.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+        sanitise_ini(dev_ini.read_text(encoding="utf-8", errors="replace"),
+                     ANDROID_INI_FORCE if android else None), encoding="utf-8")
 
     # Everything else the running build keeps in SYSTEM, so a packaged copy is the same program
     # in the same state - see SYSTEM_SKIP_NAMES.
@@ -357,7 +373,8 @@ def stage_memstick(out_dir, with_textures):
             continue
         if entry.name == "vcs.ini":
             (system / "vcs.ini").write_text(
-                sanitise_vcs_ini(entry.read_text(encoding="utf-8", errors="replace")),
+                sanitise_vcs_ini(entry.read_text(encoding="utf-8", errors="replace"),
+                                 ANDROID_VCS_INI_FORCE if android else None),
                 encoding="utf-8")
             continue
         shutil.copy2(entry, system / entry.name)
@@ -366,6 +383,12 @@ def stage_memstick(out_dir, with_textures):
     # `new/` is where SaveNewTextures dumps and is referenced by nothing in textures.ini.
     if with_textures:
         src_tex = ROOT / "memstick" / "PSP" / "TEXTURES" / "ULUS10160"
+        if android:
+            if not KTX2_PACK.is_dir():
+                fail("the converted pack is missing - run Tools/vcsktx2.py, or pass --no-textures."
+                     " The .dds pack cannot be used on a phone: the GPU cannot sample BC7 and"
+                     " PPSSPP skips every file.")
+            src_tex = KTX2_PACK
         if not src_tex.is_dir():
             fail("the texture pack is missing - pass --no-textures to build without it")
         dst_tex = out_dir / "memstick" / "PSP" / "TEXTURES" / "ULUS10160"
@@ -741,6 +764,130 @@ def build_mac(out_dir, make_zip, with_textures):
     finish_package(out_dir, make_zip, MAC_README)
 
 
+# --- Android ------------------------------------------------------------------------------------
+#
+# An APK and a GTAVCS folder. NativeInit on Android looks for exactly that folder at the root of
+# the phone's storage and uses its memstick/, and the disc goes in beside it - the PC layout with
+# the exe taken out. Built by `./gradlew :android:assembleVcsRelease`, which signs with the repo's
+# debug keystore: this is sideloaded, never sent to a store.
+ANDROID_APK = ROOT / "android" / "build" / "outputs" / "apk" / "vcs" / "release" / "android-vcs-release.apk"
+ANDROID_APK_NAME = "GTA Vice City Stories.apk"
+ANDROID_FOLDER = "GTAVCS"
+
+# What a phone needs different from the tuned desktop config. The rule stays "keep everything and
+# name what changes" - see INI_FORCE - and these are the changes.
+ANDROID_INI_FORCE = {
+    "CacheFullIsoInRam": "False",    # 1.6 GB of RAM on a PC; the whole phone has 6
+    "InternalResolution": "2",       # 960x544. Auto would pick 4x on a 1080p screen; raise it once measured
+    "DisplayStretch": "True",        # the widescreen fix renders pre-corrected for this
+    "ShowTouchControls": "True",     # the switch the VCS overlay is gated on as well
+    "UIScaleFactor": "0",            # the Android default; -1 is the desktop's
+    "UseMouse": "False",
+}
+# Both of these capture and transform the scene on the CPU every frame. Start a phone at the cheap
+# end and raise them once the frame rate is known - the same defaults the code gives a phone.
+ANDROID_VCS_INI_FORCE = {
+    "Shadows": "0",
+    "Water": "1",
+}
+
+ANDROID_README = """GTA: Vice City Stories - Android
+=================================
+
+A build of PPSSPP that only plays Vice City Stories, for a phone.  Touch
+controls of its own, a menu of its own, and the HD texture pack converted to
+a format phone GPUs can actually read.
+
+It needs an arm64 phone with Android 8.1 or later.
+
+
+Setting it up
+-------------
+
+1. Copy the "GTAVCS" folder to the root of the phone's internal storage, so
+   you end up with Internal storage/GTAVCS/memstick.  Over USB, or:
+
+       adb push GTAVCS /sdcard/
+
+2. Put your own copy of the game in that GTAVCS folder, beside memstick.
+   The USA disc, ULUS10160, as .iso or .cso.  It is not included and cannot
+   be.
+
+       adb push "Vice City Stories.iso" /sdcard/GTAVCS/
+
+3. Install "GTA Vice City Stories.apk".  Android asks you to allow installs
+   from whichever app opens it.  Or:
+
+       adb install "GTA Vice City Stories.apk"
+
+4. Open it and allow access to files when asked.  It needs that to read
+   the GTAVCS folder.  The game starts by itself once it finds the disc.
+
+It installs beside a normal PPSSPP and shares nothing with it.
+
+
+The controls
+------------
+
+They change with what you are doing - on foot, aiming, driving, flying, and
+on the game's own map and stats pages - so what is on screen is what there
+is to press.  A few that are not obvious:
+
+- One button is jump AND sprint.  Hold it to sprint, tap it twice to jump.
+- TARGET is a toggle, not a button to hold down.
+- In a car, the two buttons on the left look to that side and fire, which is
+  how a drive-by works.
+- Tap the radar to open the menu.  Tap the weapon in the corner to change
+  weapon.
+- During a cutscene the controls come off and you get SKIP and PAUSE.
+
+OPTIONS -> TOUCH CONTROLS has size, look speed and steering, and ARRANGE
+CONTROLS, which lets you drag every button to wherever your thumbs are.
+
+A Bluetooth controller works as well, with the layout the PC build uses for
+a pad: the triggers aim and fire, the right stick looks, Start opens the
+menu.  The phone's own back gesture opens it too.
+
+The game's help text still names PSP buttons - "press the X button" - rather
+than naming a control on screen.
+
+
+Graphics
+--------
+
+OPTIONS -> DISPLAY SETUP starts with shadows off and water at MEDIUM, which
+is the cheap end.  Turn them up once you know how the game runs on yours.
+
+WIDESCREEN fills a screen wider than the PSP's without stretching anything.
+CROP trims the top and bottom of the view.  WIDER shows about 20% more of
+the world instead, which looks better standing still - but the game only
+loads what it expects to draw, so scenery appears and vanishes at the edges
+as you turn.
+
+
+The HD textures
+---------------
+
+Included, converted to a format phone GPUs can read (KTX2/UASTC - the .dds
+pack the PC build uses cannot be sampled by a Mali or PowerVR GPU at all).
+OPTIONS -> DISPLAY SETUP -> TEXTURE QUALITY switches between these and the
+PSP's own.
+"""
+
+
+def build_android(out_dir, make_zip, with_textures):
+    if not ANDROID_APK.is_file():
+        fail(f"{ANDROID_APK.relative_to(ROOT)} not found - run ./gradlew :android:assembleVcsRelease first")
+
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    shutil.copy2(ANDROID_APK, out_dir / ANDROID_APK_NAME)
+    stage_memstick(out_dir / ANDROID_FOLDER, with_textures, android=True)
+    finish_package(out_dir, make_zip, ANDROID_README)
+
+
 def main():
     mac = sys.platform == "darwin"
     ap = argparse.ArgumentParser(description=__doc__,
@@ -752,7 +899,16 @@ def main():
                     help="leave the HD pack out (much smaller, PSP textures only)")
     ap.add_argument("--no-saves", action="store_true",
                     help="skip the separate saves package")
+    ap.add_argument("--android", action="store_true",
+                    help="package the Android APK and its GTAVCS folder instead")
     args = ap.parse_args()
+    if args.android:
+        out = args.out
+        if out == ap.get_default("out"):
+            out = str(ROOT / "dist" / "GTA Vice City Stories Android")
+        # No saves package: its README walks through desktop folders.
+        build_android(Path(out), args.zip, not args.no_textures)
+        return
     (build_mac if mac else build)(Path(args.out), args.zip, not args.no_textures)
     if not args.no_saves:
         # Beside the game's package, not inside it.

@@ -1089,7 +1089,8 @@ void CameraTick(VCSInputContext context) {
 	// It cannot let a delta through that nobody asked for: each device gates its own contribution
 	// at the entry point (HandleMouseDelta on the mouse's flag, ApplyPadLook on the pad's), so
 	// with both off nothing fills the accumulator and there is nothing here to apply.
-	if ((!g_settings.enabled && !PadSettings().enabled) || !ContextDrivesCamera(context)) {
+	if ((!g_settings.enabled && !PadSettings().enabled && !TouchSettings().enabled) ||
+			!ContextDrivesCamera(context)) {
 		g_holdFrames = 0;
 		g_lastContext = context;
 		return;

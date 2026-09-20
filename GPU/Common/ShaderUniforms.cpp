@@ -9,6 +9,7 @@
 #include "Common/Math/CrossSIMD.h"
 #include "Common/Math/lin/vec3.h"
 #include "Common/TimeUtil.h"
+#include "Core/VCS/VCSGame.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Common/GPUStateUtils.h"
@@ -73,6 +74,11 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 
 	if (dirtyUniforms & DIRTY_PROJMATRIX) {
 		CopyMatrix4x4(ub->proj, gstate.projMatrix);
+		// Fork-specific: the widescreen fix, which is a scale on this matrix's X output and
+		// nothing else. Here because through-mode draws never reach u_proj, so the 3D can be
+		// widened without the HUD moving - see the Widescreen section in Core/VCS/VCSGame.h.
+		// Returns on its first line for every other game and whenever the setting is off.
+		VCS::WidenProjection(ub->proj);
 		ub->rotation = useBufferedRendering ? 0 : (float)g_display.rotation;
 	}
 

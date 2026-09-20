@@ -60,12 +60,21 @@ static void ApplyWaterSetting() {
 	VCSWater::SetEnabled(mode != kVCSWaterOff);
 }
 
+// The widescreen row, which owns the display's STRETCH as well as the squash factor - see
+// RefreshWidescreen for why both live in the one function that also runs every tick.
+static void ApplyWidescreenSetting() {
+	RefreshWidescreen();
+}
+
 // Labels for the Choice options. These mirror PPSSPP's own settings screen so the two never
 // disagree about what a given index means.
 static const char *const kResolutionLabels[] = {
 	"Auto", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x", "10x",
 };
 static const char *const kAnisoLabels[] = { "Off", "2x", "4x", "8x", "16x" };
+
+// The three positions of the Widescreen row, in the order WidescreenMode declares them.
+static const char *const kWidescreenLabels[] = { "Off", "Crop", "Wider" };
 
 // A quality ladder, in the same voice as the Texture quality row above it on the page.
 //
@@ -88,6 +97,10 @@ static const char *const kShadowLabels[] = {
 // wet roads are all of it. A ladder does not have to have four rungs to be a ladder.
 //
 // The index is unchanged: 0 off, 1 sea only, 2 sea and wet roads.
+// Which control steers in a vehicle. Arrows are what the trilogy's phone ports put there, and
+// what a thumb can find without looking - a stick has no centre you can feel.
+static const char *const kSteeringLabels[] = { "ARROWS", "STICK" };
+
 static const char *const kWaterLabels[] = {
 	"LOW", "MEDIUM", "HIGH",
 };
@@ -149,6 +162,15 @@ const std::vector<Option> &Options() {
 			// at startup" - the same trap addInt and addChoice take an explicit default to avoid.
 			opt.defaultBool = external ? defaultValue : *value;
 			opts.push_back(opt);
+		};
+
+		// Keep the row just added but do not offer it - see Option::hidden. Written as an
+		// afterthought call for the same reason enabledBy's is: it applies to one row in a table
+		// of sixty, and threading a parameter through four add helpers to say so would be worse.
+		auto hideLast = [&opts]() {
+			if (!opts.empty()) {
+				opts.back().hidden = true;
+			}
 		};
 
 		// Ties the row just added to another setting, so it greys out when that one is off.
@@ -286,6 +308,61 @@ const std::vector<Option> &Options() {
 		addFloat(OptionPage::Controller, "PadDeadzone", "Stick deadzone",
 			"How far a stick must move before it counts. Raise it if the camera drifts at rest.",
 			&pad.deadzone, 0.02f, 0.45f);
+
+		// --- Touch ---
+		//
+		// Everything here is about a thumb on glass, so the page is not offered on a desktop -
+		// see OptionPage::Touch. The rows are still BUILT there: the table is one list, and a
+		// build-time hole in it would mean an ini written on a phone losing these values the
+		// first time it was opened anywhere else.
+		{
+			VCSTouchSettings &touch = TouchSettings();
+			addFloat(OptionPage::Touch, "TouchSize", "Control size",
+				"How big the on-screen controls are. Bigger is easier to hit and covers more of "
+				"the game.",
+				&touch.scale, 0.7f, 1.5f);
+			addFloat(OptionPage::Touch, "TouchLookSpeed", "Look sensitivity",
+				"How far the camera turns for a given drag.",
+				&touch.lookSpeed, 0.5f, 6.0f);
+			addBool(OptionPage::Touch, "TouchInvertLookY", "Invert look vertically",
+				"Drag up to look down.", &touch.invertLookY);
+			addChoice(OptionPage::Touch, "TouchSteering", "Steering",
+				"ARROWS gives a car two buttons to steer with; STICK steers with the same stick "
+				"you walk with.",
+				&touch.steering, kSteeringLabels, ARRAY_SIZE(kSteeringLabels), 0);
+			// FOUR ROWS AND THE ARRANGE ACTION, and everything else moved or came off.
+			//
+			// This page had nine rows on a screen that shows five and a half, which is a page you
+			// scroll to configure the thing you are looking at. The four that are left are the
+			// ones a player actually reaches for; the rest are still in the table, still saved,
+			// still doing their jobs at their defaults, and hand-editable in vcs.ini.
+			//
+			// The cutscene switch is the one that did NOT simply come off, and the reason it
+			// moved rather than vanished is that it is a safety valve: the signal behind it is a
+			// correlation, and a build where it stops holding takes the controls away during
+			// ordinary play. It belongs on Gameplay anyway - it is a statement about what happens
+			// during cutscenes, not about the shape of a button - so it is there now.
+			addBool(OptionPage::Gameplay, "TouchHideInCutscene", "Clear screen for cutscenes",
+				"Takes the on-screen controls off during a cutscene and offers SKIP and PAUSE "
+				"instead. Turn it off if they ever vanish during ordinary play.",
+				&touch.hideInCutscene);
+			addBool(OptionPage::Touch, "TouchFloatingStick", "Floating stick",
+				"The stick appears wherever your thumb lands, instead of sitting in one place.",
+				&touch.floatingStick);
+			hideLast();
+			addFloat(OptionPage::Touch, "TouchStickRadius", "Stick travel",
+				"How far your thumb moves for a full push.",
+				&touch.stickRadius, 40.0f, 100.0f);
+			hideLast();
+			addBool(OptionPage::Touch, "TouchHaptics", "Vibration",
+				"A short tick when a control is pressed.", &touch.haptics);
+			hideLast();
+			addInt(OptionPage::Touch, "TouchOpacity", "Control opacity",
+				"How solid the controls look.",
+				&g_Config.iTouchButtonOpacity, 15, 100, 5,
+				Config::GetDefaultValueInt(&g_Config.iTouchButtonOpacity), true);
+			hideLast();
+		}
 
 		// --- Aiming ---
 
@@ -440,7 +517,7 @@ const std::vector<Option> &Options() {
 			"Real shadows from the sun, which the PSP game has none of. MEDIUM shadows people and "
 			"vehicles, HIGH adds props like lamp posts and bins, ULTRA shadows the whole city.",
 			&GameSettings().shadows, kShadowLabels,
-			ARRAY_SIZE(kShadowLabels), kVCSShadowsEntities, false, []() {
+			ARRAY_SIZE(kShadowLabels), kVCSShadowsDefault, false, []() {
 				ApplyShadowSetting();
 			});
 
@@ -458,8 +535,25 @@ const std::vector<Option> &Options() {
 			"Waves, reflections and sun glint on the sea, which the PSP draws as one flat colour. "
 			"HIGH also makes the roads go wet and catch droplets while it is raining.",
 			&GameSettings().water, kWaterLabels,
-			ARRAY_SIZE(kWaterLabels), kVCSWaterSeaAndRoads, false, []() {
+			ARRAY_SIZE(kWaterLabels), kVCSWaterDefault, false, []() {
 				ApplyWaterSetting();
+			});
+
+		// The PSP's screen is 16:9.06 and a modern phone is wider, so PPSSPP either leaves black
+		// bars or stretches everything 20% wide. This does what a GTA widescreen mod does instead
+		// - see the Widescreen section in VCSGame.h.
+		// The KEY is renamed, deliberately, and this is the one case where the usual rule about
+		// never renaming one is wrong. Position 1 used to mean "widen the view and leave the HUD
+		// stretched" and now means "crop instead of widening" - the same number saying something
+		// else. A rename resets everybody to the new default, which is the only honest outcome
+		// when the scale itself has changed underneath the number.
+		addChoice(OptionPage::Graphics, "WidescreenFill", "Widescreen",
+			"Fills a screen wider than the PSP's without stretching it. CROP trims the top and "
+			"bottom; WIDER shows about 20% more world instead, but the game only loads what it "
+			"expects to draw, so things appear and vanish at the edges.",
+			&GameSettings().widescreen, kWidescreenLabels,
+			ARRAY_SIZE(kWidescreenLabels), kVCSWidescreenDefault, false, []() {
+				ApplyWidescreenSetting();
 			});
 
 		addChoice(OptionPage::Graphics, nullptr, "Anisotropic filtering",
@@ -518,6 +612,17 @@ const std::vector<Option> &Options() {
 		addBool(OptionPage::Gameplay, "Subtitles", "Subtitles",
 			"Dialogue as text on screen, during cutscenes and phone calls.",
 			&GameSettings().subtitles);
+		// Where the radar is drawn. A code patch applied before the game boots - see
+		// PatchRadarCorner - so the row says out loud that it waits for a restart, the way World
+		// memory does.
+		addBool(OptionPage::Gameplay, "RadarTopLeft", "Radar corner",
+			"TOP LEFT keeps the radar clear of your left thumb, the way the phone ports of the "
+			"trilogy have it. Takes effect next time the game starts.",
+			&GameSettings().radarTopLeft, false, GameSettings().radarTopLeft, nullptr,
+			[](const Option &opt) {
+				return std::string(*opt.boolValue ? "TOP LEFT" : "BOTTOM LEFT");
+			});
+
 		addBool(OptionPage::Gameplay, "Hud", "HUD",
 			"Health, armour, money, the weapon and the clock. The radar is separate and stays.",
 			&GameSettings().hud);
@@ -623,8 +728,26 @@ void LoadSettings() {
 	// switched-off feature has to cost a bool test rather than a call into Core. Pushed here as
 	// well as from the row's onChange, so the value in the file is live from the first frame
 	// rather than from the first time somebody opens the page.
+	// Where the player has dragged the on-screen controls to, which is a TABLE rather than a row
+	// and so cannot go through the option list above. Its own section, keyed by control id, so a
+	// hand-edited file reads as a list of what was moved rather than as forty numbers.
+	ClearTouchLayout();
+	if (const Section *layout = ini.GetSection("TouchLayout")) {
+		for (const auto &entry : layout->ToMap()) {
+			float dx = 0.0f, dy = 0.0f;
+			if (sscanf(entry.second.c_str(), "%f,%f", &dx, &dy) == 2) {
+				SetTouchOffset(entry.first.c_str(), dx, dy);
+			}
+		}
+	}
+
 	ApplyShadowSetting();
 	ApplyWaterSetting();
+	// And the widescreen fix, which has a second half the same argument applies to twice over:
+	// it also owns the display's STRETCH, and a boot that widened the view without stretching the
+	// frame would show a narrow, squeezed picture inside black bars - a worse state than either
+	// setting on its own.
+	ApplyWidescreenSetting();
 }
 
 void SaveSettings() {
@@ -651,6 +774,18 @@ void SaveSettings() {
 		case OptionType::Float:
 			section->Set(opt.iniKey, *opt.floatValue);
 			break;
+		}
+	}
+
+	// The touch layout, replaced wholesale rather than merged: a control dragged back to where it
+	// started is erased from the map, and a stale line left in the file would put it back.
+	ini.DeleteSection("TouchLayout");
+	if (!TouchLayoutOffsets().empty()) {
+		Section *layout = ini.GetOrCreateSection("TouchLayout");
+		for (const auto &entry : TouchLayoutOffsets()) {
+			char value[64];
+			snprintf(value, sizeof(value), "%.1f,%.1f", entry.second.dx, entry.second.dy);
+			layout->Set(entry.first.c_str(), value);
 		}
 	}
 

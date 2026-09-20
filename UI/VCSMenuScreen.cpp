@@ -38,6 +38,7 @@
 #include "Common/UI/ScreenManager.h"
 #include "Common/UI/View.h"
 #include "Common/UI/ViewGroup.h"
+#include "Common/UI/ScrollView.h"
 #include "Core/Config.h"
 #include "Core/System.h"
 #include "UI/BackgroundAudio.h"
@@ -54,6 +55,7 @@
 #include "UI/MainScreen.h"
 #include "UI/PauseScreen.h"
 #include "UI/VCSMenuScreen.h"
+#include "UI/VCSTouchControls.h"
 
 // The front end's palette. Unlike the pause menu of VC on PC - which is pink on pink with a
 // slanted highlight behind the selected row - this one carries the selection in the text colour
@@ -72,11 +74,38 @@ static const uint32_t kBackgroundColor = COLOR(0x3E0B4E);
 
 // Layout, in PPSSPP's dp units. Rows are full screen width so that "centred" means centred on
 // the screen, which is what this layout is built around.
+//
+// WHETHER THIS IS A PHONE, as a constant rather than as a preprocessor branch.
+//
+// The phone menu is a different SHAPE, not just different numbers - a grid of tiles where the
+// desktop has a list, and one two-pane settings screen where the desktop has a tree - so the
+// difference had to move out of the metrics and into the structure. Written as a constexpr bool
+// so `if (kPhoneLayout)` compiles BOTH sides everywhere: a desktop build type-checks the phone
+// code and throws it away, which is the only reason any of it can be trusted from a Mac. The
+// metrics below stay under #if because they are constants rather than code.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+static constexpr bool kPhoneLayout = true;
+#else
+static constexpr bool kPhoneLayout = false;
+#endif
+
+// A phone gets its own set, and the reason is arithmetic rather than taste: a landscape phone is
+// about 390dp tall, and the desktop numbers put a 104dp heading and a 38dp bar around rows of
+// 76dp - three of which fill the screen. The phone values fit five and a half rows between the
+// same furniture, and 52dp is still well above the 44dp a thumb wants.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+static constexpr float kRowHeight = 52.0f;
+static constexpr float kTitleLeft = 34.0f;
+static constexpr float kTitleTop = 12.0f;
+static constexpr float kTitleHeight = 62.0f;
+static constexpr float kBottomBarHeight = 30.0f;
+#else
 static constexpr float kRowHeight = 76.0f;
 static constexpr float kTitleLeft = 58.0f;
 static constexpr float kTitleTop = 24.0f;
 static constexpr float kTitleHeight = 104.0f;
 static constexpr float kBottomBarHeight = 38.0f;
+#endif
 
 // Menu text is set at a real font size rather than by scaling a theme font up: the text drawer
 // rasterises at the style's size and a scale multiplier only stretches those pixels, which at
@@ -86,7 +115,11 @@ static const FontStyle kItemFont(FontFamily::Display, 38, FontStyleFlags::Defaul
 // Gap from the screen centre to the start of the value column. Labels are right-aligned to the
 // centre, values left-aligned this far past it, which is what gives settings pages their
 // two-column look while plain action rows stay simply centred.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+static constexpr float kValueGap = 64.0f;
+#else
 static constexpr float kValueGap = 100.0f;
+#endif
 
 static constexpr int kSliderBlocks = 10;
 
@@ -283,6 +316,36 @@ static void DrawCover(UIContext &dc, Draw::Texture *tex, const Bounds &bounds,
 	DrawTexture(dc, tex, bounds, colorAlpha(0xFFFFFFFF, alpha), u0, v0, u1, v1);
 }
 
+// A round icon button, and the only view on this screen that is not a row.
+//
+// It exists for one thing and only on a phone: a visible way BACK. A keyboard has Escape, a pad
+// has its cancel button and an Android gesture is already in PPSSPP's cancel set - a thumb on a
+// screen has none of those, and what it had instead was the BACK row at the bottom of a page it
+// first had to scroll. That is the difference between a menu laid out for a phone and a desktop
+// menu that happens to fit on one.
+//
+// Deliberately NOT focusable. Every other device that could move focus onto it already has a
+// Back of its own, so putting it in the ring would only add a stop to arrow past.
+static constexpr float kIconButtonSize = 46.0f;
+
+class VCSMenuIconButton : public UI::Clickable {
+public:
+	VCSMenuIconButton(struct VCSMenuArt *art, const char *path, const char *key,
+	                  UI::LayoutParams *layoutParams)
+		: UI::Clickable(layoutParams), art_(art), path_(path), key_(key) {}
+
+	void Draw(UIContext &dc) override;
+	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override {
+		w = h = kIconButtonSize;
+	}
+	bool CanBeFocused() const override { return false; }
+
+private:
+	struct VCSMenuArt *art_;
+	const char *path_;
+	const char *key_;
+};
+
 // A value shown as a row of blocks rather than a number, which is how this front end renders
 // anything that is really "a position within a range".
 static bool ShowsBlocks(const VCS::Option &opt) {
@@ -305,17 +368,20 @@ void VCSMenuItem::GetContentDimensions(const UIContext &dc, float &w, float &h) 
 	h = kRowHeight;
 }
 
+float VCSMenuItem::CenterX() const {
+	return centerX_ >= 0.0f ? centerX_ : ScreenCenterX();
+}
+
 // Where the blocks sit: immediately past the value column's left edge.
-static Bounds BlockStrip(const Bounds &row) {
-	const float blockH = row.h * 0.34f;
-	const float blockW = blockH;
-	const float gap = blockW * 0.28f;
-	const float width = kSliderBlocks * blockW + (kSliderBlocks - 1) * gap;
-	return Bounds(ScreenCenterX() + kValueGap, row.centerY() - blockH * 0.5f, width, blockH);
+Bounds VCSMenuItem::BlockStripBounds() const {
+	const float blockH = bounds_.h * 0.34f;
+	const float gap = blockH * 0.28f;
+	const float width = kSliderBlocks * blockH + (kSliderBlocks - 1) * gap;
+	return Bounds(CenterX() + kValueGap, bounds_.centerY() - blockH * 0.5f, width, blockH);
 }
 
 float VCSMenuItem::ValueFractionAt(float x) const {
-	const Bounds strip = BlockStrip(bounds_);
+	const Bounds strip = BlockStripBounds();
 	if (strip.w <= 0.0f) {
 		return 0.0f;
 	}
@@ -349,6 +415,42 @@ void VCSMenuItem::Adjust(int direction) {
 	}
 }
 
+// A tap moves the value on by one and WRAPS at the end, where an arrow key stops.
+//
+// The difference is not an inconsistency, it is the device. A keyboard and a pad have both
+// directions, so stopping at the end is right: holding right should not silently dump a setting
+// back to its minimum. A thumb has one gesture - the tap - so stopping at the end would mean a
+// setting that can be raised and never lowered again. Wrapping is the only way round with one
+// direction, and the ten-block strip is still there to drag when a value wants aiming at.
+void VCSMenuItem::Cycle() {
+	if (!option_ || !IsEnabled()) {
+		return;
+	}
+	switch (option_->type) {
+	case VCS::OptionType::Bool:
+		VCS::SetBool(*option_, !*option_->boolValue);
+		break;
+	case VCS::OptionType::Choice:
+		VCS::SetInt(*option_, *option_->intValue + 1 >= option_->numChoices
+			? 0 : *option_->intValue + 1);
+		break;
+	case VCS::OptionType::Int: {
+		const int step = option_->stepInt > 0 ? option_->stepInt : 1;
+		VCS::SetInt(*option_, *option_->intValue + step > option_->maxInt
+			? option_->minInt : *option_->intValue + step);
+		break;
+	}
+	case VCS::OptionType::Float: {
+		const float stride = 1.0f / (float)kSliderBlocks;
+		const float next = VCS::GetNormalized(*option_) + stride;
+		// A hair under 1 rather than at it, because a value that has been dragged to 0.97 is at
+		// the top block and should wrap from there rather than stop on a step nobody can see.
+		VCS::SetNormalized(*option_, next > 1.0f - stride * 0.5f ? 0.0f : next);
+		break;
+	}
+	}
+}
+
 bool VCSMenuItem::Key(const KeyInput &input) {
 	if (option_ && IsEnabled() && HasFocus() && (input.flags & KeyInputFlags::DOWN)) {
 		switch (input.keyCode) {
@@ -366,7 +468,26 @@ bool VCSMenuItem::Key(const KeyInput &input) {
 }
 
 Bounds VCSMenuItem::HitBounds() const {
-	return hitBoundsValid_ ? hitBounds_ : bounds_;
+	if (!hitBoundsValid_) {
+		return bounds_;
+	}
+	if (!kPhoneLayout) {
+		return hitBounds_;
+	}
+	// On a phone the row is hit anywhere along ITS OWN width, not just on the glyphs. The narrow
+	// box exists because a MOUSE hovering at the same height as a distant label should not
+	// highlight it - hover is the whole reason it is measured - and a thumb has no hover at all.
+	//
+	// ITS OWN width, and the emphasis is the bug this had: it used the whole SCREEN, which is the
+	// same thing for a row laid out FILL_PARENT and catastrophically not for the two-pane, where
+	// the category list and the settings rows sit side by side. A ViewGroup hands every child the
+	// same touch, so every tap reached BOTH a category and whatever row was at the same height -
+	// and since picking a category rebuilds the views, the second handler then ran against freed
+	// ones. What it looked like from outside was a settings screen whose categories did nothing.
+	//
+	// The inset stops short of the edges so a drag starting at the screen edge is still a scroll.
+	const float inset = bounds_.w * 0.06f;
+	return Bounds(bounds_.x + inset, hitBounds_.y, bounds_.w - inset * 2.0f, hitBounds_.h);
 }
 
 // Take focus on a press, and take it *forced*, which is what makes clicking work at all.
@@ -465,7 +586,7 @@ bool VCSMenuItem::Touch(const TouchInput &input) {
 	// well as in the press handling below, because this branch comes first and would otherwise
 	// let the pointer drag a value the keyboard cannot reach.
 	if (option_ && IsEnabled() && ShowsBlocks(*option_)) {
-		const Bounds strip = BlockStrip(bounds_).Expand(0.0f, 14.0f);
+		const Bounds strip = BlockStripBounds().Expand(0.0f, 14.0f);
 		if ((input.flags & TouchInputFlags::DOWN) && strip.Contains(input.x, input.y)) {
 			draggingValue_ = true;
 			ClaimFocus();
@@ -519,11 +640,10 @@ bool VCSMenuItem::Touch(const TouchInput &input) {
 }
 
 void VCSMenuItem::ClickInternal() {
-	// Clicking a toggle flips it. Block-rendered values are edited through the strip and the
-	// arrow keys, so a click elsewhere on one deliberately does nothing.
-	if (option_ && IsEnabled() && option_->type == VCS::OptionType::Bool) {
-		VCS::SetBool(*option_, !*option_->boolValue);
-	}
+	// Clicking a settings row moves its value on by one. It used to flip a toggle and do nothing
+	// else, which left every other kind of row unreachable without arrow keys - fine on a desktop
+	// and useless on a phone, where there are none.
+	Cycle();
 	// Every click in this menu funnels through here, mouse and keyboard alike, which is why the
 	// sound is here and not on the handlers the rows attach.
 	PlayMenuSound(UI::UISound::VCS_SELECT);
@@ -535,6 +655,23 @@ std::string VCSMenuItem::DescribeText() const {
 		return label_ + ": " + VCS::ValueText(*option_);
 	}
 	return label_;
+}
+
+void VCSMenuIconButton::Draw(UIContext &dc) {
+	const float r = std::min(bounds_.w, bounds_.h) * 0.5f;
+	const uint32_t tint = down_ ? kItemSelectedColor : kItemColor;
+
+	float imgW = 0.0f, imgH = 0.0f;
+	dc.Draw()->GetAtlas()->measureImage(ImageID("I_ROUND"), &imgW, &imgH);
+	if (imgW > 0.0f) {
+		dc.Draw()->DrawImage(ImageID("I_ROUND"), bounds_.centerX(), bounds_.centerY(),
+			(r * 2.0f) / imgW, colorAlpha(tint, down_ ? 0.30f : 0.16f), ALIGN_CENTER);
+	}
+	if (Draw::Texture *tex = art_ ? art_->Image(dc, path_, key_) : nullptr) {
+		const float size = r * 1.1f;
+		DrawTexture(dc, tex, Bounds(bounds_.centerX() - size * 0.5f, bounds_.centerY() - size * 0.5f,
+			size, size), colorAlpha(tint, 1.0f));
+	}
 }
 
 void VCSMenuItem::Draw(UIContext &dc) {
@@ -560,9 +697,9 @@ void VCSMenuItem::Draw(UIContext &dc) {
 			return;
 		}
 		// An action row - RESUME GAME, BACK - is centred on the screen with nothing beside it.
-		dc.DrawTextShadow(label_, ScreenCenterX(), bounds_.centerY(), color,
+		dc.DrawTextShadow(label_, CenterX(), bounds_.centerY(), color,
 			ALIGN_VCENTER | ALIGN_HCENTER);
-		hitBounds_ = Bounds(ScreenCenterX() - labelW * 0.5f - slack, bounds_.y,
+		hitBounds_ = Bounds(CenterX() - labelW * 0.5f - slack, bounds_.y,
 			labelW + slack * 2.0f, bounds_.h);
 		hitBoundsValid_ = true;
 		return;
@@ -570,11 +707,11 @@ void VCSMenuItem::Draw(UIContext &dc) {
 
 	// A setting row is two columns: the label right-aligned into the centre, the value starting
 	// a fixed gap past it, so every value on the page lines up regardless of label length.
-	dc.DrawTextShadow(label_ + ":", ScreenCenterX(), bounds_.centerY(), color,
+	dc.DrawTextShadow(label_ + ":", CenterX(), bounds_.centerY(), color,
 		ALIGN_VCENTER | ALIGN_RIGHT);
 
 	if (ShowsBlocks(*option_)) {
-		const Bounds strip = BlockStrip(bounds_);
+		const Bounds strip = BlockStripBounds();
 		const float blockH = strip.h;
 		const float gap = blockH * 0.28f;
 		const int filled = (int)(VCS::GetNormalized(*option_) * kSliderBlocks + 0.5f);
@@ -588,7 +725,7 @@ void VCSMenuItem::Draw(UIContext &dc) {
 		dc.Flush();
 		dc.Begin();
 	} else {
-		dc.DrawTextShadow(VCS::ValueText(*option_), ScreenCenterX() + kValueGap,
+		dc.DrawTextShadow(VCS::ValueText(*option_), CenterX() + kValueGap,
 			bounds_.centerY(), color, ALIGN_VCENTER | ALIGN_LEFT);
 	}
 
@@ -596,12 +733,12 @@ void VCSMenuItem::Draw(UIContext &dc) {
 	// between them, not the width of the screen.
 	float valueW = 0.0f, valueH = 0.0f;
 	if (ShowsBlocks(*option_)) {
-		valueW = BlockStrip(bounds_).w;
+		valueW = BlockStripBounds().w;
 	} else {
 		dc.MeasureText(kItemFont, 1.0f, 1.0f, VCS::ValueText(*option_), &valueW, &valueH);
 	}
-	const float left = ScreenCenterX() - labelW - slack;
-	const float right = ScreenCenterX() + kValueGap + valueW + slack;
+	const float left = CenterX() - labelW - slack;
+	const float right = CenterX() + kValueGap + valueW + slack;
 	hitBounds_ = Bounds(left, bounds_.y, right - left, bounds_.h);
 	hitBoundsValid_ = true;
 }
@@ -705,6 +842,9 @@ VCSMenuScreen::VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode
 	// it can afford to, because an axis carries its whole state in every event. A key does not -
 	// its release is a single event, and a dropped one is gone.
 	VCS::ResetHostKeys();
+	// And the overlay's own controls, for exactly the same reason: it is not on screen while this
+	// menu is, so a thumb lifted here is a release nothing will ever deliver.
+	VCS::ResetTouchInput();
 
 	// And take any curtain down with it, for the same reason and with a sharper failure. This
 	// screen pauses the emulator, so CurtainTick stops - a curtain still up here stays up
@@ -749,6 +889,11 @@ VCSMenuScreen::~VCSMenuScreen() {
 }
 
 VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) const {
+	// One level shallower on a phone, because the CONTROLS page is skipped there - see GoToPage.
+	if (kPhoneLayout && page == VCSMenuPage::Touch) {
+		return VCSMenuPage::Settings;
+	}
+
 	// The page table's back-link, and the only place the shape of the menu is written down.
 	switch (page) {
 	case VCSMenuPage::Settings: return VCSMenuPage::Root;
@@ -764,6 +909,7 @@ VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) const {
 	case VCSMenuPage::Mouse: return VCSMenuPage::Controls;
 	case VCSMenuPage::Controller: return VCSMenuPage::Controls;
 	case VCSMenuPage::Aiming: return VCSMenuPage::Controls;
+	case VCSMenuPage::Touch: return VCSMenuPage::Controls;
 	case VCSMenuPage::Bindings: return VCSMenuPage::Controls;
 	case VCSMenuPage::KeysOnFoot: return VCSMenuPage::Bindings;
 	case VCSMenuPage::KeysVehicle: return VCSMenuPage::Bindings;
@@ -806,6 +952,7 @@ bool VCSMenuScreen::IsOptionPage(VCSMenuPage page) {
 	case VCSMenuPage::Mouse:
 	case VCSMenuPage::Controller:
 	case VCSMenuPage::Aiming:
+	case VCSMenuPage::Touch:
 	case VCSMenuPage::Audio:
 	case VCSMenuPage::Graphics:
 	case VCSMenuPage::Gameplay:
@@ -840,6 +987,7 @@ VCS::OptionPage VCSMenuScreen::ToOptionPage(VCSMenuPage page) {
 	switch (page) {
 	case VCSMenuPage::Controller: return VCS::OptionPage::Controller;
 	case VCSMenuPage::Aiming: return VCS::OptionPage::Aiming;
+	case VCSMenuPage::Touch: return VCS::OptionPage::Touch;
 	case VCSMenuPage::Audio: return VCS::OptionPage::Audio;
 	case VCSMenuPage::Graphics: return VCS::OptionPage::Graphics;
 	case VCSMenuPage::Gameplay: return VCS::OptionPage::Gameplay;
@@ -857,6 +1005,7 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 	// pages are about the pad, and both headings say the same word.
 	case VCSMenuPage::Controller: return "controller";
 	case VCSMenuPage::Aiming: return "aiming";
+	case VCSMenuPage::Touch: return "touch";
 	case VCSMenuPage::Audio: return "audiosetup";
 	case VCSMenuPage::Graphics: return "displaysetup";
 	case VCSMenuPage::Gameplay: return "gameplay";
@@ -884,6 +1033,14 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 }
 
 void VCSMenuScreen::GoToPage(VCSMenuPage page) {
+	// On a phone there is no CONTROLS page worth showing - the mouse, the pad and the bindings
+	// card are all about devices it does not have, so the only row left on it would be the touch
+	// one. Settings points straight at that instead, and this catches anything else that still
+	// asks for the page. Redirected here rather than at each call site: the rows that point at it
+	// are shared with the desktop, and a redirect in one place cannot be forgotten in one of them.
+	if (kPhoneLayout && page == VCSMenuPage::Controls) {
+		page = VCSMenuPage::Touch;
+	}
 	page_ = page;
 	RecreateViews();
 }
@@ -916,28 +1073,39 @@ bool VCSMenuScreen::key(const KeyInput &key) {
 	const bool backspace = key.keyCode == NKCODE_DEL;
 	const bool back = UI::IsEscapeKey(key) || backspace;
 	if ((key.flags & KeyInputFlags::DOWN) && back) {
-		// Before the branches, because all three of them are Back happening - up a page, out to
-		// the world, or the main menu declining to close. The one that declines still makes the
-		// sound: something was pressed, and silence there reads as a dropped input.
-		PlayMenuSound(UI::UISound::VCS_BACK);
-		if (page_ != VCSMenuPage::Root) {
-			GoToPage(ParentPage(page_));
+		// Escape on the root of the pause menu is the one Back this does NOT handle: the dialog
+		// base finishes the screen for it, which is the path every other PPSSPP screen takes out.
+		// Backspace has to be finished off by hand because the base has never heard of it.
+		if (GoBack() || !backspace) {
 			return true;
 		}
-		// The main menu is the bottom of the stack. Letting the dialog base finish it would pop
-		// the last screen and leave the app with nothing to draw.
-		if (mode_ == VCSMenuMode::MainMenu) {
-			return true;
-		}
-		// And on the root of the pause menu, Back leaves for the world. The dialog base does that
-		// for Escape and cannot do it for Backspace, which it has never heard of - so the second
-		// press of the key that got you here has to be finished off by hand.
-		if (backspace) {
-			TriggerFinish(DR_CANCEL);
-			return true;
-		}
+		TriggerFinish(DR_CANCEL);
+		return true;
 	}
 	return UIBaseDialogScreen::key(key);
+}
+
+bool VCSMenuScreen::GoBack() {
+	// Before the branches, because all three of them are Back happening - up a page, out to the
+	// world, or the main menu declining to close. The one that declines still makes the sound:
+	// something was pressed, and silence there reads as a dropped input.
+	PlayMenuSound(UI::UISound::VCS_BACK);
+	if (page_ != VCSMenuPage::Root) {
+		GoToPage(ParentPage(page_));
+		return true;
+	}
+	// The main menu is the bottom of the stack. Finishing it would pop the last screen and leave
+	// the app with nothing to draw.
+	if (mode_ == VCSMenuMode::MainMenu) {
+		return true;
+	}
+	return false;
+}
+
+void VCSMenuScreen::OnBack(UI::EventParams &e) {
+	if (!GoBack()) {
+		TriggerFinish(DR_CANCEL);
+	}
 }
 
 void VCSMenuScreen::GoToConfirm(const char *titleKey, std::string question, std::string detail,
@@ -1068,7 +1236,7 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 	const VCS::OptionPage optionPage = ToOptionPage(page);
 
 	for (const VCS::Option &option : VCS::Options()) {
-		if (option.page != optionPage) {
+		if (option.page != optionPage || option.hidden) {
 			continue;
 		}
 		VCSMenuItem *row = parent->Add(new VCSMenuItem(&option,
@@ -1080,6 +1248,20 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 			row->SetEnabledPtr(option.enabledBy);
 		}
 		rows_.push_back(row);
+	}
+
+	// Arranging the controls is not a VALUE, so it cannot be a row in the option table - it is an
+	// action that opens a screen. It sits with the touch settings because that is where somebody
+	// goes looking for it, and it is the only row on any of these pages that does something
+	// rather than changing something.
+	if (page == VCSMenuPage::Touch) {
+		VCSMenuItem *arrange = parent->Add(new VCSMenuItem("ARRANGE CONTROLS",
+			new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+		arrange->SetHelp("Drag the on-screen controls to where your thumbs are.");
+		arrange->OnClick.Add([this](UI::EventParams &e) {
+			screenManager()->push(CreateVCSTouchEditScreen());
+		});
+		rows_.push_back(arrange);
 	}
 
 	// A blank row before the two actions, the way the original separates them from the settings.
@@ -1171,6 +1353,17 @@ void VCSMenuScreen::CreateViews() {
 
 	root_ = new AnchorLayout(new LayoutParams(FILL_PARENT, FILL_PARENT));
 
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+	// The phone's way back, opposite the heading. See VCSMenuIconButton for why it is only here.
+	//
+	// Added FIRST so everything else is dispatched over it - it sits in a corner nothing else
+	// uses, and a row that ever did reach that far should win.
+	root_->Add(new VCSMenuIconButton(art_.get(), "vcs/touch_back.png", "#back",
+		new AnchorLayoutParams(kIconButtonSize, kIconButtonSize,
+			NONE, kTitleTop + 4.0f, kTitleLeft, NONE)))
+		->OnClick.Handle(this, &VCSMenuScreen::OnBack);
+#endif
+
 	// As a fraction of the screen rather than a fixed offset, so the block stays put when the
 	// window is resized and so the longer settings pages start higher without a second constant
 	// that has to be kept in step with the row count.
@@ -1185,10 +1378,21 @@ void VCSMenuScreen::CreateViews() {
 	// of rows, and the panel behind them is drawn at that same coordinate.
 	const bool listing = IsKeyListPage(page_);
 	const float top = listing ? kListTop + kListHeaderHeight : NONE;
-	LinearLayout *list = new LinearLayout(ORIENT_VERTICAL,
-		new AnchorLayoutParams(FILL_PARENT, WRAP_CONTENT, 0.0f, top, 0.0f, NONE));
+
+	LinearLayout *list = nullptr;
+	if (kPhoneLayout && !listing) {
+		// Everything that is still a list on a phone - the cheat pages, the save slots, the
+		// confirmations - scrolls rather than running off the screen. ScrollView follows focus,
+		// which is what a pad needs.
+		ScrollView *scroll = root_->Add(new ScrollView(ORIENT_VERTICAL,
+			new AnchorLayoutParams(FILL_PARENT, FILL_PARENT, 0.0f, kTitleTop + kTitleHeight, 0.0f, kBottomBarHeight)));
+		list = scroll->Add(new LinearLayout(ORIENT_VERTICAL, new LayoutParams(FILL_PARENT, WRAP_CONTENT)));
+	}
+	if (!list) {
+		list = root_->Add(new LinearLayout(ORIENT_VERTICAL,
+			new AnchorLayoutParams(FILL_PARENT, WRAP_CONTENT, 0.0f, top, 0.0f, NONE)));
+	}
 	list->SetSpacing(0.0f);
-	root_->Add(list);
 
 	if (page_ == VCSMenuPage::Root) {
 		const bool mainMenu = mode_ == VCSMenuMode::MainMenu;
@@ -1242,12 +1446,21 @@ void VCSMenuScreen::CreateViews() {
 		}
 		rows_.push_back(quit);
 	} else if (page_ == VCSMenuPage::Settings) {
-		AddPageRow(list, "CONTROLLER SETUP", VCSMenuPage::Controls);
+		// A phone skips the CONTROLS page and points straight at the touch one, because the three
+		// rows that page otherwise carries - the mouse, the pad, the bindings card - are all
+		// about devices it does not have. See the GoToPage redirect, which catches any other way
+		// of asking for it.
+		if (kPhoneLayout) {
+			AddPageRow(list, "TOUCH CONTROLS", VCSMenuPage::Touch);
+		} else {
+			AddPageRow(list, "CONTROLLER SETUP", VCSMenuPage::Controls);
+		}
 		AddPageRow(list, "AUDIO SETUP", VCSMenuPage::Audio);
 		AddPageRow(list, "DISPLAY SETUP", VCSMenuPage::Graphics);
 		AddPageRow(list, "GAMEPLAY", VCSMenuPage::Gameplay);
 		AddBackRow(list);
 	} else if (page_ == VCSMenuPage::Controls) {
+		// Desktop only - a phone never reaches this page, see the Settings block above.
 		AddPageRow(list, "MOUSE SETTINGS", VCSMenuPage::Mouse);
 		AddPageRow(list, "CONTROLLER", VCSMenuPage::Controller);
 		AddPageRow(list, "AIMING", VCSMenuPage::Aiming);
@@ -1481,6 +1694,17 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 			colorAlpha(kHintColor, 0.85f), ALIGN_VCENTER | ALIGN_LEFT);
 	}
 
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+	// No keys to name on a phone, and the blocks are worth pointing at: a tap steps a value and a
+	// drag along them aims it.
+	const char *hint = "TAP - SELECT";
+	if (IsKeyListPage(page_)) {
+		hint = "BACK - RETURN";
+	} else if (focused && focused->option()) {
+		hint = ShowsBlocks(*focused->option()) ? "TAP - CHANGE     DRAG THE BLOCKS - SET"
+		                                       : "TAP - CHANGE";
+	}
+#else
 	const char *hint = "ENTER / LMB - SELECT     ESC - BACK";
 	if (IsKeyListPage(page_)) {
 		hint = "ESC - BACK";
@@ -1489,6 +1713,7 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 			? "ENTER / LMB - TOGGLE     ESC - BACK"
 			: "LEFT / RIGHT - ADJUST     ESC - BACK";
 	}
+#endif
 	dc.DrawText(hint, bar.x2() - kTitleLeft, bar.centerY(), kHintColor,
 		ALIGN_VCENTER | ALIGN_RIGHT);
 
@@ -1695,6 +1920,19 @@ void VCSNoDiscScreen::deviceRestored(Draw::DrawContext *draw) {
 	UIScreen::deviceRestored(draw);
 }
 
+void VCSNoDiscScreen::sendMessage(UIMessage message, const char *value) {
+	UIScreen::sendMessage(message, value);
+	if (message == UIMessage::PERMISSION_GRANTED || message == UIMessage::APP_RESUMED ||
+			message == UIMessage::GOT_FOCUS) {
+		const Path beside = DiscBesideExe();
+		if (!beside.empty()) {
+			Boot(beside);
+			return;
+		}
+		RecreateViews();  // an archive may have arrived instead, and the text says which
+	}
+}
+
 void VCSNoDiscScreen::CreateViews() {
 	using namespace UI;
 
@@ -1708,7 +1946,11 @@ void VCSNoDiscScreen::CreateViews() {
 
 	VCSMenuItem *choose = list->Add(new VCSMenuItem("CHOOSE DISC",
 		new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+#if PPSSPP_PLATFORM(ANDROID)
+	choose->SetHelp("Find your copy of the game anywhere on this phone.");
+#else
 	choose->SetHelp("Find your copy of the game anywhere on this computer.");
+#endif
 	choose->OnClick.Add([this](UI::EventParams &e) {
 		System_BrowseForFile(GetRequesterToken(), "Choose your Vice City Stories disc",
 			BrowseFileType::BOOTABLE, [this](std::string_view value, int) {
@@ -1752,6 +1994,19 @@ void VCSNoDiscScreen::DrawBackground(UIContext &dc) {
 	// beside the exe means the disc is HERE and simply not readable yet, which is a thirty-second
 	// fix the player can do; no archive means they have not brought one at all.
 	std::string body;
+#if PPSSPP_PLATFORM(ANDROID)
+	// A phone has no folder "next to the game" the player can see, so name the one it does have.
+	// This screen looks again whenever the app comes back to the front, so no restart is needed.
+	if (!archiveFound_.empty()) {
+		body = "There is an archive in GTAVCS - " + archiveFound_ +
+			" - and the game cannot read one. Extract the .iso inside it into the GTAVCS folder "
+			"on this phone's storage.";
+	} else {
+		body = "Put your copy of Grand Theft Auto: Vice City Stories - the USA disc, as a .iso "
+			"or .cso - into the GTAVCS folder on this phone's internal storage, and it starts by "
+			"itself.\n\nOr choose one from anywhere on this phone below.";
+	}
+#else
 	if (!archiveFound_.empty()) {
 		body = "There is an archive here - " + archiveFound_ +
 			" - and the game cannot read one. Extract it into this folder first, so the .iso "
@@ -1761,6 +2016,7 @@ void VCSNoDiscScreen::DrawBackground(UIContext &dc) {
 			"or .cso - into this folder, next to the game, and start it again.\n\n"
 			"Or choose one from anywhere on this computer below.";
 	}
+#endif
 	dc.SetFontStyle(kConfirmDetailFont);
 	dc.DrawTextShadowRect(body,
 		Bounds(kTitleLeft, kTitleTop + 60.0f, bounds.w - kTitleLeft * 2.0f, 220.0f),
@@ -1769,8 +2025,13 @@ void VCSNoDiscScreen::DrawBackground(UIContext &dc) {
 	const Bounds bar(bounds.x, bounds.y2() - kBottomBarHeight, bounds.w, kBottomBarHeight);
 	dc.FillRect(UI::Drawable(kBarColor), bar);
 	dc.SetFontStyle(dc.GetTheme().uiFontSmall);
+#if PPSSPP_PLATFORM(ANDROID)
+	dc.DrawText("TAP - SELECT", bar.x2() - kTitleLeft, bar.centerY(), kHintColor,
+		ALIGN_VCENTER | ALIGN_RIGHT);
+#else
 	dc.DrawText("ENTER / LMB - SELECT", bar.x2() - kTitleLeft, bar.centerY(), kHintColor,
 		ALIGN_VCENTER | ALIGN_RIGHT);
+#endif
 	dc.Flush();
 }
 

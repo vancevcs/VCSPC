@@ -87,6 +87,7 @@ using namespace std::placeholders;
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSSettings.h"
 #include "UI/VCSMenuScreen.h"
+#include "UI/VCSTouchControls.h"
 #include "UI/LoadStateConfirmScreen.h"
 #include "UI/MainScreen.h"
 #include "UI/Background.h"
@@ -1253,7 +1254,14 @@ void EmuScreen::CreateViews() {
 
 	InitPadLayout(&touch, deviceOrientation, bounds.w, bounds.h);
 
-	root_ = CreatePadLayout(touch, bounds.w, bounds.h, &pauseTrigger_, &g_controlMapper);
+	// Fork-specific: VCS gets its own touch controls - context-aware, and pressing the PAD
+	// controls this layer already understands instead of writing sceCtrl behind its back. One
+	// line, and every other game keeps PPSSPP's own pad exactly as it was.
+	if (VCS::IsActive()) {
+		root_ = CreateVCSTouchLayout(bounds.w, bounds.h, &pauseTrigger_);
+	} else {
+		root_ = CreatePadLayout(touch, bounds.w, bounds.h, &pauseTrigger_, &g_controlMapper);
+	}
 	if (g_Config.bShowDeveloperMenu) {
 		root_->Add(new Button(dev->T("DevMenu")))->OnClick.Handle(this, &EmuScreen::OnDevTools);
 	}
@@ -1916,6 +1924,7 @@ bool EmuScreen::hasVisibleUI() {
 
 static void VCSReleaseOverlayTextures() {
 	ReleaseVCSBootCurtainArt();
+	ReleaseVCSTouchArt();
 }
 
 // The loading screen over the boot's auto-load, and its fade.
@@ -1984,9 +1993,15 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 	FRect rc;
 	CalculateDisplayOutputRect(config, &rc, 480.0f, 272.0f, screenFrame, config.iInternalScreenRotation);
 
-	const float ox = rc.x * g_display.dpi_scale_x;
+	float frameX = rc.x * g_display.dpi_scale_x;
+	float frameW = rc.w * g_display.dpi_scale_x;
+	// The widescreen fix squashes the game's own HUD into the middle band of the frame, and this
+	// line is drawn ON that HUD - so it has to land in the same place the radar did.
+	VCS::ApplyHudSquash(&frameX, &frameW);
+
+	const float ox = frameX;
 	const float oy = rc.y * g_display.dpi_scale_y;
-	const float sx = (rc.w * g_display.dpi_scale_x) / 480.0f;
+	const float sx = frameW / 480.0f;
 	const float sy = (rc.h * g_display.dpi_scale_y) / 272.0f;
 	if (sx <= 0.0f || sy <= 0.0f) {
 		return;

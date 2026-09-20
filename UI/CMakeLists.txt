@@ -25,6 +25,8 @@ list(APPEND UISource
 	ImDebugger/ImVCS.h
 	VCSMenuScreen.cpp
 	VCSMenuScreen.h
+	VCSTouchControls.cpp
+	VCSTouchControls.h
 	DiscordIntegration.cpp
 	NativeApp.cpp
 	AdhocServerScreen.h
