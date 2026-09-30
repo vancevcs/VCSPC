@@ -330,6 +330,15 @@ void Shutdown() {
 	VaultReset();
 	RemoveWorldQuery();
 
+	// The renderer reads these on every draw of every game, and RefreshWidescreen - the only thing
+	// that writes them - runs from Tick, which is gated on g_active. So without this they keep VCS's
+	// last values into whatever is booted next in the same session: another game's projection
+	// squashed or cropped. Zero behaviour change for every other game is the first rule in this
+	// file, and a global that outlives the game that set it is the easiest way to break it.
+	g_widescreenSquash = 1.0f;
+	g_widescreenSquashesHud = false;
+	g_widescreenSquashedDraw = false;
+
 	g_active = false;
 	g_discID.clear();
 	g_tickCount = 0;

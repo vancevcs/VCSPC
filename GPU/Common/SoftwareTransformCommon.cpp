@@ -268,6 +268,19 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 		const float heightFactor = (float)texH / (float)gstate_c.curTextureHeight;
 
 		const Vec4f materialAmbientRGBA = Vec4f::FromRGBA(gstate.getMaterialAmbientRGBA());
+
+		// Fork-specific: the same correction the shader applies to u_proj, because a draw that
+		// gets here never reaches that shader. PPSSPP sends a draw down this path whenever
+		// ClipInfoFlags::SoftClipCull is set, and it would then be projected with the raw matrix
+		// while every hardware-transformed draw around it uses the corrected one.
+		//
+		// A no-op for every other game and whenever the widescreen row is off. Rare in practice -
+		// measured at about one 3D draw a second in VCS - but it costs a matrix copy per draw and
+		// the failure it prevents is a whole draw landing somewhere else.
+		float softProjMatrix[16];
+		memcpy(softProjMatrix, gstate.projMatrix, sizeof(softProjMatrix));
+		VCS::WidenProjection(softProjMatrix);
+
 		// Okay, need to actually perform the full transform.
 		for (int index = 0; index < numDecodedVerts; index++) {
 			reader.Goto(index);
@@ -414,7 +427,7 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 			fogCoef = (v[2] + fog_end) * fog_slope;
 
 			// Then transform by the projection.
-			Vec3ByMatrix44(transformed[index].pos, v, gstate.projMatrix);
+			Vec3ByMatrix44(transformed[index].pos, v, softProjMatrix);
 
 			transformed[index].fog = fogCoef;
 			memcpy(&transformed[index].uv, uv, 3 * sizeof(float));

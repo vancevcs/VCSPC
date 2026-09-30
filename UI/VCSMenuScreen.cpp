@@ -900,6 +900,7 @@ VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) const {
 	case VCSMenuPage::Controls: return VCSMenuPage::Settings;
 	case VCSMenuPage::Audio: return VCSMenuPage::Settings;
 	case VCSMenuPage::Graphics: return VCSMenuPage::Settings;
+	case VCSMenuPage::GraphicsAdvanced: return VCSMenuPage::Graphics;
 	case VCSMenuPage::Gameplay: return VCSMenuPage::Settings;
 	case VCSMenuPage::Game: return VCSMenuPage::Root;
 	case VCSMenuPage::LoadGame: return VCSMenuPage::Game;
@@ -955,6 +956,7 @@ bool VCSMenuScreen::IsOptionPage(VCSMenuPage page) {
 	case VCSMenuPage::Touch:
 	case VCSMenuPage::Audio:
 	case VCSMenuPage::Graphics:
+	case VCSMenuPage::GraphicsAdvanced:
 	case VCSMenuPage::Gameplay:
 		return true;
 	default:
@@ -990,6 +992,7 @@ VCS::OptionPage VCSMenuScreen::ToOptionPage(VCSMenuPage page) {
 	case VCSMenuPage::Touch: return VCS::OptionPage::Touch;
 	case VCSMenuPage::Audio: return VCS::OptionPage::Audio;
 	case VCSMenuPage::Graphics: return VCS::OptionPage::Graphics;
+	case VCSMenuPage::GraphicsAdvanced: return VCS::OptionPage::GraphicsAdvanced;
 	case VCSMenuPage::Gameplay: return VCS::OptionPage::Gameplay;
 	default: return VCS::OptionPage::Mouse;
 	}
@@ -1008,6 +1011,7 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 	case VCSMenuPage::Touch: return "touch";
 	case VCSMenuPage::Audio: return "audiosetup";
 	case VCSMenuPage::Graphics: return "displaysetup";
+	case VCSMenuPage::GraphicsAdvanced: return "advanced";
 	case VCSMenuPage::Gameplay: return "gameplay";
 	case VCSMenuPage::Game: return "game";
 	case VCSMenuPage::LoadGame: return "loadgame";
@@ -1262,6 +1266,18 @@ void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
 			screenManager()->push(CreateVCSTouchEditScreen());
 		});
 		rows_.push_back(arrange);
+	}
+
+	// The last row of the settings rather than one of the actions below them: it leads to more
+	// settings, and the page's own RESTORE DEFAULTS leaves that page alone.
+	if (page == VCSMenuPage::Graphics) {
+		VCSMenuItem *advanced = parent->Add(new VCSMenuItem("ADVANCED",
+			new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+		advanced->SetHelp("Ambient occlusion, texture filtering and world memory.");
+		advanced->OnClick.Add([this](UI::EventParams &e) {
+			GoToPage(VCSMenuPage::GraphicsAdvanced);
+		});
+		rows_.push_back(advanced);
 	}
 
 	// A blank row before the two actions, the way the original separates them from the settings.

@@ -2155,11 +2155,48 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::TextColored(cap.nearCameraDraws > 0 ? kGoodColor : kUnsetColor,
 			"dropped for sitting on the camera: %d", cap.nearCameraDraws);
 
-		// The caster cache. The game culls to its own frustum, so without this a building just
-		// off the edge of the screen stops casting and its shadow blinks out of the road.
+		// THE CASTER HORIZON. How far round from the way the camera faces the game is willing to
+		// hand over geometry - which is the whole of the "why do shadows behind me go out" and
+		// "why does widescreen pop at the edges" question, in one line.
+		//
+		// A 70 degree field of view reaches 35 degrees either side, so a widest near 40 with
+		// nothing behind means the game IS culling to its own view and there is something to
+		// widen. A widest near 180 means it is not, and what is missing behind the player is the
+		// cache below rather than anything the game refused to draw.
+		if (cap.thingDraws > 0) {
+			// How much of the far geometry lies more than 60 degrees off forward. Neither the
+			// maximum nor a percentile works here - see ShareBeyond60 in VCSShadow.cpp for what
+			// each of those measures instead.
+			int wide = 0;
+			for (int i = 4; i < VCSShadow::CaptureStats::kAngleBuckets; i++) {
+				wide += cap.angleHist[i];
+			}
+			const float past60 = cap.farThingDraws ? 100.0f * wide / cap.farThingDraws : 0.0f;
+			// About 3% is the game's own 70 degree view; a widened cull runs to 20-25%.
+			ImGui::TextColored(past60 > 10.0f ? kGoodColor : kUnsetColor,
+				"horizon: %d object draws (%d past 30 units), %.0f%% of those past 60 deg off forward",
+				cap.thingDraws, cap.farThingDraws, past60);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("The angle, flat on the ground, between the way the camera faces "
+					"and each object-sized draw the game submitted. Sky and map-spanning quads are "
+					"left out - their centre is not a place anything is.\n\n"
+					"VCS culls the map to its own 70 degree view, so this reads about 3% and "
+					"the shape's shoulder sits at 45 degrees. The log prints the whole "
+					"distribution once a boot, which is the clearer read of the two.");
+			}
+		}
+
+		// The caster cache, which is what puts a shadow behind the player when the game has
+		// stopped drawing what casts it.
 		ImGui::TextColored(cap.cachedDraws > 0 ? kGoodColor : kUnsetColor,
-			"remembered: %d cells, %d re-submitted this frame (%d verts, %.0f KB held)",
-			cap.cachedEntries, cap.cachedDraws, cap.cachedVertices, cap.cachedBytes / 1024.0);
+			"remembered: %d cells, %d re-submitted this frame (%d verts, %.0f KB held), %d of them behind",
+			cap.cachedEntries, cap.cachedDraws, cap.cachedVertices, cap.cachedBytes / 1024.0,
+			cap.cachedBehind);
+		// A full cell drops triangles, and a dropped triangle is a shadow that goes out when its
+		// caster leaves the view - so anything but zero on the right is worth a look.
+		ImGui::TextColored(cap.cacheCapDrops > 0 ? kBadColor : kUnsetColor,
+			"remembered draws split across cells: %d, triangles a full cell dropped: %d",
+			cap.cacheSplitDraws, cap.cacheCapDrops);
 
 		// The back-face split. Nearly all of one and none of the other means the winding
 		// convention is upside down, which reads as acne rather than as a missing shadow.

@@ -54,6 +54,9 @@ enum class OptionPage {
 	Aiming,
 	Audio,
 	Graphics,
+	// The graphics rows a player rarely touches, one page down from the Graphics page so that page
+	// stays short enough to read at a glance.
+	GraphicsAdvanced,
 	// Settings about the GAME, as opposed to about the device you drive it with - which is what
 	// the four pages above are, each named after one. Two kinds qualify: a row that turns one of
 	// this port's own inventions off and hands that behaviour back to the PSP game, and a row

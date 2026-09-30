@@ -15,6 +15,8 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "ppsspp_config.h"
+
 #include <algorithm>
 #include <cstdio>
 
@@ -37,6 +39,15 @@
 #include "GPU/Common/VCSWater.h"
 
 namespace VCS {
+
+// Rows about a thumb on glass are kept and saved everywhere - an ini written on a phone must not
+// lose them when it is opened on a desktop - but only OFFERED on a phone. The menu's own
+// kPhoneLayout asks the same question.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+static constexpr bool kPhoneBuild = true;
+#else
+static constexpr bool kPhoneBuild = false;
+#endif
 
 // The Shadows row is one number; the shadow pass wants two answers. Deriving both in one
 // place is what stops "off" and "people and vehicles" ever being live at the same time.
@@ -346,6 +357,11 @@ const std::vector<Option> &Options() {
 				"Takes the on-screen controls off during a cutscene and offers SKIP and PAUSE "
 				"instead. Turn it off if they ever vanish during ordinary play.",
 				&touch.hideInCutscene);
+			// On Gameplay, which every build offers - so it has to say for itself that there are no
+			// on-screen controls to clear on a desktop.
+			if (!kPhoneBuild) {
+				hideLast();
+			}
 			addBool(OptionPage::Touch, "TouchFloatingStick", "Floating stick",
 				"The stick appears wherever your thumb lands, instead of sitting in one place.",
 				&touch.floatingStick);
@@ -447,8 +463,11 @@ const std::vector<Option> &Options() {
 		// --- Graphics ---
 		//
 		// The order is the one a player works down: what the picture is rendered at, then how big the
-		// window is, then the three quality steps that cost real frames, then the cheap filtering
-		// knob, then the two rows that are not really about the picture at all.
+		// window is, then the quality steps that cost real frames, then the frame rate counter.
+		//
+		// Three rows live one page down, on ADVANCED, because the page had grown past what reads at
+		// a glance: ambient occlusion (a prototype), anisotropic filtering (a knob with one right
+		// answer on any GPU this runs on) and world memory (only takes effect after a restart).
 
 		addChoice(OptionPage::Graphics, nullptr, "Resolution",
 			"Internal rendering resolution. Higher is sharper and costs more.",
@@ -527,7 +546,7 @@ const std::vector<Option> &Options() {
 		// Greyed while the shadows are off, because it reads the shadow mask's depth buffer and
 		// does not run without it. g_active is exactly "the shadow pass is running", so the row
 		// follows the Shadow quality row above the moment it moves.
-		addBool(OptionPage::Graphics, "AmbientOcclusion", "Ambient occlusion",
+		addBool(OptionPage::GraphicsAdvanced, "AmbientOcclusion", "Ambient occlusion",
 			"Soft darkening in corners and creases - where a wall meets the pavement, under a car. "
 			"Needs Shadow quality at MEDIUM or above.",
 			&VCSShadow::GetSettings().ambientOcclusion);
@@ -568,7 +587,7 @@ const std::vector<Option> &Options() {
 				ApplyWidescreenSetting();
 			});
 
-		addChoice(OptionPage::Graphics, nullptr, "Anisotropic filtering",
+		addChoice(OptionPage::GraphicsAdvanced, nullptr, "Anisotropic filtering",
 			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
 			Config::GetDefaultValueInt(&g_Config.iAnisotropyLevel), true);
@@ -577,7 +596,7 @@ const std::vector<Option> &Options() {
 		// emulator draws it. It only takes effect on the next boot, because the pools are
 		// built about a second into one and never again - the help line says so, because a
 		// setting that appears to do nothing is worse than one that is not offered.
-		addFloat(OptionPage::Graphics, "WorldMemory", "World memory",
+		addFloat(OptionPage::GraphicsAdvanced, "WorldMemory", "World memory",
 			"How much of the city stays loaded at once. Higher means you see further and "
 			"more of it casts shadows. Takes effect after a restart.",
 			&GameSettings().worldMemory, 1.0f, kVCSWorldMemoryMax, "%.1fx");
@@ -634,6 +653,11 @@ const std::vector<Option> &Options() {
 			[](const Option &opt) {
 				return std::string(*opt.boolValue ? "TOP LEFT" : "BOTTOM LEFT");
 			});
+		// A phone setting - the thumb is the whole argument for it - and a desktop keeps the radar
+		// where the game draws it. Hidden rather than dropped, so the patch still answers to vcs.ini.
+		if (!kPhoneBuild) {
+			hideLast();
+		}
 
 		addBool(OptionPage::Gameplay, "Hud", "HUD",
 			"Health, armour, money, the weapon and the clock. The radar is separate and stays.",

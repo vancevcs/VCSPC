@@ -357,6 +357,51 @@ inline constexpr u32 kVCSRwCameraNearOffset = 0x78;
 inline constexpr u32 kVCSRwCameraSetNearClip = 0x08890798;
 inline constexpr u32 kVCSRwCameraSetNearClipOp = 0xE60C0078;  // +0x14: swc1 $f12, 0x78($s0)
 
+// THE VIEW WINDOW, which is what VCS actually culls the map against.
+//
+// NOTHING USES THESE. A build widened the view window here and un-widened the reciprocal below, so
+// that the game culled a 109-degree cone behind a 70-degree picture; it worked, it measured well,
+// and in play it dropped objects the player was looking straight at. Reverted. They stay in the
+// table because the hunt for them took four failed attempts and the next person deserves the
+// answer rather than the search - see "VCS culls to the camera, and widening it is worse than the
+// pop-in" in CLAUDE.md before spending a day on it again.
+//
+// RwCamera + 0x60 is the RenderWare view window: the tangent of the half field of view, one for
+// each axis, with its reciprocals at +0x68. It reads 0.7002 - tan(35 degrees) - and near clip at
+// +0x78 is the neighbour this table already knew.
+//
+// 0x0893a7a4 is the function that fills it, `f(RwCamera *cam, void *, float tanHalfFovX, float
+// aspect)`, and the two floats arrive in $f12 and $f13. It swaps them, stores $f12 straight into
+// viewWindow.x and $f12/$f13 into viewWindow.y, and calls RwCameraSetViewWindow at 0x088906e4.
+// So SCALING BOTH FLOATS WIDENS THE VIEW HORIZONTALLY AND LEAVES THE VERTICAL ALONE, because the
+// vertical is the quotient and the scale cancels in it.
+//
+// Found by breaking on a write to the view window and reading the caller off the stack, after
+// four earlier hunts for a frustum had each found something that decided nothing. There is no
+// frustum: the camera keeps tangents, and whatever consumes them consumes them from here.
+inline constexpr u32 kVCSRwCameraViewWindowOffset = 0x60;
+inline constexpr u32 kVCSCameraSetViewWindow = 0x0893A7A4;
+inline constexpr u32 kVCSCameraSetViewWindowOp = 0x27BDFFE0;  // addiu $sp, $sp, -0x20
+
+// ...and the one instruction that has to be left out of the widening. Also unused - see above.
+//
+// RwCameraSetViewWindow derives the RECIPROCAL view window at +0x68 from the one it has just
+// stored, and the reciprocal is what the projection is built from - measured: hold it at its stock
+// value while the view window is wide and the picture comes out at the normal field of view.
+//
+// THE TWO HAVE TO BE SPLIT or nothing works. The cull and the projection are the same number in
+// this engine, so widening the cull widens the picture into a fisheye; correcting the picture back
+// in the renderer instead puts the two out of step and PPSSPP throws away over a thousand draws a
+// frame that the game had kept. Splitting them here means every stage downstream - the game's own
+// screen-space maths, the shader, the range culling, the HUD - goes on seeing one consistent
+// 70-degree projection, and only the cull is wide.
+//
+// 0x08890754 is `div.s $f13, $f13, $f14` with $f13 = 1.0 and $f14 the view window just stored, and
+// $a0 is the camera. Dividing $f14 by the same factor the entry hook multiplied by gives back the
+// stock reciprocal exactly.
+inline constexpr u32 kVCSRwCameraViewWindowRecip = 0x08890754;
+inline constexpr u32 kVCSRwCameraViewWindowRecipOp = 0x460E6B43;  // div.s $f13, $f13, $f14
+
 // The weapon's range, which is what the length of a redirected shot ray has to be.
 //
 // CWeaponInfo::GetWeaponInfo is 0x08b1fd70, and it is three instructions:

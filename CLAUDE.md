@@ -259,6 +259,15 @@ Two more details that will bite if they are "simplified":
   It is safe to call for anything in `struct Config`; only the blocks that override
   `CanResetToDefault()` (display layout, touch controls, gestures) assert.
 
+### The Graphics page has an ADVANCED page under it
+
+Ambient occlusion, anisotropic filtering and world memory moved to `OptionPage::GraphicsAdvanced`
+when AO joined and the page stopped reading at a glance. ADVANCED is the last settings row, above
+the spacer and RESTORE DEFAULTS, because it leads to more settings rather than doing something -
+and each page's RESTORE DEFAULTS resets only its own rows. Its heading is
+`assets/vcs/title_advanced.png`, rendered on the Mac with `.venv/bin/python Tools/vcsmenuart.py
+advanced` (the system python has no Pillow).
+
 ### The Gameplay page has a second kind of row now: the game's own settings
 
 `SUBTITLES` and `HUD` are not this port's inventions, and that makes them the first rows on that
@@ -4450,6 +4459,58 @@ cast once:**
 **Not yet measured in play.** It needs a building walked away from and the camera turned, and the
 harness can do neither - see the tooling limits in the streaming grid section.
 
+#### A cell took whole FLUSHES, and a flush is not an object
+
+**Status: fixed in code 2026-09-30, NOT yet verified in play.** Reported after everything above as
+"a building in front of me, I turn my back on it, and its shadow often goes out" - buildings worst,
+palms mostly fine.
+
+`RememberCaster` put a whole draw into the cell of the draw's centre, and a draw is a flush: PPSSPP
+merges consecutive draws with the same state, and which ones it merges depends on what the game
+culled, so it changes as the camera turns. That is the fact the props and the fronds had already
+recorded - three lamp posts in one batch, frond flushes 500 to 3000 units wide - and the cache was
+never taught it. The sequence that loses a building: drawn alone, it is in its own cell; a
+neighbour with the same texture comes into view, the two merge, and the flush's centre lands in a
+cell between them. The building's own cell is still wholly on screen, so it is REPLACED - with
+whatever else is centred there, without the building. The cell between is half off screen, so it
+keeps what it had and throws the flush away. The building is in no cell, and goes out when it
+leaves the view.
+
+Palms survived by accident rather than design: cut-outs are remembered per flush too
+(`RememberCutout`), but a frond flush is so wide its centre lands in a cell too far away ever to be
+replaced, so it only ever fills and is never overwritten.
+
+Each triangle now goes to the cell of its own centroid, which is independent of how draws were
+grouped. Only the vertices a casting triangle uses are stored, where the whole draw's were before,
+so a cell holds less and fills its u16 range later. `VCS_CACHE_TRACE` and the Shadows tab count
+draws split across cells and triangles dropped by a full cell; the second should read zero.
+
+**That build on its own made the flicker WORSE, reported from play the same day**, and the
+reasoning that said it could not was the mistake: "a triangle centred in a cell wholly on screen was
+drawn, so a capture of that cell misses nothing". Drawn is not captured. A flush merged past
+`maxCasterSpan`, or a resource still streaming, leaves an object out of one frame's capture, and
+with cells this small the cell is still touched by whatever else was drawn there - so it was
+replaced without the object. Whole-flush bucketing had hidden that by accident: a missing flush
+touched no cell, so its old cell was replayed over the gap.
+
+So the plain half is now a quality ladder instead of a wholesale replace, which is also the rule
+asked for from play - keep whichever LOD of a thing is best, across the next unload and load. A
+close capture (within `cacheReplaceRadius`) beats a far one; between two captures from the same side
+the one with MORE triangles wins; a capture with fewer triangles than the memory is taken as
+incomplete, and the memory is kept and replayed over it. Static scenery does not shrink, so this
+converges on the most complete capture and never regresses. Two exceptions, both deliberate: a far
+memory yields to a close sighting that is wholly on screen whatever its count (the stand-in is not
+the building), and the light moving more than ten degrees since the commit lets a slightly smaller
+capture in, because it changes which faces are kept. Cells nearer than about forty units are never
+wholly on screen, so this rule is also the only way they ever improve on their first fill.
+
+The cost is ghosts: something static that genuinely goes away stays in the shadow. Nothing in this
+game's scenery does that often enough to matter, and a knocked-over bin that lands in another cell
+is the case to look at if one is ever reported.
+
+Cut-outs still go by the flush. They work, and making them sound as well means one `CutPiece` per
+cell per draw - worth doing if a palm is ever reported doing what the buildings did.
+
 #### The vanilla shadow sprite is always empty, and the texture pack says so
 
 The game's own shadow sprite flashed for a moment whenever a new chunk loaded, and some edge cases
@@ -4510,6 +4571,15 @@ belong to whatever lived there before.
 
 The same run is a reason to look harder at the positional hider itself: skid marks and blood pools
 genuinely are flat blended decals lying under something, and that rule drops those draws on sight.
+
+**It was also hiding the street lamps' pools of light**, and that one is fixed (2026-09-30, not yet
+seen in play). GTA draws both through one shadow system - `SHADOWTYPE_DARK`/`INVCOLOR` for the blob
+under a ped or a car, `SHADOWTYPE_ADDITIVE` for the light a lamp or a headlight throws on the road -
+so a lamp's pool is small, flat, writes no depth and lies under the lamp post. It was dropped while
+the post was on screen and popped back when the post left it, reported as a hard-edged shadow
+appearing with the lamp just behind the camera. `BlendOnlyBrightens` keeps anything whose blend
+keeps the destination whole (`FIXB` white, or `MAX`) out of both the positional and the learned
+paths: a shadow can only darken.
 
 #### People and vehicles flickered because the game drew a second frame after the passes
 
@@ -4639,10 +4709,16 @@ a street full of palms.
 draws, and the cache only remembers places that have been on screen. Walk into a street facing away
 from a building and it casts nothing until you have seen it once. FOUR mechanisms have now been
 found, decoded, patched and measured - the camera frustum, the streamer's delete-behind pass, the
-far clip, and the LOD distance multiplier - and not one of them decides anything for the map. What
-is left is that VCS draws whatever the streamer has loaded, so widening the view is a STREAMING
-question and nothing else. See "The LOD multiplier was patched properly" below for the four
-negatives in one table.
+far clip and the LOD distance multiplier - and not one of them decides anything for the map. See
+"The LOD multiplier was patched properly" below for them in one table.
+
+**That sentence used to end "so VCS draws whatever the streamer has loaded, and widening the view is
+a STREAMING question and nothing else", and it was wrong** - the paragraph above it says a building
+you have not looked at casts nothing, which a game drawing whatever is loaded could not do. The cull
+was found - it is the RenderWare view window - and **widening it made things worse**, dropping
+objects the player was looking straight at. See "VCS culls to the camera, and widening it is worse
+than the pop-in". So this note stands exactly as it did: what has not been looked at cannot cast,
+and the caster cache is the whole of the answer.
 
 **A remembered frond needs its texture to still be in the cache.** Off-screen fronds are replayed
 only if the texture cache still holds a texture at their address, so a palm whose texture has been
@@ -4650,6 +4726,125 @@ freed stops casting until the game draws it again. See "Palm fronds cast through
 
 **The moon is the sun's light mirrored, not a real lunar position.** It puts night shadows
 somewhere plausible rather than somewhere correct.
+
+#### The cache was measured WHILE DRIVING, and it is not the thing that is short
+
+**Status: measured 2026-09-22, over a 3,500-unit loop at 36 units a second.** Prompted by the idea
+of building a second camera pointed backwards so the game would submit geometry behind the player
+for the shadow pass to use. The cache is what that would feed, so the question to settle first is
+whether the cache is actually short of anything - and it is not.
+
+`VCS_CACHE_TRACE=1` prints cells held, cells replayed, cells replayed BEHIND the camera and the
+rebase and clear counts, once a second. Four legs of a square, continuous movement at the speed of
+a car, at a locked 30fps:
+
+| | |
+|---|---|
+| cells held | **200 - 460 throughout**, never draining |
+| GE rebases | **20**, each carrying 350 - 460 cells with it, none lost |
+| whole-cache clears | **1**, at a genuine island change |
+| cells replayed | 6 - 40 a frame |
+| of those, behind the camera | **up to 16 a frame; about HALF the replayed ones at rest** |
+
+So the cache retains across travel, follows the world as the GE space rebases under it, and the
+geometry it hands the depth pass is about half from behind the player. That half is the whole
+feature working.
+
+**The number that answers the camera idea is the ratio.** At rest it held 363 cells and replayed
+23 - **it carries about eighteen times more geometry than the depth pass ever draws.** What decides
+whether a remembered cell casts is the `reaches` test, not whether the cell exists: `cascadeRadius`
+is 70 with `centreDistance` 40 ahead, so the box spans 30 units behind the camera to 110 in front,
+extended 300 units UP-SUN by `casterReach`. A second camera would pour more geometry into a cache
+that is already oversupplied by a factor of eighteen, and the depth box would go on drawing the
+same cells.
+
+**It would answer exactly one thing, and that thing is still true**: geometry never looked at at
+all. The cache can only remember frames the game drew, so a building you have driven past facing
+away from casts nothing until you have seen it once. That is the note above, unchanged - and it is
+a much narrower gap than "shadows go out behind you", which this measurement shows the cache
+already covers.
+
+**Against it: the cost is the failure this file already recorded.** Making the game render a second
+view means the game's own entity scan, streaming and resource residency for two views at once, out
+of a streaming heap that runs 95% full at retail - and merely WIDENING one view was measured to
+make the streamer drop objects the player was looking straight at. See "VCS culls to the camera,
+and widening it is worse than the pop-in". A second camera is that experiment with more to hold, not
+less. **The caster cache is a backwards camera already, built for free out of frames the game had
+drawn anyway** - which is why it was built that way rather than by asking the game for more.
+
+**Two traps in the measurement itself, both of which faked a broken cache before the harness was
+fixed.**
+
+- **Pacing the teleport on the WALL clock.** The game stalls for seconds while an island streams;
+  a step every 30ms banks up through the stall and arrives as a 230-unit jump in one game frame,
+  which is over `RebaseCachedCasters`'s 40-unit threshold, so the cache was cleared nine times in
+  thirty seconds and the log said "the camera jumped 228 units". Every one of those was the
+  instrument. Paced on `FrameCounter` instead, with a cap of two frames of travel per step, the
+  largest single step was 2.4 units and the clears went to one - the island change, which is
+  correct. **A harness that drives the game has to run on the game's clock**, the same rule the
+  cheat sequencer and the aim model already follow.
+- **Appending a marker to the log file with `echo >>`.** The emulator holds its own file offset, so
+  the marks were overwritten as it wrote. Correlate by printing a wall clock from the driving
+  script and matching it against the log's own timestamps.
+
+And one the previous rounds had already taught, confirmed again: **standing still reads as a
+perfectly healthy cache**, because the same cells replay with byte-identical counts for minutes.
+Every number above only moves while travelling.
+
+#### Half of what casts behind you is a LOD stand-in
+
+**Status: measured 2026-09-22, same harness, ULTRA.** The measurement above cleared "the cache is
+empty behind you" and did not look at what the cache is FULL of. It is mostly stand-ins.
+
+A cell takes full detail only from a sighting inside `cacheReplaceRadius` (150 units). An EMPTY
+cell takes whatever it is offered at any distance out to `cacheRadius` (350) and then keeps it, and
+past ~266 units the level archives hand over the LOD stand-in or a building with parts missing -
+see "The map is baked per cell". So a building you only ever passed at 200 units casts a blocky or
+holed shadow **for as long as it lives in the cache**, and every count before this one reads that
+cell as healthy. `Bucket::fillDist` records the distance its contents were committed at, which is
+what makes the two distinguishable.
+
+Over the same paced square - 3,700 units, four legs, two island changes:
+
+| | all driving | warm cache only (>=150 cells) |
+|---|---|---|
+| held cells that are stand-in | 75% | 79% |
+| REPLAYED cells that are stand-in | 29% | 22% |
+| **replayed BEHIND the camera that are stand-in** | **43%** | **50%** |
+
+The warm-cache column is the control that matters: it excludes every post-clear rebuild, where a
+fresh cache is filled from wherever the player happens to be, and the number goes **up**. So this is
+not an artefact of the island changes.
+
+**The shape explains why it hid.** Stand-ins are 75-83% of the cache and only ~7% of the cast
+GEOMETRY at rest, because they live out at the rim of `cacheRadius` where the cascade rarely
+reaches. Behind the camera is the exception - it is exactly the population you have driven past and
+possibly never come within 150 units of - which is why the one place the number is bad is the one
+place play reported a problem.
+
+**This is the same symptom "Cast once, then there" already fixed once, in the half it could not
+reach.** That section made a far sighting stop OVERWRITING a near one; it could not conjure a near
+sighting for a building on the far side of a canal, and nothing built out of the game's own
+rendering ever can.
+
+So the ordering for fixing it, cheapest first:
+
+- **`cacheReplaceRadius` is conservative.** The archives bake full detail to ~266 units from the
+  CELL, and a cell is up to ~80 across, so the guaranteed radius from the camera is nearer 180 than
+  150. Worth a try and worth almost nothing - it moves the boundary, it does not remove it.
+- **Persist the cache to disk.** Cells upgrade whenever the player does eventually drive within 150,
+  so over a few sessions everything you actually drive past becomes full detail. No format
+  reversing. Does nothing for what you never get close to.
+- **A geometry source that is not the game's own rendering**, which is the only thing that fixes
+  "never within 150 units". That is where extracting the map from the PS2 disc becomes a live
+  question rather than a speculative one - the PSP-native mesh format has no public tooling, the
+  PS2-native RenderWare one has twenty years of it, and the cell grid and instance records are
+  already decoded here.
+
+**What is NOT measured is whether it LOOKS wrong.** These are counters. A stand-in's shadow may be
+perfectly acceptable at the distance it is cast from, and the cheap way to find out is a picture
+rather than another number: one build where stand-in cells do not cast at all, and whatever
+disappears from the frame is what they were contributing.
 
 #### Shadows go out in the rain
 
@@ -5088,11 +5283,199 @@ a session, **28461 blobs hidden by position against 10621 by learned texture**.
   captures its own), which is one vertex transform per vertex on the CPU, and the shading pass draws
   the scene twice more. Nothing was measured, so nothing is claimed.
 
+### VCS culls to the camera, and widening it is worse than the pop-in
+
+**Status: the cull was found, the lever works, the feature was built and measured - and it was
+REVERTED after play, because it drops objects the player is looking straight at.** Reported as
+"some objects that are 100% in that original default viewport get deloaded sometimes in front of
+us". Nothing of it ships; the addresses stay in `VCSAddresses.h` and this section is the record.
+
+Read the last part first if you are about to try this again: **the answer is known and the answer
+does not help.** The cost of rediscovering that is a day.
+
+#### The four negatives were sound and all looked in the wrong place
+
+The conclusion drawn from them was stated twice in this file - *"what VCS draws is what the
+streamer has loaded, and nothing else decides"* - and two things from play contradicted it flatly,
+both of them already written down here:
+
+- *"Geometry you have never looked at cannot cast. Walk into a street facing away from a building
+  and it casts nothing until you have seen it once."*
+- HOR+ widescreen makes *"objects pop in and out of view in these edges"* - at the EDGES, which is
+  where a 70-degree cull's boundary falls inside an 84-degree picture.
+
+**An observation from play outranks an inference from four negatives.**
+
+#### The spin, which settled it in one run
+
+Teleport to a fixed spot, point the chase camera four ways with its look command, and histogram the
+WORLD bearing of every object-sized draw the game submits. A game drawing whatever is loaded gives
+a distribution that holds still while the camera turns. Per mille by world bearing, 15 degrees a
+bucket, from 0:
+
+```
+yaw   0    161 207 111  14   2   0 ... 0   2   2   6  17  84 173 217
+yaw  90      0   0   0  44 352 299 130 119  41   7   1   0 ...
+yaw 180      0 ...   0  12  30 116 271 254  56 120  99  17   8   4   8   0 ...
+yaw 270      0 ...                   1   0   0   0   2  63 214 274 202 181  47  13   0   0
+```
+
+Four narrow cones, each centred on where the camera points. **VCS culls the map to its camera,
+hard**, and the four inert mechanisms below were simply not it.
+
+#### The lever is tangents, not planes
+
+`RwCamera + 0x60` is the RenderWare **view window** - the tangent of the half field of view per
+axis, reciprocals at `+0x68` - reading `0.7002` = tan(35 deg). It sits 24 bytes from the near clip
+this fork had been setting for weeks. There is no frustum in the camera at all.
+
+Found by breaking on a WRITE to it and reading the caller off the stack: one writer,
+`RwCameraSetViewWindow` at `0x088906e4`, one caller at `0x0893a7a4` taking
+`(RwCamera *, void *, float tanHalfFovX, float aspect)` in `$f12`/`$f13`. It stores `$f12` as the
+horizontal half-window and `$f12/$f13` as the vertical, **so scaling both widens horizontally and
+leaves the vertical alone** - the scale cancels in the quotient.
+
+Hammering the value from the debugger does nothing: the game rewrites it inside 80 ms. Nopping the
+two stores and forcing it wide is what proved the lever - the received arc went from 105 to 150
+degrees and the draw count rose 37%.
+
+#### Splitting the cull from the picture, which also works
+
+The view window is what the PROJECTION is built from too, so widening it alone is a fisheye. But
+the setter derives the reciprocal from the value it has just stored - `div.s $f13, $f13, $f14` at
+`0x08890754`, `$f13` = 1.0 - and **the projection follows the reciprocal**. Dividing `$f14` back by
+the same factor there hands back the stock reciprocal exactly. Measured: a 4x view window with a
+stock reciprocal renders at the normal field of view.
+
+Two `REPFLAG_HOOKENTER` replacements, both guarded on `$a0` being the scene camera. At the shipped
+default it read `viewWindow 1.4004` against `recip 1.4281` - a 109-degree cull behind a 70-degree
+picture, 2.5x the object draws, 30 fps, and a screenshot pixel-identical to stock.
+
+**And then it was played, and objects vanished in front of the player.**
+
+#### Why it fails, as far as it was taken
+
+Not investigated to a root cause, because the feature was abandoned first. The strongest candidate
+is **resource residency rather than culling**: an instance record carries `bit 15 = hidden`, which
+the game recomputes on every cell swap and sets when the resource is not loaded, and the streaming
+heap runs **95% full at retail**. Widening the cull hands the streamer far more to want; a streamer
+that cannot keep up marks instances hidden, and nothing about that rule distinguishes an instance
+in front of the player from one off to the side.
+
+Three things fit that and nothing else does:
+
+- **it needs movement.** Every screenshot taken standing still was clean, across a sweep of five
+  factors and four camera angles, which is exactly how a streaming shortfall hides from a fixed
+  fixture;
+- **it is intermittent and position-dependent**, which is what a heap under pressure looks like;
+- **the player's own word was "deloaded"**, which is what the mechanism is called.
+
+If anyone retries this, **raise `World memory` first and measure the streaming heap's free bytes
+with the cull wide.** That is a ten-minute test and it either explains the whole thing or clears it.
+
+#### The other ceiling, measured before play found the real one
+
+Past about 2.2x the game draws flat sheets of its own sea across the grass - a world-anchored quad
+with straight edges. Swept at one spot with everything else held still: **1.0, 1.5 and 2.0 clean,
+2.5 and 3.0 plainly wrong.** Four suspects were ruled out before accepting it, and three of them
+looked like the answer:
+
+| | ruled out by |
+|---|---|
+| this fork's water pass | `Water = 0`, no water lines in the log at all, artefact unchanged |
+| this fork's shadow pass | `Shadows = 0`, artefact unchanged |
+| PPSSPP's bounding-box cull | widening its matrix took culled draws from 1293 to 514, artefact unchanged |
+| PPSSPP's range culling | `DisableRangeCulling` added for this disc, artefact unchanged; reverted |
+
+And the control that says what it IS: **widening the cull and the projection TOGETHER is clean at
+any factor.** Same spot, same camera, 140 degrees both ways - no wedge. The engine objects to the
+two numbers disagreeing, not to the width.
+
+**So there are two separate failures here**, and it is worth keeping them apart: the sea wedge is
+the engine noticing the split, and the vanishing objects happen at a width where the wedge does
+not. Fixing either one would not have fixed the other.
+
+#### Two real bugs found on the way, and both are kept
+
+Neither is about the cull; both were exposed by it.
+
+- **PPSSPP culls against the game's projection**, through `gstate_c.cullMatrix` in
+  `UpdateMatrixProducts`. With a 140-degree cull behind a 70-degree projection it threw away
+  **1293 draws a frame against 280**, including ground that was on screen. That code is reverted
+  with the rest, but the fact is worth keeping: **the emulator assumes no game submits geometry
+  outside its own projection**, which is true of every game that is not being interfered with.
+- **The software transform never sees `u_proj`.** PPSSPP sends a draw down `RunSoftwareTransform`
+  whenever `ClipInfoFlags::SoftClipCull` is set, and it projects with `gstate.projMatrix` directly
+  - so the widescreen row's HOR+ correction was missing from those draws. About one 3D draw a
+  second in VCS, so it was never the visible bug, but it is a genuine pre-existing fault and the
+  fix is KEPT.
+
+A third, found while tidying: `g_widescreenSquash` and friends were never reset on shutdown, and
+`RefreshWidescreen` only runs from `Tick`. Boot VCS with widescreen on, quit, boot anything else in
+the same session and it inherited VCS's squash. Fixed in `Shutdown`.
+
+#### The instrument is kept, and it is the part worth having
+
+`CaptureStats::angleHist` and the counts beside it, on the debugger's **Shadows** tab and in the log
+once per boot: for every object-sized draw the game submits, the angle between the way the camera
+faces and the way the object lies, flattened onto the ground plane. Four things about how it is
+measured, each of which would otherwise make it useless:
+
+- **Yaw, not the solid angle.** The camera sits behind and above the player looking down, so on a 3D
+  measure the pavement at his feet is 60 degrees off forward.
+- **Object-sized draws only**, by `maxCasterSpan` alone. The sky and the map-spanning ground quad
+  have a centre and it is not a place anything is.
+- **Only past 30 units** (`kHorizonFarDistance`). A frustum keeps whatever OVERLAPS it, so an object
+  is kept while its centre is up to a half-angle plus its own angular radius off forward - and close
+  to the camera that radius is enormous. A bin three units to the player's left is at 80 degrees
+  whether the cull is 70 wide or 160.
+- **The SHAPE, not a percentile and not the maximum.** The distribution is a plateau out to the cull
+  edge and then a long thin tail: the 99th percentile sat at 100, 96 and 97 degrees across three
+  settings whose geometry counts differ by nearly four times, and the per-frame maximum reads 174
+  degrees at the stock cull because one stray draw in six hundred frames sets it.
+
+```
+stock       401 337 211  22   4   7   7   5   0   0   1   0     shoulder at 45 deg
+109 deg     230 240 342 140  33   4   5   2   0   0   0   0     shoulder at 60 deg
+140 deg     146 177 228 207 179  44  11   3   0   0   0   0     shoulder at 75 deg
+```
+
+`VCS_HORIZON_TRACE=1` prints the same population bucketed by WORLD bearing once a second with the
+camera's own bearing beside it. That is the control the relative measure cannot be, and it is what
+the spin above was read off.
+
+#### 360 degrees was never available
+
+A planar projection cannot open to 360 - the tangent runs to infinity at 90 degrees each way - and
+this game caps out well before that for the reasons above. **Behind the player is the shadow
+module's caster cache and always will be**; it already holds every cell within `cacheRadius` (350
+units) for good.
+
+#### Method, because five things in a row looked like the answer
+
+The artefact hunt went: the water pass, the shadow pass, PPSSPP's frustum cull, PPSSPP's range
+culling, the software transform. Four were wrong and one was a real bug that was not THAT bug -
+the shape this file has now recorded six times.
+
+What ended each round was an instrument rather than an argument: the spin histogram for "is there a
+cull", a draw-and-cull count for "who is throwing geometry away", a per-draw counter for "does this
+path even run" (one draw a second), and a control run with the game widened by hand and the
+renderer left alone for "is it the widening or the correction". Every one cost less than the round
+of reasoning it replaced.
+
+**And the one that was not instrumented is the one that sank it.** Every check of "is this width
+safe" was a screenshot from a fixed spot with the player standing still - five factors, four camera
+angles, all clean - and the failure only exists while moving. A fixed fixture is the right tool for
+comparing two builds and the wrong tool for asking whether a build is *correct*: it holds still
+exactly the variable the streamer cares about. **Anything touching streaming has to be judged while
+travelling, by somebody playing it.**
+
 ### The hunt for the visibility function, and the frustum that decides nothing
 
-**Status: the lever was found, verified, measured, and removed. The question is still open.** What
-follows is the whole of it, because the next attempt should start from the two things that are
-ruled out rather than rediscover them.
+**Status: CLOSED - and not here. The cull is the RenderWare view window, and widening it turned out
+to be worse than leaving it alone; see "VCS culls to the camera, and widening it is worse than the
+pop-in".** What follows is the record of two candidates that really are dead storage, kept because
+both look exactly like the answer and a future hunt should not spend a session on either again.
 
 VCS culls hard to the camera, which is how a PSP ran it, and the shadow pass can only ever see what
 reaches the GPU. So the standing request - *"trick the game that I am always looking 360 degrees"* -
@@ -5150,22 +5533,25 @@ test that uses `CDraw::ms_fFarClipZ` (`gp + 0x1e74`) as its default range and cu
 **That function is not called during rendering either**: an execution breakpoint on it never fired
 in twelve seconds on the interpreter, while the same breakpoint on `0x08a1db40` fired at once.
 
-**Where to look next, in the order they are worth trying.**
+**Where to look next** - written before the answer was found, and the first line of it was right,
+which is worth noticing: the render camera WAS the object, and what it culls with is four bytes from
+the near clip this fork had been setting for weeks.
 
 - **`CCamera + 0x7bc` holds the render camera.** At `0x08a23ea0` the caller fetches it and copies
   the camera's position (`+0x30..0x38`) and basis (`+0x10..0x28`) into it. That object is what the
-  renderer actually draws through, and whatever it culls with is reachable from there.
+  renderer actually draws through, and whatever it culls with is reachable from there. **It is
+  `+0x60`, the view window** - and the way in was a WRITE breakpoint on it, not a search for code.
 - **Find the visible-entity list rather than the test.** In this engine lineage the scan fills a
   large array of entity pointers each frame. An array of many consecutive pointers into the entity
   heap that changes as the camera turns is findable with `memory.search`, and a write breakpoint on
   it lands inside the scan - the same move that found the frustum function, aimed at the right
   structure this time.
-- **Consider that there may be no per-entity frustum cull at all.** A 4.37 degree frustum drawing a
-  complete street is at least consistent with VCS drawing everything the streamer has loaded,
-  regardless of facing, and limiting itself by distance alone. If that is what it does, the shadow
-  complaint has a different cause than the one everybody has assumed, and the test is one honest
-  measurement: the draw count with the camera pointed two opposite ways from one spot. **Turning the
-  camera for that test is itself the hard part** - writing `CameraYaw` from the debugger moved the
+- **Consider that there may be no per-entity frustum cull at all.** DISPROVEN, and the test named
+  here is exactly the one that disproved it - the draw count, or better the bearing histogram, with
+  the camera pointed several ways from one spot. **Turning the camera for that test is no longer the
+  hard part**: the chase camera's block takes a look command (write yaw at `+0x30`, flags at
+  `+0x2c`), which is what made the spin possible. The paragraph below is what stood in the way
+  before that existed. - writing `CameraYaw` from the debugger moved the
   look vector by 0.0 degrees across 361 writes, because on foot mode 15 rebuilds it from the
   player's heading every frame, and `input.analog.send` goes straight to `__CtrlSetAnalogXY` and so
   never reaches this fork's own look path.
@@ -5483,9 +5869,11 @@ and measured, and every one of them is inert for the map:
 | `CDraw::ms_fFarClipZ` | doubled, and the view was indistinguishable |
 | the LOD distance multiplier | 0.05x to 8x moves 4% of the frame |
 
-**So what VCS draws is what the streamer has loaded, and nothing else decides.** That is not a
-hypothesis any more; it is what is left after four levers - and the section below found what
-does decide: the streaming heap is 4.75MB and runs 95% full. The note that
+**What VCS draws is bounded by what the streamer has loaded**, and the section below found that
+bound: the streaming heap is 4.75MB and runs 95% full. This used to say "and nothing else decides",
+as something that "is not a hypothesis any more" - and that was the overreach, because four levers
+being inert says only that the lever is elsewhere. Play says something else decides too; see "The
+four negatives cannot all be right". The note that
 `DeleteRwObjectsBehindCamera` never fires reads differently in that light - the streamer is not
 evicting because it never gets far enough to have to.
 
@@ -6256,13 +6644,16 @@ will deload and despawn". Exactly right. The game culls and streams against ITS 
 view, and the strip either side that it never expected to show is a strip where things appear and
 vanish as you turn.
 
-**Widening whatever the game culls against would be the real fix and this fork cannot do it yet.**
-Four distance mechanisms have been found, decoded, patched and measured inert for the map - the
-frustum planes, the delete-behind pass, the far clip and the LOD multiplier, see "The hunt for the
-visibility function" - so whatever really decides is still unidentified. The pop-in is evidence
-that something view-dependent exists after all, which is worth knowing: it is the first symptom in
-this whole file that contradicts the four negatives, and it arrived from play rather than from a
-measurement.
+**Widening whatever the game culls against was the obvious fix, it was built, and it is worse than
+the problem.** The cull is the RenderWare view window and it CAN be opened to 109 degrees with the
+picture untouched - and a build that did dropped objects inside the ordinary 70-degree view. See
+"VCS culls to the camera, and widening it is worse than the pop-in". So the strip either side that
+WIDER reveals is still a strip the game never expected to show, and CROP is still the default for
+exactly the reason it always was.
+
+The pop-in was the first symptom in this whole file to contradict the four inert distance
+mechanisms, and it arrived from play rather than from a measurement - which is what got the cull
+found. It just did not get it widened.
 
 **CROP's argument does not depend on knowing what that mechanism is**, which is the whole reason
 it is the default: it shows strictly LESS than the frustum the game was already drawing, so there
@@ -6438,6 +6829,12 @@ leaving it off the page, and `vcs.ini` is still there for anyone who wants one b
 the safety valve for a signal that is a correlation, so a build where it stops holding takes the
 controls away during ordinary play and it has to stay reachable. It is on GAMEPLAY, where a
 statement about what happens during cutscenes belongs anyway.
+
+**GAMEPLAY is on every build, so its phone rows hide themselves off a phone** - this one and
+`Radar corner`, whose whole argument is a thumb. Moving them there leaked both onto the desktop
+menu, reported as "settings from the Android build got into this one". `kPhoneBuild` in
+`VCSSettings.cpp` asks the question `kPhoneLayout` asks in the menu, and `hideLast()` keeps the rows
+loading and saving, so an ini carried between the two loses nothing.
 
 **A tap changes a setting, and wraps where the arrow keys stop.** That difference is the device: a
 keyboard has both directions, so stopping at the maximum is right; a thumb has one gesture, and a

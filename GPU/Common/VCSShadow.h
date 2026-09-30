@@ -572,6 +572,44 @@ struct CaptureStats {
 	// the mask will be a flat colour.
 	int nearCameraDraws;
 
+	// WHERE THE GAME'S OWN GEOMETRY SITS AROUND THE CAMERA, in yaw. This is the instrument for
+	// the one question four address hunts have failed to answer: does VCS submit world geometry
+	// that is not in front of the camera?
+	//
+	// The population is every object-sized draw the capture accepted - thing-sized rather than
+	// the sky or a map-spanning quad, whose centre means nothing - and the measure is the angle
+	// between the way the camera faces and the way the object lies, both flattened onto the
+	// ground plane. Yaw rather than the full solid angle because the camera is usually pitched
+	// down at the player, which would put half the street "behind" it on a 3D measure.
+	//
+	// HOW TO READ IT. A horizontal field of view of 70 degrees reaches 35 degrees either side, so
+	// a game culling to its own frustum can show nothing past roughly 40 with a margin for
+	// objects straddling the edge. If `widest` sits near 40 and `behind` is zero, there IS a
+	// view-dependent cull and widening it is what this fork needs. If `behind` is a healthy
+	// fraction of the frame, there is not, and a missing shadow behind the player is the caster
+	// cache's problem rather than the game's.
+	//
+	// Live and remembered are counted apart on purpose: the cache replays cells the game has
+	// stopped drawing, so counting them together would answer the question with our own work.
+	int thingDraws;        // object-sized draws the game submitted this frame
+	int thingsAhead;       // within 45 degrees of the way the camera faces
+	int thingsBeside;      // 45 to 90
+	int thingsBehind;      // past 90
+	float widestThingDeg;  // the widest any one of them reached this frame
+	int cachedBehind;      // how many cells past 90 the cache replayed
+
+	// The same angles as a histogram, 15 degrees a bucket from straight ahead to straight behind.
+	//
+	// THE REACH - the angle 99 per cent of them fall inside - is the number worth reading, and the
+	// two simpler ones are both traps. `thingsBehind` cannot move past 90 degrees however wide the
+	// cull is opened, because a planar frustum has no way to reach behind the camera, so it reads
+	// the same 2 per cent whether the setting is off or at its widest. And `widestThingDeg` is a
+	// per-frame MAXIMUM, which one stray draw in six hundred frames sets to 180 - measured at 174
+	// with the cull at its stock 70 degrees, which is how a maximum lies.
+	static const int kAngleBuckets = 12;
+	int angleHist[kAngleBuckets];
+	int farThingDraws;     // the population the histogram counts - see kHorizonFarDistance
+
 	// The caster cache: how many entries it holds, how many of them this frame's shadow map got
 	// from it rather than from the game, and how much memory that is. A cached count of zero
 	// while shadows still blink out means nothing is being recognised as scenery.
@@ -579,6 +617,20 @@ struct CaptureStats {
 	int cachedDraws;
 	int cachedVertices;
 	size_t cachedBytes;
+	// Remembered draws whose triangles landed in more than one cell - a flush holding several
+	// objects, or one straddling a boundary - and triangles a full cell had no room for.
+	int cacheSplitDraws;
+	int cacheCapDrops;
+
+	// HOW MUCH OF WHAT CASTS IS A STAND-IN. A cell only takes full detail from a sighting inside
+	// cacheReplaceRadius; an empty one takes whatever it is offered at any distance and then keeps
+	// it for good. So a building only ever seen from across a junction is remembered as its LOD
+	// stand-in permanently, and casts a blocky shadow - which is NOT the same failure as the cache
+	// being empty, and no count before these could tell the two apart.
+	int heldStandIn;          // cells whose contents were committed beyond cacheReplaceRadius
+	int cachedStandIn;        // ...of the ones replayed into the depth pass this frame
+	int cachedStandInBehind;  // ...of those, the ones behind the camera
+	int cachedStandInVerts;   // their share of the geometry, which is the honest weight
 
 	// The blob-shadow suppressor: how many textures it has learned, and how many draws it
 	// dropped this frame. Learned staying at zero means the "sits under something" test never

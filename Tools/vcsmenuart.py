@@ -62,6 +62,7 @@ TITLES = {
     "keybindings": "Key Bindings",
     "audiosetup": "Audio Setup",
     "displaysetup": "Display Setup",
+    "advanced": "Advanced",
     "touch": "Touch Controls",
 }
 

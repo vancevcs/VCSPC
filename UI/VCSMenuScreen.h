@@ -61,6 +61,8 @@ enum class VCSMenuPage {
 	Touch,
 	Audio,
 	Graphics,
+	// The rarely-touched graphics rows, reached from the last row of Graphics.
+	GraphicsAdvanced,
 	// What this port adds to the game, each row a switch that hands one of them back.
 	Gameplay,
 

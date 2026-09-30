@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -160,6 +161,10 @@ static ViewportCapture s_frameViewport;
 // The camera, recovered as soon as the view matrix is captured rather than at the end of the
 // frame, because the capture itself has to test against it - see nearCameraCutoff.
 static float s_frameCameraPos[3];
+// ...and the way it faces, for the caster-horizon measure. Taken from the same matrix on the same
+// frame rather than from s_view, which is not filled until the seam, long after the draws it would
+// have to describe.
+static float s_frameCameraFwd[3];
 
 // The direction light travels, as far as the capture knows it so far. The back-face test needs it
 // while draws are arriving, and the projection is not built until the frame turns to 2D - so this
@@ -1147,6 +1152,9 @@ static void BakeDraw(const u8 *decoded, int numDecodedVerts, const u16 *indices,
 
 static const float kBucketSize = 32.0f;
 static const int kMaxBucketVertices = 60000;   // indices into a bucket are 16-bit
+// How far the light may move, cos(10 degrees), before a remembered cell may be refreshed with a
+// smaller capture - see the replace rule in SubmitCachedCasters.
+static const float kCacheLightRefreshCos = 0.985f;
 
 // A remembered cut-out: which texture, how it is sampled, and where its vertices and indices sit
 // in the cell's flat arrays. Indices are relative to the piece's first vertex.
@@ -1177,6 +1185,15 @@ struct Bucket {
 	int lastSeenFrame;
 	int touchedFrame;
 	float centre[3];
+	// How far the camera was when these contents were COMMITTED, which is what decides whether
+	// they are the real building or its LOD stand-in. A cell only takes full detail from a
+	// sighting inside cacheReplaceRadius; an empty one takes whatever it is offered, however far
+	// away, and then keeps it. So a cell whose fillDist is large is casting a blocky
+	// approximation for as long as it lives, and nothing in the counts so far could see that.
+	float fillDist;
+	// The light the plain half was committed under. Only faces turned from the light are kept,
+	// so a memory taken under a light that has since moved holds the wrong faces.
+	float commitLight[3];
 };
 
 static std::unordered_map<u64, Bucket> s_buckets;
@@ -1207,26 +1224,72 @@ static Bucket &TouchBucket(const float centre[3]) {
 	return b;
 }
 
-// Adds this draw's casting triangles to the cell it sits in. Whole draws go to the cell of their
-// centre rather than being split across cells - a wall that straddles a boundary is remembered by
-// one side of it, which is all the accuracy a hundred-unit cascade can use.
-static void RememberCaster(const float drawMin[3], const float drawMax[3], int vertCount) {
+// Scratch for RememberCaster: which cell each of this draw's vertices was last copied into, and
+// where in it.
+static std::vector<const Bucket *> s_rememberCell;
+static std::vector<u16> s_rememberIdx;
+
+// Adds this draw's casting triangles to the cells they sit in, each TRIANGLE to the cell of its
+// own centroid.
+//
+// Whole draws used to go to the cell of the draw's centre, and a draw is a flush, not an object:
+// PPSSPP merges consecutive draws with the same state, and which ones it merges depends on what
+// the game culled - so it changes as the camera turns. A building drawn alone went to its own
+// cell; a moment later, merged with a neighbour that had come into view, it went to a cell
+// between the two. Its own cell, still on screen, was then REPLACED without it, the cell between
+// was half off screen and kept what it had, and the building was in neither. Reported as a
+// building's shadow going out after turning your back on it - buildings worst, palms fine,
+// because a frond flush is so wide its centre lands in a cell too far away ever to be replaced.
+//
+// A triangle's centroid does not care how draws were grouped. It does NOT make one frame's capture
+// of a cell complete - drawn is not captured - which is why SubmitCachedCasters keeps whichever
+// capture held the most, rather than whichever came last.
+static void RememberCaster(int vertCount) {
 	if (!s_settings.cacheCasters || s_drawCastIdx.size() < 3) {
 		return;
 	}
-	float centre[3];
-	for (int c = 0; c < 3; c++) {
-		centre[c] = (drawMin[c] + drawMax[c]) * 0.5f;
-	}
+	s_rememberCell.assign((size_t)vertCount, nullptr);
+	s_rememberIdx.resize((size_t)vertCount);
 
-	Bucket &b = TouchBucket(centre);
-	const size_t base = b.pendingPos.size() / 3;
-	if (base + (size_t)vertCount > (size_t)kMaxBucketVertices) {
-		return;
+	const float *pos = s_drawPos.data();
+	const size_t count = s_drawCastIdx.size() - s_drawCastIdx.size() % 3;
+	Bucket *cell = nullptr;
+	const Bucket *first = nullptr;
+	u64 cellKey = 0;
+	bool split = false;
+	for (size_t t = 0; t < count; t += 3) {
+		const u16 *tri = s_drawCastIdx.data() + t;
+		float centroid[3];
+		for (int c = 0; c < 3; c++) {
+			centroid[c] = (pos[tri[0] * 3 + c] + pos[tri[1] * 3 + c] + pos[tri[2] * 3 + c]) * (1.0f / 3.0f);
+		}
+		// Consecutive triangles nearly always share a cell, so the map is only asked on a change.
+		const u64 key = BucketKey(centroid);
+		if (!cell || key != cellKey) {
+			cell = &TouchBucket(centroid);
+			cellKey = key;
+			if (!first) {
+				first = cell;
+			} else if (cell != first) {
+				split = true;
+			}
+		}
+		if (cell->pendingPos.size() / 3 + 3 > (size_t)kMaxBucketVertices) {
+			s_capture.cacheCapDrops++;
+			continue;
+		}
+		for (int k = 0; k < 3; k++) {
+			const u16 v = tri[k];
+			if (s_rememberCell[v] != cell) {
+				s_rememberCell[v] = cell;
+				s_rememberIdx[v] = (u16)(cell->pendingPos.size() / 3);
+				cell->pendingPos.insert(cell->pendingPos.end(), pos + v * 3, pos + v * 3 + 3);
+			}
+			cell->pendingIdx.push_back(s_rememberIdx[v]);
+		}
 	}
-	b.pendingPos.insert(b.pendingPos.end(), s_drawPos.begin(), s_drawPos.begin() + (size_t)vertCount * 3);
-	for (u16 i : s_drawCastIdx) {
-		b.pendingIdx.push_back((u16)(base + i));
+	if (split) {
+		s_capture.cacheSplitDraws++;
 	}
 }
 
@@ -1322,6 +1385,262 @@ static void RememberCutout(const CutoutTex &tex, float alphaRef, u8 wrap) {
 	b.pendingCutVerts.insert(b.pendingCutVerts.end(), s_cutDrawVerts.begin(), s_cutDrawVerts.end());
 	b.pendingCutIdx.insert(b.pendingCutIdx.end(), s_cutDrawIdx.begin(), s_cutDrawIdx.end());
 	b.pendingCutPieces.push_back(piece);
+}
+
+// How far round from the way the camera faces this point lies, in degrees, measured flat on the
+// ground plane. 0 is straight ahead and 180 is straight behind.
+//
+// The whole of the caster-horizon instrument - see CaptureStats for what it is for and how to read
+// it. Flattened because the camera is normally pitched down at the player: on a full solid-angle
+// measure the pavement at his feet reads as being off to one side, which is true and useless.
+//
+// Returns -1 for a point the measure cannot describe: one standing on the camera's own axis, where
+// there is no direction to report, or a frame with no camera yet.
+static float YawFromForward(const float point[3]) {
+	if (!s_haveViewMatrix) {
+		return -1.0f;
+	}
+	const float fx = s_frameCameraFwd[0], fy = s_frameCameraFwd[1];
+	const float dx = point[0] - s_frameCameraPos[0], dy = point[1] - s_frameCameraPos[1];
+	const float fLen = sqrtf(fx * fx + fy * fy);
+	const float dLen = sqrtf(dx * dx + dy * dy);
+	// Two units is about where the game's own full-screen overlays sit, and anything inside that
+	// is too close for a bearing to mean anything anyway.
+	if (fLen < 0.001f || dLen < 2.0f) {
+		return -1.0f;
+	}
+	float c = (fx * dx + fy * dy) / (fLen * dLen);
+	c = c < -1.0f ? -1.0f : (c > 1.0f ? 1.0f : c);
+	return acosf(c) * (180.0f / 3.14159265f);
+}
+
+// VCS_HORIZON_TRACE=1 - the same population as the horizon counts, but bucketed by WORLD bearing
+// rather than by bearing relative to the camera, and printed once a second with the camera's own
+// bearing beside it.
+//
+// That is the control the three counts cannot be: a distribution that stays peaked around whatever
+// the camera happens to be pointing at is the game culling to its view, and one that stays put in
+// the world while the camera turns is the game drawing what the streamer holds. Turn the camera
+// between samples - the chase camera's block takes a look command - and read the two off each other.
+static const int kBearingBuckets = 24;
+static int s_bearingHist[kBearingBuckets];
+static int s_bearingFrames;
+static double s_bearingLast;
+static bool s_horizonTrace;
+
+// VCS_CACHE_TRACE=1 - what the caster cache is holding and replaying, once a second, WHILE THE
+// PLAYER MOVES. Standing still is what hid the last failure in this area: a fixed spot holds
+// still exactly the variable the streamer cares about, so a cache that collapses at every chunk
+// swap reads as a healthy one. The line carries the three numbers that separate the failures -
+// cells held (is it retaining), replayed (is any of it reaching the depth pass) and replayed
+// BEHIND (is any of THAT the geometry a shadow behind the player needs) - beside the rebase and
+// clear counts, because a cache that looks empty is usually a cache that was just emptied.
+// VCS_STANDIN_SWITCH=<path> - a dev hatch for LOOKING at what stand-in cells contribute, which
+// no counter can answer. While that file exists, a cell whose contents were committed beyond
+// cacheReplaceRadius does not cast at all, so whatever disappears from the frame is exactly what
+// the stand-ins were drawing. A file rather than an env var because the two pictures have to come
+// from ONE session - a second run moves the clock, and the sun with it, and then the difference
+// between the shots is the time of day rather than the setting.
+static std::string s_standInSwitchPath;
+static bool s_standInCasters = true;
+static double s_standInSwitchLast;
+
+static bool s_cacheTrace;
+static double s_cacheTraceLast;
+static int s_cacheTraceFrames;
+static int s_cacheTraceCellsSum;
+static int s_cacheTraceReplaySum;
+static int s_cacheTraceBehindSum;
+static int s_cacheTraceLiveBehindSum;
+static int s_cacheTraceReplayMax;
+static int s_cacheTraceBehindMax;
+static int s_cacheTraceHeldStandInSum;
+static int s_cacheTraceStandInSum;
+static int s_cacheTraceStandInBehindSum;
+static int s_cacheTraceStandInVertSum;
+static int s_cacheTraceVertSum;
+static int s_cacheTraceLastRebases;
+static int s_cacheTraceLastClears;
+static int s_cacheTraceSplitSum;
+static int s_cacheTraceCapDropSum;
+
+// Beyond this, an object's own width stops deciding what angle it is at.
+//
+// THE HISTOGRAM IS MEASURED ONLY OUT HERE, and the first version was not, which made it useless
+// for the thing it was built to show. A frustum keeps whatever OVERLAPS it, so an object is kept
+// while its centre is up to a frustum half-angle plus its own angular radius off forward - and
+// close to the camera that radius is enormous. A bin three units to the player's left is at 80
+// degrees whether the cull is 70 degrees wide or 160. Measured: opening the cull to 140 doubled
+// the geometry the game handed over and moved the 99th percentile of the whole population from
+// 97 degrees to 99, because the tail was the lamp posts either side of the player rather than
+// anything the setting touches. At thirty units a ten-metre building is worth about nine degrees.
+static const float kHorizonFarDistance = 30.0f;
+
+// Files one object-sized draw into the horizon histogram.
+static void NoteHorizon(const float centre[3]) {
+	const float deg = YawFromForward(centre);
+	if (deg < 0.0f) {
+		return;
+	}
+	const float dx = centre[0] - s_frameCameraPos[0], dy = centre[1] - s_frameCameraPos[1];
+	const bool far = dx * dx + dy * dy >= kHorizonFarDistance * kHorizonFarDistance;
+	s_capture.thingDraws++;
+	if (deg > s_capture.widestThingDeg) {
+		s_capture.widestThingDeg = deg;
+	}
+	if (deg <= 45.0f) {
+		s_capture.thingsAhead++;
+	} else if (deg <= 90.0f) {
+		s_capture.thingsBeside++;
+	} else {
+		s_capture.thingsBehind++;
+	}
+	if (far) {
+		int bucket = (int)(deg / 15.0f);
+		if (bucket < 0) bucket = 0;
+		if (bucket >= CaptureStats::kAngleBuckets) bucket = CaptureStats::kAngleBuckets - 1;
+		s_capture.angleHist[bucket]++;
+		s_capture.farThingDraws++;
+	}
+
+	if (s_horizonTrace) {
+		const float dx = centre[0] - s_frameCameraPos[0], dy = centre[1] - s_frameCameraPos[1];
+		float bearing = atan2f(dy, dx) * (180.0f / 3.14159265f);
+		if (bearing < 0.0f) bearing += 360.0f;
+		int b = (int)(bearing / (360.0f / kBearingBuckets));
+		if (b < 0) b = 0;
+		if (b >= kBearingBuckets) b = kBearingBuckets - 1;
+		s_bearingHist[b]++;
+	}
+}
+
+// The share of far objects lying more than 60 degrees off the way the camera faces - the one
+// number that moves with the cull and does not move with anything else.
+//
+// A PERCENTILE WAS TRIED FIRST AND IS USELESS HERE, which is worth a line because it looks like
+// the obvious summary. The distribution is a plateau out to the cull edge and then a long thin
+// tail of wide, near-ish surfaces, so the 99th percentile sits at about 100 degrees whatever the
+// setting is - measured at 100, 96 and 97 across three positions whose geometry counts differ by
+// a factor of nearly four. The plateau is the signal; the tail is not.
+//
+// 60 degrees sits just past the game's own edge rather than on it: a 70 degree view puts its
+// shoulder at about 45 once an object's own width is allowed for. Measured shares at one spot -
+// 2.7% with the row off, 4.6% at its widest, and 23.9% at a 140 degree cull that the engine turned
+// out not to tolerate (see "It stops at 2x"). The SHAPE printed beside it is the better read of
+// the two: the shoulder moves from bucket 2 to bucket 4 and that is unmistakable, while this one
+// number only separates them by a couple of points at the widths actually offered.
+static float ShareBeyond60(const int *hist, int total) {
+	if (total <= 0) {
+		return 0.0f;
+	}
+	int wide = 0;
+	for (int i = 4; i < CaptureStats::kAngleBuckets; i++) {
+		wide += hist[i];
+	}
+	return 100.0f * (float)wide / (float)total;
+}
+
+// See s_standInSwitchPath. Costs a stat() a second, and only when the hatch is armed.
+static void PollStandInSwitch() {
+	if (s_standInSwitchPath.empty()) {
+		return;
+	}
+	const double now = time_now_d();
+	if (now - s_standInSwitchLast < 1.0) {
+		return;
+	}
+	s_standInSwitchLast = now;
+	bool suppress = false;
+	if (FILE *f = fopen(s_standInSwitchPath.c_str(), "rb")) {
+		suppress = true;
+		fclose(f);
+	}
+	if (suppress == s_standInCasters) {
+		s_standInCasters = !suppress;
+		NOTICE_LOG(Log::G3D, "VCS shadows: stand-in cells %s",
+			s_standInCasters ? "cast again" : "are NOT casting (the dev hatch is set)");
+	}
+}
+
+// Prints the world-bearing histogram once a second while VCS_HORIZON_TRACE is set.
+static void ReportBearings() {
+	if (!s_horizonTrace || !s_haveViewMatrix) {
+		return;
+	}
+	s_bearingFrames++;
+	const double now = time_now_d();
+	if (now - s_bearingLast < 1.0) {
+		return;
+	}
+	s_bearingLast = now;
+	float camBearing = atan2f(s_frameCameraFwd[1], s_frameCameraFwd[0]) * (180.0f / 3.14159265f);
+	if (camBearing < 0.0f) camBearing += 360.0f;
+	int total = 0;
+	for (int i = 0; i < kBearingBuckets; i++) {
+		total += s_bearingHist[i];
+	}
+	char line[512];
+	int at = 0;
+	for (int i = 0; i < kBearingBuckets && at < (int)sizeof(line) - 8; i++) {
+		at += snprintf(line + at, sizeof(line) - at, "%d ",
+			total ? (int)(1000.0f * s_bearingHist[i] / total) : 0);
+	}
+	NOTICE_LOG(Log::G3D, "VCS horizon trace: camera at %.0f deg, %d draws over %d frames, per mille "
+		"by world bearing from 0 in 15 deg steps: %s",
+		camBearing, total, s_bearingFrames, line);
+	memset(s_bearingHist, 0, sizeof(s_bearingHist));
+	s_bearingFrames = 0;
+}
+
+// The cache's half of the same question ReportBearings asks about the game's own geometry.
+static void ReportCache() {
+	if (!s_cacheTrace) {
+		return;
+	}
+	s_cacheTraceFrames++;
+	s_cacheTraceCellsSum += s_capture.cachedEntries;
+	s_cacheTraceReplaySum += s_capture.cachedDraws;
+	s_cacheTraceBehindSum += s_capture.cachedBehind;
+	s_cacheTraceLiveBehindSum += s_capture.thingsBehind;
+	s_cacheTraceHeldStandInSum += s_capture.heldStandIn;
+	s_cacheTraceStandInSum += s_capture.cachedStandIn;
+	s_cacheTraceStandInBehindSum += s_capture.cachedStandInBehind;
+	s_cacheTraceStandInVertSum += s_capture.cachedStandInVerts;
+	s_cacheTraceVertSum += s_capture.cachedVertices;
+	s_cacheTraceSplitSum += s_capture.cacheSplitDraws;
+	s_cacheTraceCapDropSum += s_capture.cacheCapDrops;
+	if (s_capture.cachedDraws > s_cacheTraceReplayMax) s_cacheTraceReplayMax = s_capture.cachedDraws;
+	if (s_capture.cachedBehind > s_cacheTraceBehindMax) s_cacheTraceBehindMax = s_capture.cachedBehind;
+	const double now = time_now_d();
+	if (now - s_cacheTraceLast < 1.0 || s_cacheTraceFrames == 0) {
+		return;
+	}
+	s_cacheTraceLast = now;
+	const float f = (float)s_cacheTraceFrames;
+	const float heldPct = s_cacheTraceCellsSum ? 100.0f * s_cacheTraceHeldStandInSum / (float)s_cacheTraceCellsSum : 0.0f;
+	const float castPct = s_cacheTraceReplaySum ? 100.0f * s_cacheTraceStandInSum / (float)s_cacheTraceReplaySum : 0.0f;
+	const float behindPct = s_cacheTraceBehindSum ? 100.0f * s_cacheTraceStandInBehindSum / (float)s_cacheTraceBehindSum : 0.0f;
+	const float vertPct = s_cacheTraceVertSum ? 100.0f * s_cacheTraceStandInVertSum / (float)s_cacheTraceVertSum : 0.0f;
+	NOTICE_LOG(Log::G3D,
+		"VCS cache trace: %d frames | cells held %.0f | replayed %.1f (max %d) | "
+		"replayed BEHIND %.1f (max %d) | live things behind %.1f | rebases +%d clears +%d | "
+		"draws split across cells %.1f | triangles a full cell dropped %d "
+		"|| STAND-IN: held %.0f%% | cast %.0f%% | cast behind %.0f%% | of the geometry %.0f%%",
+		s_cacheTraceFrames, s_cacheTraceCellsSum / f, s_cacheTraceReplaySum / f,
+		s_cacheTraceReplayMax, s_cacheTraceBehindSum / f, s_cacheTraceBehindMax,
+		s_cacheTraceLiveBehindSum / f,
+		s_cacheRebases - s_cacheTraceLastRebases, s_cacheClears - s_cacheTraceLastClears,
+		s_cacheTraceSplitSum / f, s_cacheTraceCapDropSum,
+		heldPct, castPct, behindPct, vertPct);
+	s_cacheTraceLastRebases = s_cacheRebases;
+	s_cacheTraceLastClears = s_cacheClears;
+	s_cacheTraceFrames = 0;
+	s_cacheTraceCellsSum = s_cacheTraceReplaySum = s_cacheTraceBehindSum = 0;
+	s_cacheTraceLiveBehindSum = 0;
+	s_cacheTraceReplayMax = s_cacheTraceBehindMax = 0;
+	s_cacheTraceHeldStandInSum = s_cacheTraceStandInSum = s_cacheTraceStandInBehindSum = 0;
+	s_cacheTraceStandInVertSum = s_cacheTraceVertSum = 0;
+	s_cacheTraceSplitSum = s_cacheTraceCapDropSum = 0;
 }
 
 // Is this cell entirely inside the frame, so that what the game drew in it is the whole of it?
@@ -1436,12 +1755,48 @@ static void SubmitCachedCasters(TextureCacheCommon *textureCache) {
 			//
 			// An empty cell always takes what it is offered, or a cell that is never fully seen
 			// would never hold anything at all.
+			//
+			// The plain half no longer trusts one frame's capture to be complete. Since every
+			// triangle goes to the cell of its own centroid, a cell is touched by whatever else
+			// was drawn there - and a building missing from THIS frame's capture (its flush merged
+			// past maxCasterSpan, a resource still streaming) was wiped from memory by the
+			// neighbours that were present, which made the shadows flicker more than before.
+			// Static scenery does not shrink, so a capture with fewer triangles than the memory is
+			// an incomplete one: the memory is kept and replayed over it. Cells nearer than about
+			// forty units are never wholly on screen, so this is also the only way they improve.
+			//
+			// And it is a quality ladder, which is the LOD rule asked for: a close capture is full
+			// detail and beats a far one, and between two captures from the same side of
+			// cacheReplaceRadius the one with more triangles is the more detailed. The one way a
+			// memory may get smaller is the light moving, since it changes which faces are kept.
+			// Cut-outs still go by the flush, so they keep the older rule.
 			const bool close = distSq <= replaceRadius * replaceRadius;
-			const bool replace = (b.pos.empty() && b.cutPieces.empty()) ||
-				(close && CellIsWhollyInView(b.centre));
-			if (replace) {
+			const bool empty = b.pos.empty() && b.cutPieces.empty();
+			const size_t heldTris = b.idx.size() / 3;
+			const size_t seenTris = b.pendingIdx.size() / 3;
+			const bool heldFar = b.fillDist > replaceRadius;
+			const bool lightMoved = s_view.valid && Dot(b.commitLight, s_view.lightDir) < kCacheLightRefreshCos;
+			bool replacePlain;
+			if (empty || b.pos.empty()) {
+				replacePlain = true;
+			} else if (!close) {
+				replacePlain = heldFar && seenTris >= heldTris;
+			} else if (heldFar) {
+				replacePlain = seenTris >= heldTris || CellIsWhollyInView(b.centre);
+			} else {
+				replacePlain = seenTris >= heldTris ||
+					(lightMoved && (CellIsWhollyInView(b.centre) || seenTris * 10 >= heldTris * 9));
+			}
+			const bool replaceCut = empty || (close && CellIsWhollyInView(b.centre));
+			if (replacePlain) {
+				b.fillDist = sqrtf(distSq);
 				b.pos.swap(b.pendingPos);
 				b.idx.swap(b.pendingIdx);
+				if (s_view.valid) {
+					memcpy(b.commitLight, s_view.lightDir, sizeof(b.commitLight));
+				}
+			}
+			if (replaceCut) {
 				b.cutVerts.swap(b.pendingCutVerts);
 				b.cutIdx.swap(b.pendingCutIdx);
 				b.cutPieces.swap(b.pendingCutPieces);
@@ -1452,6 +1807,7 @@ static void SubmitCachedCasters(TextureCacheCommon *textureCache) {
 			b.pendingCutIdx.clear();
 			b.pendingCutPieces.clear();
 			b.lastSeenFrame = s_frameIndex;
+			const bool replace = replacePlain && replaceCut;
 			if (replace) {
 				s_capture.cachedBytes += b.pos.size() * sizeof(float) + b.idx.size() * sizeof(u16) +
 					b.cutVerts.size() * sizeof(float) + b.cutIdx.size() * sizeof(u16);
@@ -1485,11 +1841,33 @@ static void SubmitCachedCasters(TextureCacheCommon *textureCache) {
 			reaches = acrossSq < across * across &&
 				along > -(s_view.casterReach + kBucketSize) && along < s_view.radius + kBucketSize;
 		}
+		// Is what this cell casts the real thing, or the stand-in it was holding the only time it
+		// was ever seen from anywhere? See CaptureStats, and s_standInSwitchPath for the hatch
+		// that stops them casting so the difference can be looked at rather than counted.
+		const bool standIn = b.fillDist > replaceRadius;
+		if (standIn && !s_standInCasters) {
+			reaches = false;
+		}
+
 		if (reaches && b.idx.size() >= 3) {
 			AppendGeometry(b.pos.data(), (int)(b.pos.size() / 3), b.idx.data(), (int)b.idx.size(),
 				nullptr, 0);
 			s_capture.cachedDraws++;
 			s_capture.cachedVertices += (int)(b.pos.size() / 3);
+			if (standIn) {
+				s_capture.cachedStandIn++;
+				s_capture.cachedStandInVerts += (int)(b.pos.size() / 3);
+			}
+			// Only cells the game is NOT drawing reach here, so this counts exactly the shadows
+			// behind the player that exist because they were remembered. Kept apart from the live
+			// half of the horizon measure - see CaptureStats.
+			const float deg = YawFromForward(b.centre);
+			if (deg > 90.0f) {
+				s_capture.cachedBehind++;
+				if (standIn) {
+					s_capture.cachedStandInBehind++;
+				}
+			}
 		}
 		if (reaches && !b.cutPieces.empty() && s_settings.texturedCutouts) {
 			if (!liveTexturesListed) {
@@ -1517,6 +1895,11 @@ static void SubmitCachedCasters(TextureCacheCommon *textureCache) {
 	}
 
 	s_capture.cachedEntries = (int)s_buckets.size();
+	for (const auto &cell : s_buckets) {
+		if (cell.second.fillDist > replaceRadius) {
+			s_capture.heldStandIn++;
+		}
+	}
 
 	// Once per boot, so a build where the cache silently never engages says so in the log rather
 	// than only in a panel the Release build cannot open.
@@ -1534,6 +1917,47 @@ static void SubmitCachedCasters(TextureCacheCommon *textureCache) {
 		s_saidCacheWorks = true;
 		WARN_LOG(Log::G3D, "VCS: the caster cache is carrying %d cells the game no longer draws (%d held)",
 			s_capture.cachedDraws, s_capture.cachedEntries);
+	}
+
+	// THE CASTER HORIZON, said out loud once per boot. This is the measurement that decides
+	// whether the request "make the game draw 360 degrees" has anything to aim at: if the game
+	// never submits an object more than about 40 degrees off the way the camera faces, there is a
+	// view-dependent cull to find and widen, and four address hunts have looked in the wrong
+	// places. If it routinely submits things behind the player, there is not, and a shadow that
+	// goes out behind you is this module's cache rather than the game's culling.
+	//
+	// Ten seconds of whatever the player happens to be doing, because one frame in a corridor
+	// proves nothing either way - and NOTICE, because this build's log level drops WARNING.
+	PollStandInSwitch();
+	ReportBearings();
+	ReportCache();
+
+	static int s_horizonFrames = 0;
+	static int s_horizonHist[CaptureStats::kAngleBuckets] = {};
+	static int s_horizonThings = 0;
+	static bool s_saidHorizon = false;
+	if (!s_saidHorizon && s_capture.thingDraws > 0) {
+		s_horizonFrames++;
+		s_horizonThings += s_capture.farThingDraws;
+		for (int i = 0; i < CaptureStats::kAngleBuckets; i++) {
+			s_horizonHist[i] += s_capture.angleHist[i];
+		}
+		if (s_horizonFrames >= 600) {
+			s_saidHorizon = true;
+			char shape[128];
+			int at = 0;
+			for (int i = 0; i < CaptureStats::kAngleBuckets; i++) {
+				at += snprintf(shape + at, sizeof(shape) - at, "%d ",
+					s_horizonThings ? (int)(1000.0f * s_horizonHist[i] / s_horizonThings) : 0);
+			}
+			NOTICE_LOG(Log::G3D,
+				"VCS shadows: caster horizon over %d frames - %d object draws past %.0f units, "
+				"%.1f%% of them past 60 degrees off forward. Per mille by angle in 15 deg steps: %s"
+				"(the SHOULDER is where the cull ends - about 45 deg on the retail cull, because a "
+				"frustum keeps whatever overlaps it and a near object overlaps a lot of it)",
+				s_horizonFrames, s_horizonThings, kHorizonFarDistance,
+				ShareBeyond60(s_horizonHist, s_horizonThings), shape);
+		}
 	}
 }
 
@@ -1613,6 +2037,20 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		spanX <= s_settings.propMaxSpan && spanY <= s_settings.propMaxSpan &&
 		spanZ >= s_settings.propMinHeight;
 
+	// Thing-sized, before the mode filter has an opinion: the horizon measure is asking what the
+	// GAME submitted, and answering it with our own caster setting would be answering a different
+	// question. The span test alone is what drops the sky and the map-spanning quads, whose centre
+	// is not a place anything is.
+	const bool thingSized = spanX <= s_settings.maxCasterSpan && spanY <= s_settings.maxCasterSpan;
+	if (thingSized) {
+		const float centre[3] = {
+			(drawMin[0] + drawMax[0]) * 0.5f,
+			(drawMin[1] + drawMax[1]) * 0.5f,
+			(drawMin[2] + drawMax[2]) * 0.5f,
+		};
+		NoteHorizon(centre);
+	}
+
 	const bool casts = spanX <= s_settings.maxCasterSpan && spanY <= s_settings.maxCasterSpan &&
 		(!s_settings.entityCastersOnly || isEntity || isProp);
 	if (!casts) {
@@ -1668,7 +2106,7 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 	const bool canMove = s_settings.entityCastersOnly ? !isProp : isEntity;
 	if (casts && !canMove &&
 		(gstate.vertType & GE_VTYPE_WEIGHT_MASK) == GE_VTYPE_WEIGHT_NONE) {
-		RememberCaster(drawMin, drawMax, numDecodedVerts);
+		RememberCaster(numDecodedVerts);
 	}
 }
 
@@ -1936,9 +2374,31 @@ static bool IsLearnedBlobTexture(u32 textureAddr) {
 	return false;
 }
 
+// A blend that can only add light: the destination is kept whole and the source goes on top.
+//
+// GTA draws two kinds of decal through the same shadow code - SHADOWTYPE_DARK and INVCOLOR, which
+// are the blob under a ped or a car, and SHADOWTYPE_ADDITIVE, which is the pool of light a street
+// lamp or a headlight throws on the road. Both are small, flat, write no depth and lie under
+// something, so the positional test could not tell them apart, and the lamp's pool was hidden for
+// as long as the lamp post was on screen - and popped back the moment it left, which was reported
+// as a hard-edged shadow appearing with the lamp just behind the camera.
+static bool BlendOnlyBrightens() {
+	if (!gstate.isAlphaBlendEnabled()) {
+		return false;
+	}
+	if (gstate.getBlendEq() == GE_BLENDMODE_MAX) {
+		return true;
+	}
+	return gstate.getBlendEq() == GE_BLENDMODE_MUL_AND_ADD &&
+		gstate.getBlendFuncB() == GE_DSTBLEND_FIXB && gstate.getFixB() == 0xFFFFFF;
+}
+
 void NoteGroundQuad(const u8 *decoded, int numDecodedVerts, int stride, int posOffset,
 	const float world[12], u32 textureAddr) {
 	if (!g_active || !s_settings.hideBlobShadows || numDecodedVerts < 3 || !textureAddr) {
+		return;
+	}
+	if (BlendOnlyBrightens()) {
 		return;
 	}
 	if (IsLearnedBlobTexture(textureAddr)) {
@@ -2030,7 +2490,8 @@ bool ShouldSkipDraw() {
 	// The shape as well as the texture. A learned texture is one this game happens to use for
 	// blobs, and nothing says it is used for nothing else - the through-mode HUD in particular
 	// is not ours to edit.
-	if (gstate.isModeThrough() || gstate.isDepthWriteEnabled() || !gstate.isAlphaBlendEnabled()) {
+	if (gstate.isModeThrough() || gstate.isDepthWriteEnabled() || !gstate.isAlphaBlendEnabled() ||
+		BlendOnlyBrightens()) {
 		return false;
 	}
 	if (!IsLearnedBlobTexture(gstate.getTextureAddress(0))) {
@@ -3877,6 +4338,19 @@ static void RefreshAvailability() {
 }
 
 void Init() {
+	// Read once, like the camera and water traces beside it.
+	s_horizonTrace = getenv("VCS_HORIZON_TRACE") != nullptr;
+	s_cacheTrace = getenv("VCS_CACHE_TRACE") != nullptr;
+	if (const char *sw = getenv("VCS_STANDIN_SWITCH")) {
+		s_standInSwitchPath = sw;
+		s_standInSwitchLast = 0.0;
+		s_standInCasters = true;
+	}
+	s_cacheTraceLast = 0.0;
+	s_cacheTraceFrames = 0;
+	memset(s_bearingHist, 0, sizeof(s_bearingHist));
+	s_bearingFrames = 0;
+	s_bearingLast = 0.0;
 	memset(&s_current, 0, sizeof(s_current));
 	memset(&s_published, 0, sizeof(s_published));
 	s_sunLuminance = 0.0f;
@@ -4688,6 +5162,13 @@ Reject ClassifyDraw(GEPrimitiveType prim, u32 vertTypeID, int vertexCount) {
 			s_frameCameraPos[0] = -(t[0] * m[0] + t[1] * m[1] + t[2] * m[2]);
 			s_frameCameraPos[1] = -(t[0] * m[3] + t[1] * m[4] + t[2] * m[5]);
 			s_frameCameraPos[2] = -(t[0] * m[6] + t[1] * m[7] + t[2] * m[8]);
+			// Column 2 of the rotation is the world direction of the view's z axis; which end of
+			// it points forward is the same question forwardIsNegativeZ already answers for the
+			// cascade, so it is asked the same way here.
+			const float sign = s_settings.forwardIsNegativeZ ? -1.0f : 1.0f;
+			s_frameCameraFwd[0] = m[2] * sign;
+			s_frameCameraFwd[1] = m[5] * sign;
+			s_frameCameraFwd[2] = m[8] * sign;
 		}
 		s_haveViewMatrix = true;
 

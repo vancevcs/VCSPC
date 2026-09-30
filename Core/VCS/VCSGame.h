@@ -279,10 +279,14 @@ u64 GetTickCount();
 // VERT- keeps the horizontal field of view and narrows the vertical one instead - the frame is
 // filled by cropping the top and bottom rather than by revealing anything new. Nothing enters the
 // frustum that was not already in it, so there is nothing to pop, whatever the culling mechanism
-// turns out to be. That argument holds without knowing what it is, which is why this is the
-// default: four distance mechanisms have been found, patched and measured inert for this game
-// (see "The hunt for the visibility function"), so the one that is really deciding is still
-// unidentified and cannot be widened to match.
+// turns out to be. That argument holds without knowing what the culling mechanism is, and it is
+// still why this is the default.
+//
+// THE MECHANISM IS NOW KNOWN AND WIDENING IT DID NOT WORK. VCS culls to the RenderWare view
+// window, that can be widened while the projection stays put, and a build that did it dropped
+// objects the player was looking straight at. Reverted. So the strip either side that WIDER
+// reveals is still a strip the game never expected to show, and CROP is still the honest default.
+// See "VCS culls to the camera, and widening it is worse than the pop-in" in CLAUDE.md.
 //
 // The HUD is squashed in both, because the frame is stretched horizontally in both.
 
