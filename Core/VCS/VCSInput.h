@@ -214,6 +214,12 @@ struct VCSTouchState {
 	bool armed = false;                  // something that shoots is in hand
 	bool melee = false;                  // fists or a melee weapon
 	bool scoped = false;                 // a scope, the binoculars or the camera is up
+	// What that scope offers, which is not the same for all four: the sniper and the camera zoom
+	// and the RPG does not, and the binoculars and the camera have nothing to shoot. The second
+	// is only ever true while aiming, so the fire button is left alone with the item merely held.
+	bool scopeZooms = false;
+	bool scopeCannotShoot = false;
+	bool cameraUp = false;               // ... and of those two, the camera: it has a shutter
 	bool lockedOn = false;               // the game has a target
 	bool ledgeAhead = false;             // the vault probe has something to climb
 	bool driveBy = false;                // riding shotgun with a weapon out

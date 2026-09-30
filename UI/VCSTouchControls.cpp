@@ -129,6 +129,10 @@ enum Cond : uint32_t {
 	CondMelee = 1 << 1,     // fists or a melee weapon
 	CondScoped = 1 << 2,    // a scope, the binoculars or the camera is up
 	CondLockedOn = 1 << 3,  // the game has a target
+	CondScopeZooms = 1 << 4,       // the sniper, the camera or the binoculars is up
+	CondScopeCannotShoot = 1 << 5, // the camera or the binoculars is up
+	CondCameraUp = 1 << 6,         // the camera is up
+	CondBike = 1 << 7,             // riding a motorcycle
 	CondWeapon = CondArmed | CondMelee,
 };
 
@@ -225,7 +229,7 @@ const ControlSpec kControls[] = {
 	// where a mis-tap cannot fire a gun.
 	{ "foot.fist",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
-		"fist", "gun", "ATTACK",       kColA, kRow1, kBig,   Anchor::Edge, kOnFoot | kAiming, CondAlways, 0 },
+		"fist", "gun", "ATTACK",       kColA, kRow1, kBig,   Anchor::Edge, kOnFoot | kAiming, CondAlways, CondScopeCannotShoot },
 	// Jump and sprint on one button: held it sprints, tapped twice it jumps. Two of the four
 	// face buttons on one control, which is what a screen with room for three has to do - and
 	// what a phone player already expects, because every touch platformer since has done it.
@@ -241,7 +245,7 @@ const ControlSpec kControls[] = {
 	// cannot do anything else, and aiming is exactly when the other hand is busy.
 	{ "foot.crosshair",
 		 kVCSPadAimButton,     NKCODE_UNKNOWN,       Kind::Toggle,
-		"crosshair", nullptr, "TARGET", kColB, kRow1, kMid,  Anchor::Edge, kOnFoot | kAiming, CondWeapon, 0 },
+		"crosshair", nullptr, "TARGET", kColB, kRow1, kMid,  Anchor::Edge, kOnFoot | kAiming, CondWeapon | CondScoped, 0 },
 	{ "foot.pickup",
 		 NKCODE_BUTTON_THUMBL, NKCODE_UNKNOWN,       Kind::Hold,
 		"pickup", nullptr, "PICKUP",   kColB, kRow2, kSmall, Anchor::Edge, kOnFoot,           CondAlways, 0 },
@@ -272,12 +276,17 @@ const ControlSpec kControls[] = {
 		"arrow_right", nullptr, "NEXT", kColA, kRow2, kMid,  Anchor::Edge, kAiming,           CondArmed,  CondScoped },
 	// The scope's own two, and the reason the table carries a condition at all: with anything but
 	// a scope in hand these are Block and Heavy Hit, so an ungated pair would throw punches.
+	// The camera's shutter, which is the fire control under another name - and where the fire
+	// button would be, because that is where the thumb already is.
+	{ "aim.shutter",
+		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
+		"shutter", nullptr, "PHOTO",   kColA, kRow1, kBig,   Anchor::Edge, kAiming,           CondCameraUp, 0 },
 	{ "aim.zoom_in",
 		 NKCODE_BUTTON_R1,     NKCODE_UNKNOWN,       Kind::Hold,
-		"zoom_in", nullptr, "ZOOM +",  kColA, kRow2, kMid,   Anchor::Edge, kAiming,           CondScoped, 0 },
+		"zoom_in", nullptr, "ZOOM +",  kColA, kRow2, kMid,   Anchor::Edge, kAiming,           CondScopeZooms, 0 },
 	{ "aim.zoom_out",
 		 NKCODE_BUTTON_L1,     NKCODE_UNKNOWN,       Kind::Hold,
-		"zoom_out", nullptr, "ZOOM -", kColB, kRow2, kSmall, Anchor::Edge, kAiming,           CondScoped, 0 },
+		"zoom_out", nullptr, "ZOOM -", kColB, kRow2, kSmall, Anchor::Edge, kAiming,           CondScopeZooms, 0 },
 
 	// --- Driving -------------------------------------------------------------------------------
 	{ "car.pedal_gas",
@@ -306,6 +315,12 @@ const ControlSpec kControls[] = {
 	{ "car.driveby_right",
 		 NKCODE_BUTTON_R1,     NKCODE_BUTTON_B,      Kind::Hold,
 		"driveby_right", nullptr, "LOOK", kLeftB, kGlanceY, kMid, Anchor::Edge, kVehicle,     CondAlways, 0 },
+	// A motorcycle also fires straight ahead, which is the drive-by control with no glance held -
+	// so this one presses the fire control alone. To the right of the pair rather than between
+	// them, because between them there is no room, and it can be dragged wherever suits.
+	{ "car.driveby_forward",
+		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
+		"driveby_forward", nullptr, "SHOOT", kLeftB + 94.0f, kGlanceY, kMid, Anchor::Edge, kVehicle, CondBike, 0 },
 	{ "car.arrow_left",
 		 NKCODE_UNKNOWN,       NKCODE_UNKNOWN,       Kind::SteerLeft,
 		"arrow_left", nullptr, "<",     kLeftA, kWheelY, kBig, Anchor::Edge, kVehicle,        CondAlways, 0 },
@@ -325,7 +340,7 @@ const ControlSpec kControls[] = {
 		"climb", nullptr, "UP",         kColA, kRow2, kMid,   Anchor::Edge, kAircraft,        CondAlways, 0 },
 	{ "air.gun",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
-		"gun", nullptr, "FIRE",         kColB, -96.0f, kSmall, Anchor::Edge, kAircraft,       CondAlways, 0 },
+		"missile", nullptr, "FIRE",     kColB, -96.0f, kSmall, Anchor::Edge, kAircraft,       CondAlways, 0 },
 	{ "air.car",
 		 NKCODE_BUTTON_Y,      NKCODE_UNKNOWN,       Kind::Hold,
 		"car", nullptr, "EXIT",         kColA, kRow3, kSmall, Anchor::Edge, kAircraft,        CondAlways, 0 },
@@ -440,6 +455,14 @@ float TouchScale() {
 	return s > 0.2f && s < 4.0f ? s : 1.0f;
 }
 
+// Testing only: VCS_TOUCH_TEST=1 in the environment puts this overlay up on a desktop build,
+// where ShowTouchControls is off, and keeps it from fading - so the art and the layout can be
+// looked at, and clicked, without a phone. Nothing is written to any ini.
+bool DesktopTouchTest() {
+	static const bool on = getenv("VCS_TOUCH_TEST") != nullptr;
+	return on;
+}
+
 uint32_t ButtonColor(bool down, float opacity) {
 	const uint32_t rgb = g_Config.iTouchButtonStyle != 0 ? 0xFFFFFF : 0xE8E0D0;
 	return colorAlpha(rgb, opacity * (down ? 0.75f : 0.32f));
@@ -469,13 +492,15 @@ struct VCSTouchArt {
 		}
 	}
 
-	Draw::Texture *Icon(UIContext &dc, const char *name) {
-		auto iter = icons.find(name);
+	// `prefix` is "touch" for a white glyph drawn on our own disc, or "touchbtn" for a whole
+	// button - disc, outline and glyph in their own colours - that replaces the disc outright.
+	Draw::Texture *Icon(UIContext &dc, const char *prefix, const char *name) {
+		char path[128];
+		snprintf(path, sizeof(path), "vcs/%s_%s.png", prefix, name);
+		auto iter = icons.find(path);
 		if (iter != icons.end()) {
 			return iter->second;
 		}
-		char path[128];
-		snprintf(path, sizeof(path), "vcs/touch_%s.png", name);
 		size_t size = 0;
 		uint8_t *data = g_VFS.ReadFile(path, &size);
 		Draw::Texture *tex = nullptr;
@@ -484,7 +509,7 @@ struct VCSTouchArt {
 				ImageFileType::DETECT, false, path);
 			delete[] data;
 		}
-		icons[name] = tex;
+		icons[path] = tex;
 		return tex;
 	}
 
@@ -674,8 +699,13 @@ bool VCSTouchButton::Touch(const TouchInput &input) {
 			}
 			// Firing a gun asks the game to lock on first. The shot follows a couple of frames
 			// later, from Update - see kAutoLockLeadFrames.
+			//
+			// On foot only: in a car the aim control is the BRAKE and in the air it is DESCEND,
+			// so a fire button there that borrowed it would slow you down with every shot.
 			const VCS::VCSTouchState state = VCS::TouchState();
-			if (spec_.kind == Kind::Hold && spec_.pad == NKCODE_BUTTON_B &&
+			const bool onFoot = state.context == VCS::VCSInputContext::OnFoot ||
+				state.context == VCS::VCSInputContext::Aiming;
+			if (spec_.kind == Kind::Hold && spec_.pad == NKCODE_BUTTON_B && onFoot &&
 					state.armed && !state.scoped &&
 					!VCS::IsTouchButtonDown(kVCSPadAimButton)) {
 				VCS::SetTouchButton(kVCSPadAimButton, true);
@@ -765,6 +795,21 @@ void VCSTouchButton::Draw(UIContext &dc) {
 	const bool down = downMask_ != 0 || toggled_;
 	const float cx = bounds_.centerX();
 	const float cy = bounds_.centerY();
+	const char *icon = armed_ && spec_.iconArmed ? spec_.iconArmed : spec_.icon;
+	if (icon && !g_art) {
+		g_art.reset(new VCSTouchArt());
+	}
+
+	// A whole button, drawn as it was painted. Its disc spans 236 of the image's 256 pixels, so it
+	// is scaled up to put that disc - not the image - on the control's radius, and a press lifts it
+	// to full brightness, which is the only change multiplying a coloured image can make.
+	if (icon) {
+		if (Draw::Texture *tex = g_art->Icon(dc, "touchbtn", icon)) {
+			const float size = Radius() * 2.0f * (256.0f / 236.0f) * (down ? 1.06f : 1.0f);
+			DrawIcon(dc, tex, cx, cy, size, colorAlpha(down ? 0xFFFFFF : 0xD8D8D8, opacity));
+			return;
+		}
+	}
 
 	float imgW = 0.0f, imgH = 0.0f;
 	dc.Draw()->GetAtlas()->measureImage(ImageID("I_ROUND"), &imgW, &imgH);
@@ -773,12 +818,8 @@ void VCSTouchButton::Draw(UIContext &dc) {
 		ButtonColor(down, opacity), ALIGN_CENTER);
 
 	const uint32_t inkColor = colorAlpha(0xFFFFFF, opacity * (down ? 1.0f : 0.85f));
-	const char *icon = armed_ && spec_.iconArmed ? spec_.iconArmed : spec_.icon;
 	if (icon) {
-		if (!g_art) {
-			g_art.reset(new VCSTouchArt());
-		}
-		if (Draw::Texture *tex = g_art->Icon(dc, icon)) {
+		if (Draw::Texture *tex = g_art->Icon(dc, "touch", icon)) {
 			DrawIcon(dc, tex, cx, cy, Radius() * 1.2f, inkColor);
 			return;
 		}
@@ -1305,7 +1346,10 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 		return ((spec.cond & CondArmed) && state.armed) ||
 			((spec.cond & CondMelee) && state.melee) ||
 			((spec.cond & CondScoped) && state.scoped) ||
-			((spec.cond & CondLockedOn) && state.lockedOn);
+			((spec.cond & CondLockedOn) && state.lockedOn) ||
+			((spec.cond & CondScopeZooms) && state.scopeZooms) ||
+			((spec.cond & CondCameraUp) && state.cameraUp) ||
+			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike);
 	}
 	// Steering by stick means no arrows, and by arrows means no stick. Both at once would be two
 	// things writing one axis.
@@ -1351,7 +1395,7 @@ void VCSTouchLayout::Update() {
 	//
 	// Never below 0.6, whatever the opacity setting says. A player who has turned the controls
 	// down to a ghost still has to be able to see the one they are moving.
-	if (editing_) {
+	if (editing_ || DesktopTouchTest()) {
 		GamepadUpdateOpacity(std::max(0.6f, g_Config.iTouchButtonOpacity / 100.0f));
 	} else {
 		GamepadUpdateOpacity();
@@ -1396,7 +1440,8 @@ void VCSTouchLayout::Update() {
 	// menu opening. The look zone stays up through the intro, because a tap there skips it.
 	const bool curtain = VCS::AutoCurtain() != VCS::CurtainKind::None;
 	const bool intro = VCS::GetBootPhase() == VCS::BootPhase::Intro;
-	if (!VCS::TouchSettings().enabled || !g_Config.bShowTouchControls || curtain ||
+	if (!VCS::TouchSettings().enabled ||
+			!(g_Config.bShowTouchControls || DesktopTouchTest()) || curtain ||
 			(!state.active && !intro)) {
 		if (visible_) {
 			ReleaseEverything();

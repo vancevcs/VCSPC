@@ -2729,6 +2729,17 @@ void PublishTouchState(VCSInputContext context) {
 	snap.vehicleClass = state.vehicleClass;
 	snap.melee = MeleeEquipped();
 	snap.scoped = ScopedWeaponActive();
+	if (snap.scoped) {
+		// 7 is the sniper scope and 8 the RPG's (see ScopedWeaponActive); 38 and 39 are the camera
+		// and the binoculars, keyed on the weapon because their camera mode reads 0 until raised.
+		const u32 camMode = ReadAddrU32(VCSAddr::WeaponCamMode).value_or(0);
+		const bool optical = OpticalItemEquipped();
+		snap.scopeZooms = camMode == 7 || optical;
+		snap.scopeCannotShoot = optical && context == VCSInputContext::Aiming;
+		// 38 - see WeaponTypeIsOpticalItem. The shutter is the fire control, so the camera gets
+		// it back as a button of its own rather than as the gun it is not.
+		snap.cameraUp = snap.scopeCannotShoot && GetState().weaponType.value_or(0) == 38;
+	}
 	// Something that shoots: a weapon slot that is not fists and not one of the items you only
 	// look through. The slot alone cannot say that - see WeaponSlotIsMelee.
 	snap.armed = state.weaponIndex.has_value() && *state.weaponIndex != 0 && !snap.melee;
@@ -2742,8 +2753,13 @@ void PublishTouchState(VCSInputContext context) {
 	// The Menu context is excluded because the game takes its own HUD away there too, so
 	// without it every visit to the map would read as a cutscene. Unknown is excluded for the
 	// reason everything else here is: no context means nothing decoded.
+	//
+	// A raised scope is excluded for the same reason: the sniper, the RPG, the camera and the
+	// binoculars all take the game into a first-person view that drops the radar with the rest
+	// of the HUD, and reading that as a cutscene swapped their controls for SKIP and PAUSE.
 	snap.cutscene = TouchSettings().hideInCutscene && GameSettings().hud && snap.active &&
-		context != VCSInputContext::Menu && !RadarOnScreen();
+		context != VCSInputContext::Menu && !(context == VCSInputContext::Aiming && snap.scoped) &&
+		!RadarOnScreen();
 
 	std::lock_guard<std::mutex> guard(g_touchStateMutex);
 	g_touchState = snap;
