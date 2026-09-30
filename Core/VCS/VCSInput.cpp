@@ -2744,6 +2744,7 @@ void PublishTouchState(VCSInputContext context) {
 	// look through. The slot alone cannot say that - see WeaponSlotIsMelee.
 	snap.armed = state.weaponIndex.has_value() && *state.weaponIndex != 0 && !snap.melee;
 	snap.lockedOn = state.isAiming.value_or(false);
+	snap.mapPage = context == VCSInputContext::Menu && GameMenuPage() == FrontEndSettings().mapPage;
 	snap.ledgeAhead = VaultDebugState().armed;
 	snap.driveBy = DriveByAimActive(context);
 

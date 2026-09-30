@@ -220,6 +220,7 @@ struct VCSTouchState {
 	bool scopeZooms = false;
 	bool scopeCannotShoot = false;
 	bool cameraUp = false;               // ... and of those two, the camera: it has a shutter
+	bool mapPage = false;                // the game's own menu is up and showing the map
 	bool lockedOn = false;               // the game has a target
 	bool ledgeAhead = false;             // the vault probe has something to climb
 	bool driveBy = false;                // riding shotgun with a weapon out

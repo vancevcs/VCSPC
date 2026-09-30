@@ -133,6 +133,7 @@ enum Cond : uint32_t {
 	CondScopeCannotShoot = 1 << 5, // the camera or the binoculars is up
 	CondCameraUp = 1 << 6,         // the camera is up
 	CondBike = 1 << 7,             // riding a motorcycle
+	CondMapPage = 1 << 8,          // the game's own map page
 	CondWeapon = CondArmed | CondMelee,
 };
 
@@ -376,29 +377,18 @@ const ControlSpec kControls[] = {
 
 	// --- The game's own pages: the map, the briefs, the stats ----------------------------------
 	//
-	// Ours drives most of the front end, but the pages it hands over still want the game's own
-	// d-pad and its Cross - and on the map, Square is what plants a marker.
+	// Ours drives most of the front end, so all these pages need is a way back. The map adds its
+	// Cross and the Square that plants a marker. The d-pad arrows that used to sit here were not
+	// needed on any of the three.
 	{ "menu.select",
 		 NKCODE_BUTTON_A,      NKCODE_UNKNOWN,       Kind::Hold,
-		"select", nullptr, "SELECT",    kColA, kRow1, kMid,   Anchor::Edge, kMenu,            CondAlways, 0 },
+		"select", nullptr, "SELECT",    kColA, kRow1, kMid,   Anchor::Edge, kMenu,            CondMapPage, 0 },
 	{ "menu.back",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
 		"back", nullptr, "BACK",        kColB, -76.0f, kSmall, Anchor::Edge, kMenu,           CondAlways, 0 },
 	{ "menu.marker",
 		 NKCODE_BUTTON_X,      NKCODE_UNKNOWN,       Kind::Hold,
-		"marker", nullptr, "MARKER",    kColA, kRow2, kSmall, Anchor::Edge, kMenu,            CondAlways, 0 },
-	{ "menu.up",
-		 NKCODE_DPAD_UP,       NKCODE_UNKNOWN,       Kind::Hold,
-		"up", nullptr, "^",             112.0f, -200.0f, kSmall, Anchor::Edge, kMenu,         CondAlways, 0 },
-	{ "menu.down",
-		 NKCODE_DPAD_DOWN,     NKCODE_UNKNOWN,       Kind::Hold,
-		"down", nullptr, "v",           112.0f, -80.0f, kSmall, Anchor::Edge, kMenu,          CondAlways, 0 },
-	{ "menu.left",
-		 NKCODE_DPAD_LEFT,     NKCODE_UNKNOWN,       Kind::Hold,
-		"left", nullptr, "<",           52.0f, -140.0f, kSmall, Anchor::Edge, kMenu,          CondAlways, 0 },
-	{ "menu.right",
-		 NKCODE_DPAD_RIGHT,    NKCODE_UNKNOWN,       Kind::Hold,
-		"right", nullptr, ">",          172.0f, -140.0f, kSmall, Anchor::Edge, kMenu,         CondAlways, 0 },
+		"marker", nullptr, "MARKER",    kColA, kRow2, kSmall, Anchor::Edge, kMenu,            CondMapPage, 0 },
 	// Only on the game's own pages, where there is no radar to tap.
 	{ "menu.menu",
 		 NKCODE_UNKNOWN,       NKCODE_UNKNOWN,       Kind::Menu,
@@ -1349,7 +1339,8 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.cond & CondLockedOn) && state.lockedOn) ||
 			((spec.cond & CondScopeZooms) && state.scopeZooms) ||
 			((spec.cond & CondCameraUp) && state.cameraUp) ||
-			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike);
+			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike) ||
+			((spec.cond & CondMapPage) && state.mapPage);
 	}
 	// Steering by stick means no arrows, and by arrows means no stick. Both at once would be two
 	// things writing one axis.
