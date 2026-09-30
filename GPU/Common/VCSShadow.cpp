@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -115,6 +116,21 @@ static Settings s_settings = {
 	0,        // debugView
 	false,    // showMask
 	false,    // countCascadeCoverage
+	false,    // ambientOcclusion - a prototype, so off until somebody has looked at it
+	1.5f,     // aoRadius - a metre and a half: a kerb, the foot of a wall, the gap under a car
+	0.6f,     // aoStrength
+	1.0f,     // aoIntensity
+	0.35f,    // aoInSun
+	0.3f,     // aoOnPeople
+	0.002f,   // aoBias, per unit of camera distance
+	50.0f,    // aoFadeStart
+	80.0f,    // aoFadeEnd
+	1.0f,     // aoScale - the mask's own resolution
+	12,       // aoSamples
+	true,     // aoBlur
+	8.0f,     // aoBlurSharpness
+	false,    // showAO
+	false,    // aoSplit
 };
 
 
@@ -523,6 +539,54 @@ void Transpose4x4(const float in[16], float out[16]) {
 			out[col * 4 + row] = in[row * 4 + col];
 		}
 	}
+}
+
+// Gauss-Jordan with partial pivoting, in double. The matrix it is asked to invert is the camera's
+// whole path to the pixel, whose depth row is a perspective projection squeezed into [0, 1] - in
+// float the far half of the depth range comes back as noise.
+bool Invert4x4(const float in[16], double out[16]) {
+	double a[4][8];
+	for (int row = 0; row < 4; row++) {
+		for (int col = 0; col < 4; col++) {
+			a[row][col] = in[row * 4 + col];
+			a[row][col + 4] = row == col ? 1.0 : 0.0;
+		}
+	}
+	for (int col = 0; col < 4; col++) {
+		int pivot = col;
+		for (int row = col + 1; row < 4; row++) {
+			if (fabs(a[row][col]) > fabs(a[pivot][col])) {
+				pivot = row;
+			}
+		}
+		if (fabs(a[pivot][col]) < 1e-30) {
+			return false;
+		}
+		if (pivot != col) {
+			for (int k = 0; k < 8; k++) {
+				std::swap(a[col][k], a[pivot][k]);
+			}
+		}
+		const double invPivot = 1.0 / a[col][col];
+		for (int k = 0; k < 8; k++) {
+			a[col][k] *= invPivot;
+		}
+		for (int row = 0; row < 4; row++) {
+			if (row == col) {
+				continue;
+			}
+			const double factor = a[row][col];
+			for (int k = 0; k < 8; k++) {
+				a[row][k] -= factor * a[col][k];
+			}
+		}
+	}
+	for (int row = 0; row < 4; row++) {
+		for (int col = 0; col < 4; col++) {
+			out[row * 4 + col] = a[row][col + 4];
+		}
+	}
+	return true;
 }
 
 }  // namespace
@@ -1578,12 +1642,13 @@ void AddCaster(const u8 *decoded, int numDecodedVerts, const u16 *indices, int i
 		s_capture.casterSkinnedDraws++;
 	}
 
-	// Skinned means a person, which is the one receiver that needs the heavier bias.
+	// Skinned means a person, which is the one receiver that needs the heavier bias - and the one
+	// the ambient occlusion goes easy on, which needs them in their own draw to mark them.
 	const bool isSkinned = (gstate.vertType & GE_VTYPE_WEIGHT_MASK) != GE_VTYPE_WEIGHT_NONE;
 	AppendGeometry(s_drawPos.data(), numDecodedVerts,
 		casts ? s_drawCastIdx.data() : nullptr, casts ? (int)s_drawCastIdx.size() : 0,
 		s_drawIdx.data(), (int)s_drawIdx.size(),
-		isSkinned && s_settings.pedReceiverBias > 0.0f);
+		isSkinned && (s_settings.pedReceiverBias > 0.0f || s_settings.ambientOcclusion));
 	s_capture.draws++;
 
 	// What may be REMEMBERED is narrower than what casts, and the rule is one question: can
@@ -2468,7 +2533,7 @@ struct MaskUB {
 	float nearLightViewProj[16];
 	float params[4];    // depthBias, flipV, debugView, slopeBias
 	float params2[4];   // shadow texel size, pcf radius, edge fade, shadow map size
-	float params3[4];   // near cascade on/off, unused x3
+	float params3[4];   // near cascade on/off, this draw is people (alpha 0 for the AO), unused x2
 };
 
 static const UniformBufferDesc s_maskUBDesc{ sizeof(MaskUB), {
@@ -2674,7 +2739,9 @@ static bool EnsureMaskResources(Draw::DrawContext *draw, int width, int height) 
 		// The debug views. An all-black mask has at least two causes that look identical from
 		// outside - the sample returning nothing, or the comparison being the wrong way round -
 		// and these separate them in one run rather than one per guess.
-		writer.C("  vec4 outColor = vec4(lit, lit, lit, 1.0);\n");
+		// Alpha marks people, for the ambient occlusion's composite - see aoOnPeople. Nothing
+		// else reads the mask's alpha, and the debug views below overwrite it harmlessly.
+		writer.C("  vec4 outColor = vec4(lit, lit, lit, u_shadowParams3.y > 0.5 ? 0.0 : 1.0);\n");
 		writer.C("  if (u_shadowParams.z > 0.5 && u_shadowParams.z < 1.5) {\n");
 		writer.C("    outColor = vec4(mapDepth, mapDepth, mapDepth, 1.0);\n");
 		writer.C("  } else if (u_shadowParams.z > 1.5 && u_shadowParams.z < 2.5) {\n");
@@ -2824,9 +2891,11 @@ static void RenderMask(Draw::DrawContext *draw, int width, int height, int viewW
 
 	// The people, with the bias raised so their own arms and legs stop landing on them. Same
 	// pipeline and same vertex buffer - only the uniform and the index stream differ - so this
-	// is one more draw call per batch rather than a second pass over the scene.
-	if (s_settings.pedReceiverBias > 0.0f && !s_pedReceiverIndices.empty()) {
+	// is one more draw call per batch rather than a second pass over the scene. Marked in alpha
+	// while they are at it, for the ambient occlusion.
+	if ((s_settings.pedReceiverBias > 0.0f || s_settings.ambientOcclusion) && !s_pedReceiverIndices.empty()) {
 		ub.params[0] = s_settings.depthBias + s_settings.pedReceiverBias;
+		ub.params3[1] = 1.0f;
 		draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
 		for (const Batch &batch : s_batches) {
 			if (batch.pedReceiverIndexCount < 3) {
@@ -2847,6 +2916,564 @@ Draw::Framebuffer *ShadowMask() {
 	return s_maskFbo;
 }
 
+// --- ambient occlusion ------------------------------------------------------------------------
+//
+// Scalable Ambient Obscurance (McGuire, Mara and Luebke, 2012), read off the MASK's depth buffer.
+// That buffer is the thing occlusion needs and the expensive thing to get: every captured receiver
+// drawn through the camera's own transform, lined up with the frame to the pixel. The mask pass
+// already pays for it, so this is one full-screen pass over it and a two-pass blur - nothing goes
+// back through the city's geometry.
+//
+//   estimate   per pixel: its position rebuilt from depth, a normal from its neighbours, and a
+//              spiral of nearby pixels asked how much of the hemisphere above it they fill
+//   blur x2    separable, and stopped at depth edges so an outline is not smeared into the wall
+//              behind it
+//
+// The composite then multiplies the result in alongside the shadows, before the HUD is drawn.
+//
+// Positions are rebuilt RELATIVE TO THE CAMERA rather than in the space the GE is fed. That space
+// sits wherever the game last rebased it, so a position in it is a large number reached by
+// subtracting two large numbers; relative to the camera it is small, and occlusion only ever asks
+// about the difference between two nearby points.
+
+struct AOUB {
+	float inv[4][4];     // columns of NDC -> camera-relative position; see RenderAO
+	float forward[4];    // camera forward, and w = pixels per world unit at one unit's distance
+	float params[4];     // radius, intensity, bias per unit of distance, largest radius in pixels
+	float params2[4];    // NDC scale x and y (mask texture over mask viewport), samples, spiral turns
+	float depthSize[4];  // mask depth texture width, height, 1/width, 1/height
+	float aoSize[4];     // 1/this target's width, 1/height, fade start, fade end
+	float key[4];        // 1 / the distance at which the blur's depth key saturates, unused x3
+};
+
+static const UniformBufferDesc s_aoUBDesc{ sizeof(AOUB), {
+	{ "u_aoInv0", 0, -1, UniformType::FLOAT4, 0 },
+	{ "u_aoInv1", 1, 0, UniformType::FLOAT4, 16 },
+	{ "u_aoInv2", 2, 1, UniformType::FLOAT4, 32 },
+	{ "u_aoInv3", 3, 2, UniformType::FLOAT4, 48 },
+	{ "u_aoForward", 4, 3, UniformType::FLOAT4, 64 },
+	{ "u_aoParams", 5, 4, UniformType::FLOAT4, 80 },
+	{ "u_aoParams2", 6, 5, UniformType::FLOAT4, 96 },
+	{ "u_aoDepthSize", 7, 6, UniformType::FLOAT4, 112 },
+	{ "u_aoSize", 8, 7, UniformType::FLOAT4, 128 },
+	{ "u_aoKey", 9, 8, UniformType::FLOAT4, 144 },
+} };
+
+struct AOBlurUB {
+	float dir[4];   // one tap's step in UV, x and y; edge sharpness; unused
+};
+
+static const UniformBufferDesc s_aoBlurUBDesc{ sizeof(AOBlurUB), {
+	{ "u_aoBlurDir", 0, -1, UniformType::FLOAT4, 0 },
+} };
+
+static Draw::Framebuffer *s_aoFbo;       // the estimate, and where the blur finishes
+static Draw::Framebuffer *s_aoBlurFbo;   // between the two blur passes
+static Draw::Pipeline *s_aoPipeline;
+static Draw::Pipeline *s_aoBlurPipeline;
+// NEAREST for everything these passes read: a filtered depth is a position that is on no surface,
+// and a filtered key is a depth nobody drew.
+static Draw::SamplerState *s_aoSampler;
+static int s_aoWidth;
+static int s_aoHeight;
+static bool s_aoSetupFailed;
+
+static void ReleaseAOTargets() {
+	if (s_aoFbo) {
+		s_aoFbo->Release();
+		s_aoFbo = nullptr;
+	}
+	if (s_aoBlurFbo) {
+		s_aoBlurFbo->Release();
+		s_aoBlurFbo = nullptr;
+	}
+	s_aoWidth = 0;
+	s_aoHeight = 0;
+}
+
+static void ReleaseAOResources() {
+	ReleaseAOTargets();
+	if (s_aoPipeline) {
+		s_aoPipeline->Release();
+		s_aoPipeline = nullptr;
+	}
+	if (s_aoBlurPipeline) {
+		s_aoBlurPipeline->Release();
+		s_aoBlurPipeline = nullptr;
+	}
+	if (s_aoSampler) {
+		s_aoSampler->Release();
+		s_aoSampler = nullptr;
+	}
+}
+
+// The vertex half of every full-screen pass here: one oversized triangle in clip space, and a UV
+// that is that position remapped. It declares the pipeline's uniform block even though it reads
+// none of it - see the note on the mask's uniforms for why the two stages must agree on Vulkan.
+static Draw::ShaderModule *CompileFullscreenVS(Draw::DrawContext *draw, Slice<UniformDef> uniforms,
+	Slice<VaryingDef> varyings, const char *tag) {
+	using namespace Draw;
+	const ShaderLanguageDesc &lang = draw->GetShaderLanguageDesc();
+	char *code = new char[4096];
+	{
+		ShaderWriter writer(code, lang, ShaderStage::Vertex);
+		static const InputDef inputs[] = { { "vec2", "a_position", Draw::SEM_POSITION } };
+		writer.BeginVSMain(inputs, uniforms, varyings);
+		writer.C("  v_uv = a_position * 0.5 + 0.5;\n");
+		writer.C("  gl_Position = vec4(a_position, 0.0, 1.0);\n");
+		writer.EndVSMain(varyings);
+	}
+	ShaderModule *vs = draw->CreateShaderModule(ShaderStage::Vertex, lang.shaderLanguage,
+		(const uint8_t *)code, strlen(code), tag);
+	if (!vs) {
+		ERROR_LOG(Log::G3D, "VCS %s failed:\n%s", tag, code);
+	}
+	delete[] code;
+	return vs;
+}
+
+// One position rebuilt from the mask's depth, as `vec3 <name>`. Emitted inline rather than as a
+// GLSL function, because a function would have to be declared before the uniform block that
+// BeginFSMain writes, and could not see it.
+//
+// The UV is snapped to the centre of the depth texel it lands in first. The depth read there is
+// that texel's, so the position has to be that texel's too - rebuilding it at the unsnapped UV
+// puts every point up to half a texel off its own surface, and on a slope that reads as noise.
+static void EmitAOPosition(ShaderWriter &writer, const char *name, const char *uv) {
+	char texelUV[64];
+	snprintf(texelUV, sizeof(texelUV), "%s_t", name);
+	writer.F("  vec2 %s_t = (floor((%s) * u_aoDepthSize.xy) + 0.5) * u_aoDepthSize.zw;\n", name, uv);
+	writer.F("  float %s_d = ", name).SampleTexture2D("maskDepth", texelUV).C(".r;\n");
+	writer.F("  vec4 %s_n = vec4((%s_t * u_aoParams2.xy) * 2.0 - 1.0, %s_d, 1.0);\n", name, name, name);
+	writer.F("  vec4 %s_h = vec4(dot(%s_n, u_aoInv0), dot(%s_n, u_aoInv1), dot(%s_n, u_aoInv2), dot(%s_n, u_aoInv3));\n",
+		name, name, name, name, name);
+	writer.F("  vec3 %s = %s_h.xyz / %s_h.w;\n", name, name, name);
+}
+
+static bool EnsureAOResources(Draw::DrawContext *draw, int width, int height) {
+	if (s_aoFbo && s_aoBlurFbo && s_aoPipeline && s_aoBlurPipeline && s_aoWidth == width && s_aoHeight == height) {
+		s_capture.aoStep = CaptureStats::MaskStep::Ok;
+		return true;
+	}
+	if (s_aoSetupFailed) {
+		s_capture.aoStep = CaptureStats::MaskStep::Pipeline;
+		return false;
+	}
+
+	using namespace Draw;
+	ReleaseAOTargets();
+	// Colour only. The estimate reads the mask's depth and writes none of its own.
+	s_aoFbo = draw->CreateFramebuffer({ width, height, 1, 1, 0, false, "vcs_ao" });
+	s_aoBlurFbo = draw->CreateFramebuffer({ width, height, 1, 1, 0, false, "vcs_ao_blur" });
+	if (!s_aoFbo || !s_aoBlurFbo) {
+		s_capture.aoStep = CaptureStats::MaskStep::Framebuffer;
+		ReleaseAOTargets();
+		s_aoSetupFailed = true;
+		return false;
+	}
+	s_aoWidth = width;
+	s_aoHeight = height;
+	if (s_aoPipeline && s_aoBlurPipeline) {
+		s_capture.aoStep = CaptureStats::MaskStep::Ok;
+		return true;
+	}
+
+	const ShaderLanguageDesc &lang = draw->GetShaderLanguageDesc();
+	static const VaryingDef varyings[] = {
+		{ "vec2", "v_uv", Draw::SEM_TEXCOORD0, 0, "highp" },
+	};
+
+	// --- the estimate ---
+	static const SamplerDef aoSamplers[] = { { 0, "maskDepth", SamplerFlags(0) } };
+	static const UniformDef aoUniforms[] = {
+		{ "vec4", "u_aoInv0", 0 },
+		{ "vec4", "u_aoInv1", 1 },
+		{ "vec4", "u_aoInv2", 2 },
+		{ "vec4", "u_aoInv3", 3 },
+		{ "vec4", "u_aoForward", 4 },
+		{ "vec4", "u_aoParams", 5 },
+		{ "vec4", "u_aoParams2", 6 },
+		{ "vec4", "u_aoDepthSize", 7 },
+		{ "vec4", "u_aoSize", 8 },
+		{ "vec4", "u_aoKey", 9 },
+	};
+	ShaderModule *aoVS = CompileFullscreenVS(draw, aoUniforms, varyings, "vcs_ao_vs");
+
+	const size_t kShaderBufferSize = 16384;
+	char *fsCode = new char[kShaderBufferSize];
+	{
+		ShaderWriter writer(fsCode, lang, ShaderStage::Fragment);
+		writer.HighPrecisionFloat();
+		writer.DeclareSamplers(aoSamplers);
+		writer.BeginFSMain(aoUniforms, varyings);
+		writer.C("  vec4 outColor = vec4(1.0, 1.0, 1.0, 1.0);\n");
+		EmitAOPosition(writer, "P", "v_uv");
+		writer.C("  float depth = dot(P, u_aoForward.xyz);\n");
+		// The mask clears to the far plane and nothing it draws gets there - the game's own far
+		// plane lands 8/65536 short of it. So a cleared texel is sky, or outside the game's
+		// viewport, and nothing there is occluded.
+		writer.C("  if (P_d < 0.99995 && depth > 0.0 && depth < u_aoSize.w) {\n");
+		// A normal from the neighbours, taking whichever side is nearer in depth on each axis.
+		// The nearer side is the one on the same surface: at a silhouette the far side is
+		// whatever is behind it, and a normal built across that edge points nowhere real.
+		writer.C("    vec2 texX = vec2(u_aoDepthSize.z, 0.0);\n");
+		writer.C("    vec2 texY = vec2(0.0, u_aoDepthSize.w);\n");
+		EmitAOPosition(writer, "Pr", "v_uv + texX");
+		EmitAOPosition(writer, "Pl", "v_uv - texX");
+		EmitAOPosition(writer, "Pd", "v_uv + texY");
+		EmitAOPosition(writer, "Pu", "v_uv - texY");
+		writer.C("    vec3 ex = abs(dot(Pr - P, u_aoForward.xyz)) < abs(dot(P - Pl, u_aoForward.xyz)) ? Pr - P : P - Pl;\n");
+		writer.C("    vec3 ey = abs(dot(Pd - P, u_aoForward.xyz)) < abs(dot(P - Pu, u_aoForward.xyz)) ? Pd - P : P - Pu;\n");
+		writer.C("    vec3 c = cross(ex, ey);\n");
+		writer.C("    float cl = dot(c, c);\n");
+		// The camera is the origin, so a surface the camera can see faces back along -P.
+		writer.C("    vec3 N = cl > 1e-20 ? c * inversesqrt(cl) : -normalize(P);\n");
+		writer.C("    if (dot(N, P) > 0.0) { N = -N; }\n");
+		// How big the search disc is on screen, from how far away this pixel is. Capped, because
+		// a wall at arm's length would otherwise ask for samples from half the screen away and
+		// twelve of them cannot cover that.
+		writer.C("    float radius = u_aoParams.x;\n");
+		writer.C("    float r2 = radius * radius;\n");
+		writer.C("    float discPx = min(radius * u_aoForward.w / depth, u_aoParams.w);\n");
+		writer.C("    float ao = 1.0;\n");
+		writer.C("    if (discPx >= 1.0) {\n");
+		// A different spin on the spiral per pixel, from interleaved gradient noise - which is
+		// what makes twelve samples cover a disc between neighbours, and what the blur is for.
+		writer.C("      vec2 pixel = floor(v_uv / u_aoSize.xy);\n");
+		writer.C("      float spin = 6.2831853 * fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));\n");
+		writer.C("      int sampleCount = int(u_aoParams2.z);\n");
+		writer.C("      float bias = u_aoParams.z * depth;\n");
+		writer.C("      float sum = 0.0;\n");
+		writer.C("      for (int i = 0; i < 32; i++) {\n");
+		writer.C("        if (i >= sampleCount) { break; }\n");
+		writer.C("        float alpha = (float(i) + 0.5) / float(sampleCount);\n");
+		writer.C("        float angle = alpha * u_aoParams2.w * 6.2831853 + spin;\n");
+		writer.C("        vec2 sampleUV = v_uv + vec2(cos(angle), sin(angle)) * (alpha * discPx) * u_aoSize.xy;\n");
+		EmitAOPosition(writer, "Q", "sampleUV");
+		// SAO's falloff: nothing past the radius counts at all, which is also what keeps a person
+		// standing in front of a distant wall from casting a dark halo onto it.
+		writer.C("        vec3 v = Q - P;\n");
+		writer.C("        float vv = dot(v, v);\n");
+		writer.C("        float vn = dot(v, N);\n");
+		writer.C("        float f = max(r2 - vv, 0.0);\n");
+		writer.C("        sum += f * f * f * max((vn - bias) / (vv + 0.01), 0.0);\n");
+		writer.C("      }\n");
+		writer.C("      ao = max(0.0, 1.0 - sum * u_aoParams.y * 5.0 / (float(sampleCount) * r2 * r2 * r2));\n");
+		writer.C("    }\n");
+		writer.C("    ao = mix(ao, 1.0, smoothstep(u_aoSize.z, u_aoSize.w, depth));\n");
+		// Depth for the blur to key on, sixteen bits across green and blue. Packed as two whole
+		// numbers out of 255 each, which an 8-bit channel stores exactly.
+		writer.C("    float keyq = floor(clamp(depth * u_aoKey.x, 0.0, 1.0) * 65535.0);\n");
+		writer.C("    float keyHi = floor(keyq / 256.0);\n");
+		writer.C("    outColor = vec4(ao, keyHi / 255.0, (keyq - keyHi * 256.0) / 255.0, 1.0);\n");
+		writer.C("  }\n");
+		writer.EndFSMain("outColor");
+	}
+	ShaderModule *aoFS = draw->CreateShaderModule(ShaderStage::Fragment, lang.shaderLanguage,
+		(const uint8_t *)fsCode, strlen(fsCode), "vcs_ao_fs");
+	if (!aoFS) {
+		ERROR_LOG(Log::G3D, "VCS AO FS (%d bytes) failed:\n%s", (int)strlen(fsCode), fsCode);
+	}
+	delete[] fsCode;
+
+	// --- the blur ---
+	static const SamplerDef blurSamplers[] = { { 0, "aoTex", SamplerFlags(0) } };
+	static const UniformDef blurUniforms[] = {
+		{ "vec4", "u_aoBlurDir", 0 },
+	};
+	ShaderModule *blurVS = CompileFullscreenVS(draw, blurUniforms, varyings, "vcs_ao_blur_vs");
+
+	char *blurCode = new char[kShaderBufferSize];
+	{
+		ShaderWriter writer(blurCode, lang, ShaderStage::Fragment);
+		writer.HighPrecisionFloat();
+		writer.DeclareSamplers(blurSamplers);
+		writer.BeginFSMain(blurUniforms, varyings);
+		writer.C("  vec4 centre = ").SampleTexture2D("aoTex", "v_uv").C(";\n");
+		writer.C("  float keyC = (floor(centre.g * 255.0 + 0.5) * 256.0 + floor(centre.b * 255.0 + 0.5)) / 65535.0;\n");
+		writer.C("  vec4 outColor = centre;\n");
+		writer.C("  if (keyC < 0.99999) {\n");
+		writer.C("    float sum = centre.r;\n");
+		writer.C("    float weightSum = 1.0;\n");
+		writer.C("    for (int i = -4; i <= 4; i++) {\n");
+		writer.C("      if (i == 0) { continue; }\n");
+		writer.C("      float fi = float(i);\n");
+		writer.C("      vec4 tap = ").SampleTexture2D("aoTex", "v_uv + u_aoBlurDir.xy * fi").C(";\n");
+		writer.C("      float key = (floor(tap.g * 255.0 + 0.5) * 256.0 + floor(tap.b * 255.0 + 0.5)) / 65535.0;\n");
+		// Gaussian in the tap, and zero across a depth step. The step is measured relative to
+		// the depth itself, because the ground's own depth changes faster per pixel the further
+		// away it is - an absolute threshold would stop the blur dead on distant road.
+		writer.C("      float w = exp(-fi * fi / 8.0);\n");
+		writer.C("      w *= max(0.0, 1.0 - u_aoBlurDir.z * abs(key - keyC) / max(keyC, 0.0001));\n");
+		writer.C("      sum += tap.r * w;\n");
+		writer.C("      weightSum += w;\n");
+		writer.C("    }\n");
+		writer.C("    outColor = vec4(sum / weightSum, centre.g, centre.b, 1.0);\n");
+		writer.C("  }\n");
+		writer.EndFSMain("outColor");
+	}
+	ShaderModule *blurFS = draw->CreateShaderModule(ShaderStage::Fragment, lang.shaderLanguage,
+		(const uint8_t *)blurCode, strlen(blurCode), "vcs_ao_blur_fs");
+	if (!blurFS) {
+		ERROR_LOG(Log::G3D, "VCS AO blur FS failed:\n%s", blurCode);
+	}
+	delete[] blurCode;
+
+	if (!aoVS || !aoFS || !blurVS || !blurFS) {
+		s_capture.aoStep = (!aoVS || !blurVS) ? CaptureStats::MaskStep::VertexShader
+			: CaptureStats::MaskStep::FragmentShader;
+		ERROR_LOG(Log::G3D, "VCS ambient occlusion shaders failed to compile");
+		if (aoVS) aoVS->Release();
+		if (aoFS) aoFS->Release();
+		if (blurVS) blurVS->Release();
+		if (blurFS) blurFS->Release();
+		ReleaseAOResources();
+		s_aoSetupFailed = true;
+		return false;
+	}
+
+	static const InputLayoutDesc layoutDesc = {
+		8,
+		{ { SEM_POSITION, DataFormat::R32G32_FLOAT, 0 } },
+	};
+	InputLayout *inputLayout = draw->CreateInputLayout(layoutDesc);
+	DepthStencilStateDesc dsDesc{};
+	dsDesc.depthTestEnabled = false;
+	dsDesc.depthWriteEnabled = false;
+	dsDesc.depthCompare = Comparison::ALWAYS;
+	DepthStencilState *depthStencil = draw->CreateDepthStencilState(dsDesc);
+	BlendState *opaque = draw->CreateBlendState({ false, 0xF });
+	RasterState *raster = draw->CreateRasterState({});
+
+	SamplerStateDesc sampDesc{};
+	sampDesc.magFilter = TextureFilter::NEAREST;
+	sampDesc.minFilter = TextureFilter::NEAREST;
+	sampDesc.mipFilter = TextureFilter::NEAREST;
+	sampDesc.wrapU = TextureAddressMode::CLAMP_TO_EDGE;
+	sampDesc.wrapV = TextureAddressMode::CLAMP_TO_EDGE;
+	sampDesc.wrapW = TextureAddressMode::CLAMP_TO_EDGE;
+	s_aoSampler = draw->CreateSamplerState(sampDesc);
+
+	PipelineDesc aoDesc{
+		Primitive::TRIANGLE_LIST,
+		{ aoVS, aoFS },
+		inputLayout,
+		depthStencil,
+		opaque,
+		raster,
+		&s_aoUBDesc,
+		aoSamplers,
+	};
+	s_aoPipeline = draw->CreateGraphicsPipeline(aoDesc, "vcs_ao");
+	PipelineDesc blurDesc{
+		Primitive::TRIANGLE_LIST,
+		{ blurVS, blurFS },
+		inputLayout,
+		depthStencil,
+		opaque,
+		raster,
+		&s_aoBlurUBDesc,
+		blurSamplers,
+	};
+	s_aoBlurPipeline = draw->CreateGraphicsPipeline(blurDesc, "vcs_ao_blur");
+
+	aoVS->Release();
+	aoFS->Release();
+	blurVS->Release();
+	blurFS->Release();
+	inputLayout->Release();
+	depthStencil->Release();
+	opaque->Release();
+	raster->Release();
+
+	if (!s_aoPipeline || !s_aoBlurPipeline || !s_aoSampler) {
+		s_capture.aoStep = CaptureStats::MaskStep::Pipeline;
+		ERROR_LOG(Log::G3D, "VCS ambient occlusion pipelines failed to create");
+		ReleaseAOResources();
+		s_aoSetupFailed = true;
+		return false;
+	}
+	s_capture.aoStep = CaptureStats::MaskStep::Ok;
+	return true;
+}
+
+static void RenderAO(Draw::DrawContext *draw, int maskW, int maskH, int viewW, int viewH) {
+	s_capture.aoRendered = false;
+	s_capture.aoStep = CaptureStats::MaskStep::NotAttempted;
+	if (!s_settings.ambientOcclusion || !s_capture.maskRendered || !s_maskFbo || viewW <= 0 || viewH <= 0) {
+		return;
+	}
+
+	// NDC -> the space the GE is fed, then moved so the camera is the origin. In row-vector
+	// terms that is inverse(cameraViewProj) * T(-camera), and folding the translation in on the
+	// CPU keeps the shader's numbers small - see the note at the top of this section.
+	double inv[16];
+	if (!Invert4x4(s_view.cameraViewProj, inv)) {
+		return;
+	}
+	const double cam[3] = { s_view.cameraPos[0], s_view.cameraPos[1], s_view.cameraPos[2] };
+	double rel[16];
+	for (int row = 0; row < 4; row++) {
+		const double w = inv[row * 4 + 3];
+		rel[row * 4 + 0] = inv[row * 4 + 0] - cam[0] * w;
+		rel[row * 4 + 1] = inv[row * 4 + 1] - cam[1] * w;
+		rel[row * 4 + 2] = inv[row * 4 + 2] - cam[2] * w;
+		rel[row * 4 + 3] = w;
+	}
+
+	float scale = s_settings.aoScale;
+	if (scale < 0.25f) scale = 0.25f;
+	if (scale > 1.0f) scale = 1.0f;
+	const int aoW = std::max(1, (int)((float)maskW * scale + 0.5f));
+	const int aoH = std::max(1, (int)((float)maskH * scale + 0.5f));
+	if (!EnsureAOResources(draw, aoW, aoH)) {
+		return;
+	}
+
+	float forward[3] = { s_view.cameraForward[0], s_view.cameraForward[1], s_view.cameraForward[2] };
+	float up[3] = { s_view.cameraUp[0], s_view.cameraUp[1], s_view.cameraUp[2] };
+	if (!Normalize(forward) || !Normalize(up)) {
+		return;
+	}
+
+	// Pixels per world unit at one unit's distance, in THIS target's pixels. Measured by pushing
+	// a one-unit step through the same matrix the mask used rather than read off the projection,
+	// because the matrix also holds the PSP viewport and the remap into the render target, and
+	// every one of those scales the answer.
+	float projScale = 0.0f;
+	{
+		const float dist = 10.0f;
+		float a[3], b[3];
+		for (int i = 0; i < 3; i++) {
+			a[i] = s_view.cameraPos[i] + forward[i] * dist;
+			b[i] = a[i] + up[i];
+		}
+		const float *m = s_view.cameraViewProj;
+		float ca[4], cb[4];
+		for (int col = 0; col < 4; col++) {
+			ca[col] = a[0] * m[col] + a[1] * m[4 + col] + a[2] * m[8 + col] + m[12 + col];
+			cb[col] = b[0] * m[col] + b[1] * m[4 + col] + b[2] * m[8 + col] + m[12 + col];
+		}
+		if (fabsf(ca[3]) < 1e-6f || fabsf(cb[3]) < 1e-6f) {
+			return;
+		}
+		// NDC spans 2 across the mask's viewport, and this target covers the same fraction of
+		// itself as the viewport does of the mask.
+		const float pxW = (float)viewW * (float)aoW / (float)maskW * 0.5f;
+		const float pxH = (float)viewH * (float)aoH / (float)maskH * 0.5f;
+		const float dx = (cb[0] / cb[3] - ca[0] / ca[3]) * pxW;
+		const float dy = (cb[1] / cb[3] - ca[1] / ca[3]) * pxH;
+		projScale = sqrtf(dx * dx + dy * dy) * dist;
+	}
+
+	AOUB ub;
+	for (int col = 0; col < 4; col++) {
+		for (int row = 0; row < 4; row++) {
+			ub.inv[col][row] = (float)rel[row * 4 + col];
+		}
+	}
+	ub.forward[0] = forward[0];
+	ub.forward[1] = forward[1];
+	ub.forward[2] = forward[2];
+	ub.forward[3] = projScale;
+	ub.params[0] = std::max(s_settings.aoRadius, 0.05f);
+	ub.params[1] = s_settings.aoIntensity;
+	ub.params[2] = s_settings.aoBias;
+	ub.params[3] = 0.1f * (float)aoH;
+	ub.params2[0] = (float)maskW / (float)viewW;
+	ub.params2[1] = (float)maskH / (float)viewH;
+	ub.params2[2] = (float)std::clamp(s_settings.aoSamples, 4, 32);
+	// Turns of the spiral. SAO's table picks the count that spreads the samples most evenly for
+	// each sample count; seven is its answer for eleven and twelve, and nothing here is fussy.
+	ub.params2[3] = 7.0f;
+	ub.depthSize[0] = (float)maskW;
+	ub.depthSize[1] = (float)maskH;
+	ub.depthSize[2] = 1.0f / (float)maskW;
+	ub.depthSize[3] = 1.0f / (float)maskH;
+	ub.aoSize[0] = 1.0f / (float)aoW;
+	ub.aoSize[1] = 1.0f / (float)aoH;
+	ub.aoSize[2] = s_settings.aoFadeStart;
+	ub.aoSize[3] = std::max(s_settings.aoFadeEnd, s_settings.aoFadeStart + 1.0f);
+	// Saturates well past the fade, so nothing the estimate shades shares a key with the sky.
+	ub.key[0] = 1.0f / (ub.aoSize[3] * 2.0f);
+	ub.key[1] = 0.0f;
+	ub.key[2] = 0.0f;
+	ub.key[3] = 0.0f;
+
+	static const float kFullscreenTriangle[6] = {
+		-1.0f, -1.0f,
+		 3.0f, -1.0f,
+		-1.0f,  3.0f,
+	};
+
+	using namespace Draw;
+	draw->BindFramebufferAsRenderTarget(s_aoFbo,
+		{ RPAction::CLEAR, RPAction::DONT_CARE, RPAction::DONT_CARE, 0xFFFFFFFF, 1.0f, 0, "vcs_ao" },
+		"vcs_ao");
+	draw->BindFramebufferAsTexture(s_maskFbo, 0, Aspect::DEPTH_BIT, 0);
+	draw->BindSamplerStates(0, 1, &s_aoSampler);
+	Viewport viewport{ 0.0f, 0.0f, (float)aoW, (float)aoH, 0.0f, 1.0f };
+	draw->SetViewport(viewport);
+	draw->SetScissorRect(0, 0, aoW, aoH);
+	draw->BindPipeline(s_aoPipeline);
+	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+	draw->DrawUP(kFullscreenTriangle, 3);
+
+	if (s_settings.aoBlur) {
+		// Taps two texels apart at full resolution - the noise repeats over about four pixels,
+		// and nine taps a texel apart would only average it with itself.
+		const float stride = scale >= 0.75f ? 2.0f : 1.0f;
+		AOBlurUB blur{};
+		blur.dir[2] = s_settings.aoBlurSharpness;
+
+		draw->BindFramebufferAsRenderTarget(s_aoBlurFbo,
+			{ RPAction::DONT_CARE, RPAction::DONT_CARE, RPAction::DONT_CARE, 0, 1.0f, 0, "vcs_ao_blur_x" },
+			"vcs_ao_blur_x");
+		draw->BindFramebufferAsTexture(s_aoFbo, 0, Aspect::COLOR_BIT, 0);
+		draw->BindSamplerStates(0, 1, &s_aoSampler);
+		draw->SetViewport(viewport);
+		draw->SetScissorRect(0, 0, aoW, aoH);
+		draw->BindPipeline(s_aoBlurPipeline);
+		blur.dir[0] = stride / (float)aoW;
+		blur.dir[1] = 0.0f;
+		draw->UpdateDynamicUniformBuffer(&blur, sizeof(blur));
+		draw->DrawUP(kFullscreenTriangle, 3);
+
+		draw->BindFramebufferAsRenderTarget(s_aoFbo,
+			{ RPAction::DONT_CARE, RPAction::DONT_CARE, RPAction::DONT_CARE, 0, 1.0f, 0, "vcs_ao_blur_y" },
+			"vcs_ao_blur_y");
+		draw->BindFramebufferAsTexture(s_aoBlurFbo, 0, Aspect::COLOR_BIT, 0);
+		draw->BindSamplerStates(0, 1, &s_aoSampler);
+		draw->SetViewport(viewport);
+		draw->SetScissorRect(0, 0, aoW, aoH);
+		draw->BindPipeline(s_aoBlurPipeline);
+		blur.dir[0] = 0.0f;
+		blur.dir[1] = stride / (float)aoH;
+		draw->UpdateDynamicUniformBuffer(&blur, sizeof(blur));
+		draw->DrawUP(kFullscreenTriangle, 3);
+	}
+
+	s_capture.aoRendered = true;
+	s_capture.aoWidth = aoW;
+	s_capture.aoHeight = aoH;
+
+	// Said positively, and again whenever the size changes - a latched setup failure and a pass
+	// that is simply switched off look the same from the frame, and only this tells them apart.
+	static int s_lastLoggedAO[3] = { -1, -1, -1 };
+	static int s_aoLogs = 0;
+	const int now[3] = { aoW, aoH, (int)projScale };
+	if ((now[0] != s_lastLoggedAO[0] || now[1] != s_lastLoggedAO[1]) && s_aoLogs < 16) {
+		memcpy(s_lastLoggedAO, now, sizeof(now));
+		s_aoLogs++;
+		NOTICE_LOG(Log::G3D, "VCS AO: ran at %dx%d (mask %dx%d, viewport %dx%d), %.0f px per unit at 1 unit, radius %.2f",
+			aoW, aoH, maskW, maskH, viewW, viewH, projScale, ub.params[0]);
+	}
+}
+
+Draw::Framebuffer *AmbientOcclusion() {
+	return s_aoFbo;
+}
+
 // --- the composite ----------------------------------------------------------------------------
 //
 // One triangle over the game's own framebuffer, multiplying what is there by the mask. The blend
@@ -2858,12 +3485,17 @@ Draw::Framebuffer *ShadowMask() {
 
 struct CompositeUB {
 	float tint[4];     // rgb, and strength in a
-	float params[4];   // showMask, unused
+	float params[4];   // showMask, stretch for the depth-map view, showAO, unused
+	float ao[4];       // AO strength (0 when it did not run), its share in sunlight, how much of
+	                   // the light is direct right now, left half only
+	float ao2[4];      // AO share on people, unused x3
 };
 
 static const UniformBufferDesc s_compositeUBDesc{ sizeof(CompositeUB), {
 	{ "u_shadowTint", 0, -1, UniformType::FLOAT4, 0 },
 	{ "u_compositeParams", 1, 0, UniformType::FLOAT4, 16 },
+	{ "u_compositeAO", 2, 1, UniformType::FLOAT4, 32 },
+	{ "u_compositeAO2", 3, 2, UniformType::FLOAT4, 48 },
 } };
 
 static Draw::Pipeline *s_compositePipeline;   // multiply into the frame
@@ -2897,13 +3529,20 @@ static bool EnsureCompositeResources(Draw::DrawContext *draw) {
 
 	using namespace Draw;
 	const ShaderLanguageDesc &lang = draw->GetShaderLanguageDesc();
-	static const SamplerDef samplers[] = { { 0, "shadowMask", SamplerFlags(0) } };
+	// The occlusion always has a texture bound, even when it did not run - the mask again, with
+	// the strength at zero - so there is one pipeline rather than one per combination.
+	static const SamplerDef samplers[] = {
+		{ 0, "shadowMask", SamplerFlags(0) },
+		{ 1, "aoTex", SamplerFlags(0) },
+	};
 	static const VaryingDef varyings[] = {
 		{ "vec2", "v_uv", Draw::SEM_TEXCOORD0, 0, "highp" },
 	};
 	static const UniformDef uniforms[] = {
 		{ "vec4", "u_shadowTint", 0 },
 		{ "vec4", "u_compositeParams", 1 },
+		{ "vec4", "u_compositeAO", 2 },
+		{ "vec4", "u_compositeAO2", 3 },
 	};
 
 	const size_t kShaderBufferSize = 4096;
@@ -2932,15 +3571,32 @@ static bool EnsureCompositeResources(Draw::DrawContext *draw) {
 		writer.HighPrecisionFloat();
 		writer.DeclareSamplers(samplers);
 		writer.BeginFSMain(uniforms, varyings);
-		writer.C("  float lit = ").SampleTexture2D("shadowMask", "v_uv").C(".r;\n");
+		writer.C("  vec4 maskSample = ").SampleTexture2D("shadowMask", "v_uv").C(";\n");
+		writer.C("  float lit = maskSample.r;\n");
 		// Towards the tint where the sun does not reach, and exactly white where it does - so a
 		// fully lit pixel multiplies by one and the frame is bit-for-bit what the game drew.
 		writer.C("  vec3 shaded = mix(u_shadowTint.rgb, vec3(1.0, 1.0, 1.0), lit);\n");
 		writer.C("  vec3 col = mix(vec3(1.0, 1.0, 1.0), shaded, u_shadowTint.a);\n");
+		// Occlusion takes away ambient light and nothing else, but all that is here is the finished
+		// colour - so where the sun is reaching, only a share of it applies. How much of the light
+		// is sun right now comes from the shadows' own strength, which already follows the time of
+		// day and the weather: at night nearly all of it applies, at noon in the open little does.
+		writer.C("  float ao = ").SampleTexture2D("aoTex", "v_uv").C(".r;\n");
+		writer.C("  float sunlit = lit * u_compositeAO.z;\n");
+		writer.C("  float aoAmount = u_compositeAO.x * (1.0 - ao) * mix(1.0, u_compositeAO.y, sunlit);\n");
+		// The mask's alpha is zero on people - see aoOnPeople.
+		writer.C("  aoAmount *= mix(u_compositeAO2.x, 1.0, maskSample.a);\n");
+		writer.C("  if (u_compositeAO.w > 0.5 && v_uv.x > 0.5) { aoAmount = 0.0; }\n");
+		writer.C("  col *= 1.0 - aoAmount;\n");
 		writer.C("  vec4 outColor = vec4(col, 1.0);\n");
 		writer.C("  if (u_compositeParams.x > 0.5) {\n");
 		writer.C("    float v = u_compositeParams.y > 0.5 ? clamp((1.0 - lit) * 6.0, 0.0, 1.0) : lit;\n");
 		writer.C("    outColor = vec4(v, v, v, 1.0);\n");
+		writer.C("  }\n");
+		// The raw estimate, before the strength or the sunlight share - what the pass computed
+		// rather than what reached the frame.
+		writer.C("  if (u_compositeParams.z > 0.5) {\n");
+		writer.C("    outColor = vec4(ao, ao, ao, 1.0);\n");
 		writer.C("  }\n");
 		writer.EndFSMain("outColor");
 	}
@@ -3046,12 +3702,16 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 	} else {
 		draw->BindFramebufferAsTexture(s_maskFbo, 0, Aspect::COLOR_BIT, 0);
 	}
-	draw->BindSamplerStates(0, 1, &s_compositeSampler);
+	const bool haveAO = s_capture.aoRendered && s_aoFbo;
+	draw->BindFramebufferAsTexture(haveAO ? s_aoFbo : s_maskFbo, 1, Aspect::COLOR_BIT, 0);
+	Draw::SamplerState *compositeSamplers[2] = { s_compositeSampler, s_compositeSampler };
+	draw->BindSamplerStates(0, 2, compositeSamplers);
 
 	Viewport viewport{ 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
 	draw->SetViewport(viewport);
 	draw->SetScissorRect(0, 0, width, height);
-	draw->BindPipeline(s_settings.showMask ? s_compositeOpaque : s_compositePipeline);
+	const bool showAO = s_settings.showAO && haveAO;
+	draw->BindPipeline(s_settings.showMask || showAO ? s_compositeOpaque : s_compositePipeline);
 
 	CompositeUB ub;
 	ub.tint[0] = s_settings.tint[0];
@@ -3079,8 +3739,19 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 	ub.params[0] = s_settings.showMask ? 1.0f : 0.0f;
 	// The depth map is almost all near-white at these ranges, so it is stretched to be legible.
 	ub.params[1] = s_settings.debugView == 4 ? 1.0f : 0.0f;
-	ub.params[2] = 0.0f;
+	ub.params[2] = showAO ? 1.0f : 0.0f;
 	ub.params[3] = 0.0f;
+	ub.ao[0] = haveAO ? std::clamp(s_settings.aoStrength, 0.0f, 1.0f) : 0.0f;
+	ub.ao[1] = std::clamp(s_settings.aoInSun, 0.0f, 1.0f);
+	// How much of the light is direct sun, read back off the strength the shadows just settled
+	// on - which is the sun's brightness, the moon's share and the rain's, already eased. Asking
+	// for them again would advance the easing a second time in one frame.
+	ub.ao[2] = s_settings.strength > 0.0f ? std::clamp(ub.tint[3] / s_settings.strength, 0.0f, 1.0f) : 0.0f;
+	ub.ao[3] = s_settings.aoSplit ? 1.0f : 0.0f;
+	ub.ao2[0] = std::clamp(s_settings.aoOnPeople, 0.0f, 1.0f);
+	ub.ao2[1] = 0.0f;
+	ub.ao2[2] = 0.0f;
+	ub.ao2[3] = 0.0f;
 	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
 
 	// One oversized triangle rather than two, so there is no seam down the diagonal and no index
@@ -3190,6 +3861,7 @@ bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
 	SubmitCachedCasters(textureCache);
 	RenderCascade(draw);
 	RenderMask(draw, maskW, maskH, viewW, viewH);
+	RenderAO(draw, maskW, maskH, viewW, viewH);
 	RenderComposite(draw, target, fbWidth, fbHeight);
 	return true;
 }
@@ -3234,6 +3906,17 @@ void Init() {
 	// The flag is only set for ULUS10160 in compat.ini, so this is the disc-ID check as well.
 	RefreshAvailability();
 	g_active = g_available && s_enabled;
+
+	// The raw occlusion over the frame, for a run with nobody at the keyboard - the same lever as
+	// VCSWater's VCS_WATER_DEBUG. Not persisted anywhere, so nothing loaded later overrides it.
+	if (const char *show = getenv("VCS_AO_SHOW")) {
+		s_settings.showAO = atoi(show) != 0;
+		NOTICE_LOG(Log::G3D, "VCS AO: showing the raw estimate: %d", s_settings.showAO ? 1 : 0);
+	}
+	if (const char *split = getenv("VCS_AO_SPLIT")) {
+		s_settings.aoSplit = atoi(split) != 0;
+		NOTICE_LOG(Log::G3D, "VCS AO: left half only: %d", s_settings.aoSplit ? 1 : 0);
+	}
 }
 
 void SetEnabled(bool enabled) {
@@ -3247,6 +3930,7 @@ void SetEnabled(bool enabled) {
 		s_maskSetupFailed = false;
 		s_compositeSetupFailed = false;
 		s_cutSetupFailed = false;
+		s_aoSetupFailed = false;
 	}
 	if (!g_active) {
 		// Drop the frame's work immediately rather than leaving a stale map on screen in the
@@ -3272,9 +3956,11 @@ bool IsEnabled() {
 void Shutdown() {
 	ReleaseResources();
 	ReleaseMaskResources();
+	ReleaseAOResources();
 	ReleaseCompositeResources();
 	ReleaseCutoutResources();
 	s_cutSetupFailed = false;
+	s_aoSetupFailed = false;
 	s_cutGroups.clear();
 	s_cutPending = false;
 	s_depthSetupFailed = false;
@@ -3300,6 +3986,7 @@ void Shutdown() {
 void DeviceLost() {
 	ReleaseResources();
 	ReleaseMaskResources();
+	ReleaseAOResources();
 	ReleaseCompositeResources();
 	ReleaseCutoutResources();
 }

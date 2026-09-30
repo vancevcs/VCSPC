@@ -473,6 +473,67 @@ struct Settings {
 	// a second full pass purely to produce one diagnostic number. It earned its place while the
 	// projection was unproven; it has no business costing frames once it is.
 	bool countCascadeCoverage;
+
+	// Screen-space ambient occlusion: the soft darkening in creases and corners, where less of
+	// the sky reaches. It rides on the mask pass, whose depth buffer is already the camera's own
+	// view of every captured receiver, lined up with the frame - so it costs one full-screen pass
+	// and a blur rather than another trip through the city's geometry. It also means it only runs
+	// when the shadows do, and only sees what the capture accepted: foliage, particles and glass
+	// get whatever the surface behind them gets.
+	bool ambientOcclusion;
+
+	// How far the occlusion search reaches, in world units. GTA is about a metre to the unit, so
+	// this is the size of crease that darkens - a kerb, the foot of a wall, the gap under a car.
+	float aoRadius;
+
+	// How much of the occlusion reaches the frame, 0..1. Applied as a multiply, like the shadows.
+	float aoStrength;
+
+	// The estimator's own gain, before the strength above. Raising it darkens shallow creases
+	// towards what deep ones already are; raising the strength darkens everything alike.
+	float aoIntensity;
+
+	// Occlusion only removes AMBIENT light, but the composite only has the finished colour. So
+	// where the shadow mask says the sun reaches, only this share of it is applied - otherwise a
+	// sunlit corner goes as dark as a shaded one and reads as dirt rather than as a corner.
+	float aoInSun;
+
+	// The share of it that lands on PEOPLE. The estimator weighs a nearby surface just above the
+	// tangent plane heavily, which is right for a kerb and wrong for a body: the arms next to the
+	// torso darken the whole back of it, and the first prototype read as a dirty suit. The mask
+	// marks people in its alpha - they are drawn in their own call anyway, for their bias - so the
+	// world keeps the full strength and a person keeps the creases. They still occlude the ground.
+	float aoOnPeople;
+
+	// Surfaces closer than this to the surface being shaded do not count, per unit of distance
+	// from the camera. It is what stops a flat road occluding itself through depth-buffer noise,
+	// which grows with distance.
+	float aoBias;
+
+	// Occlusion fades out between these distances from the camera. Past a few blocks the depth
+	// buffer is too coarse to find a kerb and the game draws stand-ins anyway.
+	float aoFadeStart;
+	float aoFadeEnd;
+
+	// Resolution relative to the shadow mask. The blur is edge-aware, so half is softer rather
+	// than blockier - but the composite's upsample is not, so below half it starts to halo.
+	float aoScale;
+
+	int aoSamples;
+
+	// The estimator is noisy by construction - each pixel spins its samples differently so that
+	// twelve of them cover a disc - and this is what turns the noise back into a gradient. It
+	// stops at depth edges, which is what keeps a person's outline from being smeared into the
+	// wall behind them.
+	bool aoBlur;
+	float aoBlurSharpness;
+
+	// Draw the occlusion over the game instead of multiplying by it.
+	bool showAO;
+
+	// Apply it to the left half of the screen only. Every boot resumes somewhere different, so two
+	// runs are never the same picture - this is how to see with and without in one frame.
+	bool aoSplit;
 };
 
 // The frame's caster geometry, baked to the space the GE is fed and flattened to one triangle
@@ -579,6 +640,13 @@ struct CaptureStats {
 	// Flat surfaces drawn with a blend or a cut-out texture, captured as receivers only - see
 	// AddReceiver. Zero on a street means the ground there is all ordinary geometry.
 	int blendedReceiverDraws;
+
+	// The ambient occlusion pass: whether it ran, at what size, and if it did not, which step of
+	// its setup failed. Same steps as the mask, because it is built the same way.
+	bool aoRendered;
+	MaskStep aoStep;
+	int aoWidth;
+	int aoHeight;
 };
 
 const CaptureStats &LastCapture();
@@ -681,6 +749,10 @@ Draw::Framebuffer *ShadowMap();
 // The screen-space mask: white where the sun reaches, black where it does not. This is what the
 // composite multiplies the game's colour by.
 Draw::Framebuffer *ShadowMask();
+
+// The ambient occlusion, white where nothing crowds a surface. Red is the occlusion; green and
+// blue hold the depth the blur keys on. Null until the pass has run once.
+Draw::Framebuffer *AmbientOcclusion();
 
 // Called from the draw engine for every draw that reaches the GPU. `vertTypeID` is the decoder's
 // vertex type, not gstate's, because those can differ.

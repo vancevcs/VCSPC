@@ -2345,6 +2345,73 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::SetTooltip("Which view-space axis points into the scene. If the camera/player distance above is sane but the centre sits behind you, this is the wrong way round.");
 	}
 
+	// --- ambient occlusion -----------------------------------------------------------------
+	// Read off the mask's depth buffer, so it only exists while the mask does. The status row is
+	// the one to trust: a pass that failed to build and a pass that is switched off both leave the
+	// frame looking exactly as it did.
+	ImGui::Separator();
+	ImGui::Checkbox("Ambient occlusion", &set.ambientOcclusion);
+	{
+		const VCSShadow::CaptureStats &cap = VCSShadow::LastCapture();
+		if (!set.ambientOcclusion) {
+			ImGui::TextDisabled("   off");
+		} else if (cap.aoRendered) {
+			ImGui::TextColored(kGoodColor, "   ran at %dx%d%s", cap.aoWidth, cap.aoHeight,
+				set.aoBlur ? ", blurred" : ", unblurred");
+		} else {
+			const char *why = "did not run";
+			switch (cap.aoStep) {
+			case VCSShadow::CaptureStats::MaskStep::NotAttempted: why = "did not run - no mask this frame"; break;
+			case VCSShadow::CaptureStats::MaskStep::Framebuffer: why = "framebuffer creation failed"; break;
+			case VCSShadow::CaptureStats::MaskStep::VertexShader: why = "vertex shader would not compile"; break;
+			case VCSShadow::CaptureStats::MaskStep::FragmentShader: why = "fragment shader would not compile"; break;
+			case VCSShadow::CaptureStats::MaskStep::Pipeline: why = "pipeline creation failed"; break;
+			default: break;
+			}
+			ImGui::TextColored(kBadColor, "   %s", why);
+		}
+	}
+	if (set.ambientOcclusion) {
+		ImGui::SliderFloat("AO strength", &set.aoStrength, 0.0f, 1.0f, "%.2f");
+		ImGui::SliderFloat("AO radius", &set.aoRadius, 0.2f, 5.0f, "%.2f units");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("The size of crease that darkens. About a metre to the unit: a kerb is a few tenths, the gap under a car about one.");
+		}
+		ImGui::SliderFloat("AO intensity", &set.aoIntensity, 0.1f, 4.0f, "%.2f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("The estimator's gain. Raising it darkens shallow creases towards what deep ones already are; strength darkens everything alike.");
+		}
+		ImGui::SliderFloat("AO in sunlight", &set.aoInSun, 0.0f, 1.0f, "%.2f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Occlusion only removes ambient light, so where the shadow mask says the sun reaches, only this share of it applies. 1 treats sun and shade alike, which reads as dirt in sunlit corners.");
+		}
+		ImGui::SliderFloat("AO on people", &set.aoOnPeople, 0.0f, 1.0f, "%.2f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("The share that lands on people. At full strength the arms darken the whole torso and a suit reads as dirty. They still darken the ground they stand on either way.");
+		}
+		ImGui::SliderFloat("AO bias", &set.aoBias, 0.0f, 0.02f, "%.4f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("Per unit of distance from the camera. Raise it if flat road picks up a grey crawl in the distance.");
+		}
+		ImGui::SliderFloat("AO fade start", &set.aoFadeStart, 5.0f, 200.0f, "%.0f units");
+		ImGui::SliderFloat("AO fade end", &set.aoFadeEnd, 10.0f, 300.0f, "%.0f units");
+		ImGui::SliderFloat("AO scale", &set.aoScale, 0.25f, 1.0f, "%.2f x mask");
+		ImGui::SliderInt("AO samples", &set.aoSamples, 4, 32);
+		ImGui::Checkbox("AO blur", &set.aoBlur);
+		ImGui::SliderFloat("AO blur edge sharpness", &set.aoBlurSharpness, 0.0f, 40.0f, "%.1f");
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("How small a depth step stops the blur, relative to the depth itself. Lower smears outlines into what is behind them; higher leaves the noise on slopes.");
+		}
+		ImGui::Checkbox("AO on the left half only", &set.aoSplit);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("With and without in one frame. Every boot resumes somewhere different, so two runs are never the same picture.");
+		}
+		ImGui::Checkbox("Show the AO instead of the frame", &set.showAO);
+		if (ImGui::IsItemHovered()) {
+			ImGui::SetTooltip("The raw estimate, before strength and the sunlight share. White is open sky; dark is crowded.");
+		}
+	}
+
 	if (Draw::Framebuffer *shadowFbo = VCSShadow::ShadowMap()) {
 		ImGui::Separator();
 		ImGui::Text("cascade 0 depth:");
@@ -2362,6 +2429,14 @@ void ImVCSWindow::DrawShadows() {
 			ImGuiPipeline::TexturedOpaque);
 		ImGui::Image(maskId, ImVec2(384.0f, 218.0f));
 		ImGui::TextDisabled("This one is meant to be recognisable: it is your view, in black and white.");
+	}
+
+	if (Draw::Framebuffer *aoFbo = VCSShadow::AmbientOcclusion()) {
+		ImGui::Separator();
+		ImGui::Text("ambient occlusion (red; green and blue are the blur's depth key):");
+		ImTextureID aoId = ImGui_ImplThin3d_AddFBAsTextureTemp(aoFbo, Draw::Aspect::COLOR_BIT,
+			ImGuiPipeline::TexturedOpaque);
+		ImGui::Image(aoId, ImVec2(384.0f, 218.0f));
 	}
 
 	// What to actually do with this tab. The counts are only worth anything as a response to

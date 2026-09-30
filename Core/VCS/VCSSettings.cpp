@@ -521,6 +521,18 @@ const std::vector<Option> &Options() {
 				ApplyShadowSetting();
 			});
 
+		// Ambient occlusion, bound straight to the renderer's own flag - there is only one answer
+		// to derive, so there is nothing for an Apply function to keep consistent.
+		//
+		// Greyed while the shadows are off, because it reads the shadow mask's depth buffer and
+		// does not run without it. g_active is exactly "the shadow pass is running", so the row
+		// follows the Shadow quality row above the moment it moves.
+		addBool(OptionPage::Graphics, "AmbientOcclusion", "Ambient occlusion",
+			"Soft darkening in corners and creases - where a wall meets the pavement, under a car. "
+			"Needs Shadow quality at MEDIUM or above.",
+			&VCSShadow::GetSettings().ambientOcclusion);
+		enabledBy(&VCSShadow::g_active);
+
 		// Water. Two halves a player has no reason to separate: a shaded sea in place of the flat
 		// blue quad the PSP draws, and roads that go wet and reflective when it rains. Both run at
 		// the same seam and share one geometry capture, so the second costs very little once the
