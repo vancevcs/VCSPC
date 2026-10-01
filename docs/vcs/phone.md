@@ -138,11 +138,67 @@ gates it - see `kVCSHudCutscene`. Three things therefore have to be true at once
 - and `hideInCutscene` is on, which is a row on the Touch page precisely so a build where the
   correlation stops holding is one switch away from being playable.
 
+**And it has to last a fifth of a second (`kCutsceneSettleTicks`) before it is believed.** The HUD
+goes away for moments that are not cutscenes. Tapping TARGET to lower a scope takes the context out
+of Aiming on that tick, and the game puts its HUD back a frame later, so for one tick the signal
+reads "cutscene". Believed at once, that tick hid every control while a finger was still on TARGET.
+
+**A control that leaves the screen gives its fingers back (`VCSTouchButton::ForceUp`).** That one
+tick was the whole of "after the scope the controls go unresponsive, as if the buttons were not
+where they are drawn". The hidden TARGET never saw its finger lift. So the pointer it had claimed
+stayed claimed for the rest of the session. A phone numbers the first finger down 0 every time, so
+from then on a lone finger was ignored by every control, the stick and the look drag, and only a
+second finger held alongside it got through. Measured on the Mac through injected touches: the
+pointer that tapped TARGET to lower the sniper moved the player 0.00 afterwards, against 7.1 for a
+fresh one. Either fix alone stops that case. Both are in, because any control hidden under a finger
+leaks the same way: PREV/NEXT when a scope comes up, ZOOM when it goes down.
+
 **SKIP presses Cross, and that is the harmless guess rather than the measured one.** Cross is what
 was measured to skip the CREDITS - see `UpdateBootPhase` - and in-game cutscenes have not been
 tested, because nobody has had the disc and a phone in the same room since this went in. A wrong
 Cross does nothing; a wrong Start would open the game's own pause menu on top of the scene. One
 constant to change if it turns out to be Start.
+
+#### The game's menus in the world get a confirm, a way out and arrows
+
+**Status: built and played on the Mac through the touch overlay, at the wardrobe.** The arrows
+stepped Pastel Suit → Tracksuit → Army Fatigues and back, OK changed into the outfit, and BACK left
+without changing. None of the others has been seen.
+
+The wardrobe, the Empire site's business picker, a shop counter: none of them is a context. The
+player is on foot and the game has stopped listening to the stick and started listening for d-pad
+left/right, Cross and Circle. **The game says which in its own help line**, and that is the signal:
+`kVCSHudHelpSource` (HUD `+0x2bdc`) points at the GXT entry the line on screen was printed from,
+UNEXPANDED. So the controls it asks for are still tokens, and tokens are not translated. Found by
+diffing the HUD object in and out of the wardrobe: it held `0x098a9f7a`, the CLOTHA entry to the
+byte, and went to zero on the frame the wardrobe closed, together with all three of its displayed
+text buffers (`+0x243c`, read as a second witness).
+
+`ReadHelpLineControls` reports two things. `~AMBUY~`/`~AMEXI~` mean a confirm and a way out;
+`~AMLEF~`/`~AMRIG~` and `~VECRS~` mean something to step through. On foot the overlay then swaps the
+five on-foot face buttons for OK (pad A, the PSP's Cross), BACK (pad B, Circle) and, with something
+to step through, a pair of arrows (the d-pad) where the car's steering arrows sit. Every line in the
+GXT that names those tokens, so every place this comes up:
+
+| | step through | confirm / out |
+|---|---|---|
+| wardrobe | `CLOTHA` | ✓ |
+| Empire site: business type, business size | `H_DEV10`, `H_DEV11` (`~VECRS~`) | ✓ |
+| Empire repair | | `H_DEV12` |
+| movie picker | `MOCINST` (`~VECRS~`) | ✓ |
+| race picker | `RACEHLP` | ✓ |
+| Ammu-Nation, the "Pay $X?" prompts, a time-trial start | | `H_AM_01`, `RE_*`, `TT_A2` |
+
+**On foot only.** The one vehicle line naming these tokens is the radio's help (`H_IV_01`), which is
+advice, not a menu, and the pedals are not something to take away on a guess. The race picker may
+well be met in a car. That has not been seen, and it would need the car's own buttons, since Cross
+is the accelerator there.
+
+**A picker is never a cutscene.** If the game drops its HUD for one of these, the overlay would
+otherwise put up SKIP, which presses Cross and would buy whatever was showing.
+
+**BACK presses B, and B on foot with a gun is the fire button that borrows aim** (see
+`kAutoLockLeadFrames`). The auto-lock stands down in a picker, or leaving a shop would raise a gun.
 
 #### The icons are baked, and there is a path renderer in the tool because nothing else would do it
 
@@ -212,6 +268,26 @@ and the compass letter together in the top-left.
 play came back `0x68298a0c` - a RUNBLOCK marker rather than the game's instruction - and writing
 through it took the emulator down. AGENTS.md has warned about this for a long time; it is written
 here again because the warning was read and the mistake made anyway, in the same hour.
+
+**The help box moves with it (`PatchHelpBox`).** The game's tips are drawn top-left, which is where
+the radar now is, so with the same setting they go to the top centre. The draw builds one
+rect from immediates, `CRect(8, 5, 228, 272)`, and the wrap width, the measured height and the
+black background the font puts behind the text all follow from it. Found from the other end: the
+three help-text buffers (HUD `+0x243c/+0x263c/+0x283c`, see "The game's menus in the world") were
+looked up in the code, and the one that loads `+0x283c` for printing sits right after that rect.
+Only the two horizontal edges move: same width, centred (x 130..350), still at the very top.
+
+**The first build also moved it down, and that was wrong.** It started the box at y 64 to clear the
+row of small touch controls beside the radar, which at a phone's ~1.4dp per PSP unit sits on the
+radar's centre line (about y 30..60) and reaches x ~150 on foot and ~218 in a vehicle. Reported
+from the phone: "not the best placement, it should be moved to the very top". So the row may
+overlap the start of a long tip's second and third lines. If the box ever has to move down after
+all, that is two more sites, and the second is not obvious: the draw overwrites the rect's bottom
+with the measured text height plus a hard-coded integer 5 (the top again, `addiu` at
+`0x089C1C3C`). Moving the top without it draws the background upside down.
+
+**The pager is in the same corner and has not moved.** "Beeper" messages draw at about x 25..184,
+y 23..90, over the moved radar. Not done; the same approach would work.
 
 ### Tapping the game's own HUD
 
@@ -339,6 +415,21 @@ applied to one half of a pair.
   round radar is usually masked - would otherwise have that texture's contents squashed about the
   texture's own centre, which is not a place that means anything.
 
+**A flat fill that reaches the screen's edge keeps reaching it.** This is the full-width exemption
+applied one edge at a time, and the sniper scope is why. Its overlay is a square texture (x 32..480
+of the game's 512-wide buffer) with a 32-pixel opaque black bar either side, out to the screen's
+edges. Squashed like the rest of the HUD, the bars stopped short of a phone's edges and the world
+showed down both sides. The software transform now leaves at the edge any vertex of an UNTEXTURED
+draw that sits there, and `g_widescreenEdgeFill` tells the scissor to keep that edge too. Without
+that, the squashed clip would cut the bar back to where it was. Untextured only, because a fill has
+no proportions to lose and a stretched image does.
+
+Logged across boot, play, the sniper, the binoculars and the game's map page, the only partial-width
+untextured draws touching an edge were those two bars and a one-pixel line in the boot logo, which
+ran to the PSP's right edge and now runs to the phone's. The binoculars are a single full-screen
+texture, already exempt, so they cover the screen stretched rather than squashed. The camera and
+the RPG were not logged.
+
 **What is NOT verified**: whether the HUD half is right now. The arithmetic is checked - squash 0.836, a
 vertex at the old edge lands at 0.836w, so the horizontal FOV widens by 1/0.836 = 19.6%, and the
 frame is then stretched by exactly 2280/480 over 1080/272 = 1.196 - but nobody has looked at the
@@ -364,10 +455,21 @@ covers, and a stand-in cannot answer it.
   the keys in `[TouchLayout]` in `vcs.ini`.
 - **A control dragged back to where it started is erased**, so a reset layout and a fresh install
   are the same file, and the section says only what was actually moved.
-- **The drag's sign follows the anchor.** Dragging left has to INCREASE a distance measured from
-  the right edge, or the control runs away from the finger. Then it is clamped by where it
-  actually landed rather than by an estimate - which for a row anchored to the radar is the only
-  way to know.
+- **The drag is the finger's own movement, whichever edge the control hangs from.** `PlaceButton`
+  adds the offset to the row's SIGNED position, where a right-anchored row is already negative, so
+  moving left already takes it further from the right edge. The first build flipped the sign for
+  right- and bottom-anchored rows as well, which flipped it twice: the whole right-hand cluster ran
+  away from the finger. Found on the Mac dragging PICKUP left and watching it pile into the right
+  edge. Stored offsets mean what they always meant, because only the drag changed, not the
+  placement. It is then clamped by where it actually landed rather than by an estimate, which for a
+  row anchored to the radar is the only way to know.
+- **A tap resizes.** Up through the sizes to the largest, then back down to the smallest, one step
+  a tap (`kTouchSizeSteps`, 0.7-1.5 of the row's own radius). That is how the trilogy's phone ports
+  do it. A press only becomes a drag past `kTapSlop` (10dp), so a tap never nudges the control as
+  well. The size is the third number in a `[TouchLayout]` line, a line from before it has two, and a
+  control grows about its centre and is pushed back onto the screen if it grew off an edge.
+- **SHOPS** is a fifth tab: the on-foot context with a picker up, so its OK, BACK and arrows can be
+  arranged too.
 - **The editor came up EMPTY twice, for two different reasons, and the second is the one worth
   remembering.** The first was the AnchorLayoutParams trap above - the controls were placed off
   screen. The second was that they were placed correctly and drawn at zero alpha: the overlay's

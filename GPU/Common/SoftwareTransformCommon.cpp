@@ -192,6 +192,7 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 		// The clear detection below still sees full-width rects unsquashed, so a screen clear is
 		// still recognised as one.
 		bool squashed = false;
+		bool edgeFill = false;
 		if (VCS::g_widescreenSquashesHud && VCS::WidescreenActive() && numDecodedVerts > 0) {
 			const float full = (float)gstate_c.curRTWidth;
 			// ONLY INTO A FULL-SIZE TARGET. A game that renders part of its HUD to a texture
@@ -207,10 +208,21 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 					maxX = std::max(maxX, transformed[index].x);
 				}
 				if ((maxX - minX) < full * 0.9f) {
+					// A FLAT FILL THAT REACHES THE SCREEN'S EDGE KEEPS REACHING IT, which is the
+					// exemption above applied one edge at a time. The sniper scope is a square
+					// texture with a black bar either side of it, 32 pixels each, from the screen's
+					// edge to the scope's - so squashed with everything else the bars ended a strip
+					// short of a phone's edges and the world showed down both sides. Untextured
+					// only: a fill has no proportions to keep, where an image stretched to the edge
+					// would be distorted.
+					edgeFill = !gstate.isTextureMapEnabled() && (minX <= 0.5f || maxX >= full - 0.5f);
 					const float centre = full * 0.5f;
 					for (int index = 0; index < numDecodedVerts; index++) {
-						transformed[index].x =
-							centre + (transformed[index].x - centre) * VCS::g_widescreenSquash;
+						const float x = transformed[index].x;
+						if (edgeFill && (x <= 0.5f || x >= full - 0.5f)) {
+							continue;
+						}
+						transformed[index].x = centre + (x - centre) * VCS::g_widescreenSquash;
 					}
 					squashed = true;
 				}
@@ -219,8 +231,9 @@ SoftwareTransformAction RunSoftwareTransform(SoftwareTransformParams &params, in
 		// The clip has to move with the content, and only the state conversion can move it - so
 		// the decision is handed forward, and a change in it dirties the scissor so the next draw
 		// cannot inherit the last one's. See VCS::g_widescreenSquashedDraw.
-		if (squashed != VCS::g_widescreenSquashedDraw) {
+		if (squashed != VCS::g_widescreenSquashedDraw || edgeFill != VCS::g_widescreenEdgeFill) {
 			VCS::g_widescreenSquashedDraw = squashed;
+			VCS::g_widescreenEdgeFill = edgeFill;
 			gstate_c.Dirty(DIRTY_VIEWPORTSCISSOR_STATE);
 		}
 

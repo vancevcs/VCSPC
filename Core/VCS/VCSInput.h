@@ -167,6 +167,9 @@ VCSTouchSettings &TouchSettings();
 struct VCSTouchOffset {
 	float dx = 0.0f;
 	float dy = 0.0f;
+	// And how big the player has made it, as a multiple of the row's own radius - tapped through
+	// in the editor. On top of the overall control size, not instead of it.
+	float size = 1.0f;
 };
 
 // Keyed by control id. Read when the overlay is built and when the editor draws; written only by
@@ -176,6 +179,7 @@ std::map<std::string, VCSTouchOffset> &TouchLayoutOffsets();
 // What the layout uses: the saved offset, or nothing.
 VCSTouchOffset TouchOffsetFor(const char *id);
 void SetTouchOffset(const char *id, float dx, float dy);
+void SetTouchSize(const char *id, float size);
 void ClearTouchLayout();
 
 // Bumped by every change above.
@@ -224,6 +228,11 @@ struct VCSTouchState {
 	bool lockedOn = false;               // the game has a target
 	bool ledgeAhead = false;             // the vault probe has something to climb
 	bool driveBy = false;                // riding shotgun with a weapon out
+	// One of the menus the game runs in the world is open on foot - the wardrobe, the Empire
+	// site's business picker, a shop, a "Pay $X?" prompt - asking for its confirm and its way
+	// out, and with `pickerCycle` something to step through as well. See ReadHelpLineControls.
+	bool picker = false;
+	bool pickerCycle = false;
 
 	// The game is playing a cutscene, so the player has no control and the controls should not
 	// be sitting on top of it. Skip and pause go up instead.

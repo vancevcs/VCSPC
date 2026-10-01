@@ -770,9 +770,14 @@ void LoadSettings() {
 	ClearTouchLayout();
 	if (const Section *layout = ini.GetSection("TouchLayout")) {
 		for (const auto &entry : layout->ToMap()) {
-			float dx = 0.0f, dy = 0.0f;
-			if (sscanf(entry.second.c_str(), "%f,%f", &dx, &dy) == 2) {
+			// The size is a third number, added later - a line from before it has two and means
+			// the row's own size.
+			float dx = 0.0f, dy = 0.0f, size = 1.0f;
+			if (sscanf(entry.second.c_str(), "%f,%f,%f", &dx, &dy, &size) >= 2) {
 				SetTouchOffset(entry.first.c_str(), dx, dy);
+				if (size > 0.2f && size < 4.0f) {
+					SetTouchSize(entry.first.c_str(), size);
+				}
 			}
 		}
 	}
@@ -820,7 +825,8 @@ void SaveSettings() {
 		Section *layout = ini.GetOrCreateSection("TouchLayout");
 		for (const auto &entry : TouchLayoutOffsets()) {
 			char value[64];
-			snprintf(value, sizeof(value), "%.1f,%.1f", entry.second.dx, entry.second.dy);
+			snprintf(value, sizeof(value), "%.1f,%.1f,%.2f", entry.second.dx, entry.second.dy,
+				entry.second.size);
 			layout->Set(entry.first.c_str(), value);
 		}
 	}

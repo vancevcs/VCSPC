@@ -2675,6 +2675,18 @@ bool LockOnModeActive() {
 static std::mutex g_touchStateMutex;
 static VCSTouchState g_touchState;
 
+// How many ticks in a row the HUD has to be gone before the overlay calls it a cutscene.
+//
+// The HUD also goes away for a moment that is not one: lowering a scope takes the context out of
+// Aiming on the tick the aim control is let go, and the game puts its HUD back a frame or so
+// later - measured with the sniper, through the touch controls, as exactly one tick with the
+// context OnFoot and the HUD still suppressed. Believed at once, that tick hid every control with
+// a finger still on TARGET and flashed SKIP where ATTACK sits. Twelve vblanks is a fifth of a
+// second: a real cutscene runs for seconds and loses nothing by it, and a gap in the HUD shorter
+// than that is not a cutscene.
+static constexpr int kCutsceneSettleTicks = 12;
+static int g_cutsceneTicks = 0;
+
 VCSTouchState TouchState() {
 	std::lock_guard<std::mutex> guard(g_touchStateMutex);
 	return g_touchState;
@@ -2697,18 +2709,29 @@ VCSTouchOffset TouchOffsetFor(const char *id) {
 	return iter == offsets.end() ? VCSTouchOffset{} : iter->second;
 }
 
-void SetTouchOffset(const char *id, float dx, float dy) {
-	// A control dragged back to where it started is ERASED rather than stored as a zero, so a
-	// layout somebody has reset by hand leaves no trace in the file - and so the ini says only
-	// what was actually changed.
+// A control dragged back to where it started, at the size it started, is ERASED rather than
+// stored as zeroes, so a layout somebody has reset by hand leaves no trace in the file - and so the
+// ini says only what was actually changed.
+static void StoreTouchOffset(const char *id, const VCSTouchOffset &offset) {
 	g_touchLayoutGeneration++;
-	if (dx == 0.0f && dy == 0.0f) {
+	if (offset.dx == 0.0f && offset.dy == 0.0f && offset.size == 1.0f) {
 		TouchLayoutOffsets().erase(id);
 		return;
 	}
-	VCSTouchOffset &offset = TouchLayoutOffsets()[id];
+	TouchLayoutOffsets()[id] = offset;
+}
+
+void SetTouchOffset(const char *id, float dx, float dy) {
+	VCSTouchOffset offset = TouchOffsetFor(id);
 	offset.dx = dx;
 	offset.dy = dy;
+	StoreTouchOffset(id, offset);
+}
+
+void SetTouchSize(const char *id, float size) {
+	VCSTouchOffset offset = TouchOffsetFor(id);
+	offset.size = size;
+	StoreTouchOffset(id, offset);
 }
 
 void ClearTouchLayout() {
@@ -2747,6 +2770,14 @@ void PublishTouchState(VCSInputContext context) {
 	snap.mapPage = context == VCSInputContext::Menu && GameMenuPage() == FrontEndSettings().mapPage;
 	snap.ledgeAhead = VaultDebugState().armed;
 	snap.driveBy = DriveByAimActive(context);
+	// On foot only. The only line that names these controls in a vehicle is the radio's help
+	// (H_IV_01), which is advice rather than a menu, and the pedals are not something to take
+	// away on a guess. The race picker names them too and may well be met in a car - not seen yet.
+	if (context == VCSInputContext::OnFoot) {
+		const HelpLineControls help = ReadHelpLineControls();
+		snap.picker = help.choose;
+		snap.pickerCycle = help.choose && help.cycle;
+	}
 
 	// The cutscene. Three things have to be true at once, and the two guards are what make a
 	// soft signal safe to hang the whole overlay on - see the note on the field.
@@ -2758,9 +2789,15 @@ void PublishTouchState(VCSInputContext context) {
 	// A raised scope is excluded for the same reason: the sniper, the RPG, the camera and the
 	// binoculars all take the game into a first-person view that drops the radar with the rest
 	// of the HUD, and reading that as a cutscene swapped their controls for SKIP and PAUSE.
-	snap.cutscene = TouchSettings().hideInCutscene && GameSettings().hud && snap.active &&
+	//
+	// And it has to HOLD before it is believed - see kCutsceneSettleTicks. Leaving one is believed
+	// at once: the controls coming back late is the failure that costs the player something.
+	// A menu the game runs in the world is never one either: it is waiting for the player.
+	const bool hudGone = TouchSettings().hideInCutscene && GameSettings().hud && snap.active &&
 		context != VCSInputContext::Menu && !(context == VCSInputContext::Aiming && snap.scoped) &&
-		!RadarOnScreen();
+		!snap.picker && !RadarOnScreen();
+	g_cutsceneTicks = hudGone ? std::min(g_cutsceneTicks + 1, kCutsceneSettleTicks) : 0;
+	snap.cutscene = g_cutsceneTicks >= kCutsceneSettleTicks;
 
 	std::lock_guard<std::mutex> guard(g_touchStateMutex);
 	g_touchState = snap;

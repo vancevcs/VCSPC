@@ -223,11 +223,38 @@ static void PatchRadarCorner() {
 		radar.centreX, radar.centreY);
 }
 
+// The help box, out of the corner the radar has just moved into - see kVCSHelpBoxLeft. The same
+// setting as the radar and patched at the same moment for the same reason; on its own it would be
+// a box moved for no reason.
+static void PatchHelpBox() {
+	if (!GameSettings().radarTopLeft) {
+		return;
+	}
+	struct Site { u32 address; u32 stock; u32 moved; };
+	const Site sites[] = {
+		{ kVCSHelpBoxLeft, kVCSHelpBoxLeftOp, kVCSHelpBoxLeftMoved },
+		{ kVCSHelpBoxRight, kVCSHelpBoxRightOp, kVCSHelpBoxRightMoved },
+	};
+	// Both or neither: one edge moved without the other is a box twice as wide, or none at all.
+	for (const Site &site : sites) {
+		if (!Memory::IsValid4AlignedAddress(site.address) ||
+				Memory::ReadUnchecked_U32(site.address) != site.stock) {
+			WARN_LOG(Log::System, "VCS: %08x does not hold the help box's layout on this build - "
+				"leaving it where the game put it", site.address);
+			return;
+		}
+	}
+	for (const Site &site : sites) {
+		Memory::WriteUnchecked_U32(site.moved, site.address);
+	}
+}
+
 void PatchLoadedModule() {
 	if (!IsActive()) {
 		return;
 	}
 	PatchRadarCorner();
+	PatchHelpBox();
 	const float wanted = GameSettings().worldMemory;
 	if (!(wanted > 1.0f) || !Memory::IsValid4AlignedAddress(kVCSMainPoolReserve)) {
 		return;
@@ -338,6 +365,7 @@ void Shutdown() {
 	g_widescreenSquash = 1.0f;
 	g_widescreenSquashesHud = false;
 	g_widescreenSquashedDraw = false;
+	g_widescreenEdgeFill = false;
 
 	g_active = false;
 	g_discID.clear();
@@ -700,6 +728,7 @@ void PatchDiscRead(u64 positionOnIso, u8 *data, size_t bytes) {
 float g_widescreenSquash = 1.0f;
 bool g_widescreenSquashesHud = false;
 bool g_widescreenSquashedDraw = false;
+bool g_widescreenEdgeFill = false;
 
 void WidenProjection(float *matrix16) {
 	if (!WidescreenActive()) {

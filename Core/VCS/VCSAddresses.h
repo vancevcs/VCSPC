@@ -231,6 +231,23 @@ inline constexpr u32 kVCSRadarTopMoved = 0x3C044140;
 // route line on it and the touch zone that opens the menu.
 inline constexpr float kVCSRadarLeft = 12.0f;
 inline constexpr float kVCSRadarSize = 65.7f;
+// The help box - the game's tips in the top-left - moved out of the radar's way when the radar
+// moves up there. Its draw (0x089C1B58 on, in the function that prints HUD+0x283C) builds ONE
+// rect from immediates, CRect(8, 5, 228, 272), and everything else follows from it: the wrap
+// width, the measured height, and the black background the font draws behind the text.
+//
+// To the top centre, as wide as it was: only the two horizontal edges move. The top stays at 5.
+// A first build also moved it down to y 64, to clear the small touch controls beside the radar;
+// played, that was the wrong call - the very top is where it belongs. Moving it down again would
+// be two more sites: the top (lui $a1, 0x40A0 at 0x089C1BB8) and a hard-coded `addiu $a0, $a0, 5`
+// at 0x089C1C3C, where the draw overwrites the rect's bottom with the text height plus the top.
+inline constexpr u32 kVCSHelpBoxLeft = 0x089C1BAC;       // lui $a1, 0x4100   (8.0)
+inline constexpr u32 kVCSHelpBoxLeftOp = 0x3C054100;
+inline constexpr u32 kVCSHelpBoxLeftMoved = 0x3C054302;  // 130.0
+inline constexpr u32 kVCSHelpBoxRight = 0x089C1BC4;      // lui $a1, 0x4364   (228.0)
+inline constexpr u32 kVCSHelpBoxRightOp = 0x3C054364;
+inline constexpr u32 kVCSHelpBoxRightMoved = 0x3C0543AF; // 350.0
+
 inline constexpr float kVCSRadarTopRetail = 196.0f;
 inline constexpr float kVCSRadarTopMovedY = 12.0f;
 
@@ -662,6 +679,20 @@ inline constexpr u32 kVCSHudCutscene = 0x0c;
 inline constexpr u32 kVCSHudDrawFlag = 0x2436;
 inline constexpr u32 kVCSHudSuppressState = 0x2be8;
 inline constexpr u32 kVCSHudSuppressValue = 2;
+
+// The help line - the box in the top-left - as the game's own TEXT rather than as what is drawn.
+//
+// `+0x2bdc` points at the GXT entry the line on screen was printed from, unexpanded, so the
+// controls it names are still TOKENS (`~AMLEF~`, `~AMBUY~`) rather than whatever words the control
+// configuration spells them as - and tokens are not translated. Zero with no help line up.
+// Measured at the safehouse wardrobe: 0 before, 0x098a9f7a while choosing - the CLOTHA entry to
+// the byte - and 0 again on the frame the wardrobe closed.
+//
+// `+0x243c` is the line as displayed, the first of three 256-wchar buffers in a row (reVC's
+// m_HelpMessage family). All three were emptied on that same frame, so it is read as a second
+// witness: a source pointer outliving its line cannot hold the overlay up on its own.
+inline constexpr u32 kVCSHudHelpSource = 0x2bdc;
+inline constexpr u32 kVCSHudHelpText = 0x243c;
 
 inline constexpr u32 kVCSRadarRange = 0x1ab8;
 

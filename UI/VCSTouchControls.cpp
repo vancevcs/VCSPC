@@ -135,6 +135,8 @@ enum Cond : uint32_t {
 	CondBike = 1 << 7,             // riding a motorcycle
 	CondMapPage = 1 << 8,          // the game's own map page
 	CondPlane = 1 << 9,            // flying a plane rather than a helicopter
+	CondPicker = 1 << 10,          // a menu the game runs in the world wants a confirm and a way out
+	CondPickerCycle = 1 << 11,     // ... and has something to step through
 	CondWeapon = CondArmed | CondMelee,
 };
 
@@ -231,26 +233,51 @@ const ControlSpec kControls[] = {
 	// where a mis-tap cannot fire a gun.
 	{ "foot.fist",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
-		"fist", "gun", "ATTACK",       kColA, kRow1, kBig,   Anchor::Edge, kOnFoot | kAiming, CondAlways, CondScopeCannotShoot },
+		"fist", "gun", "ATTACK",       kColA, kRow1, kBig,   Anchor::Edge, kOnFoot | kAiming, CondAlways, CondScopeCannotShoot | CondPicker },
 	// Jump and sprint on one button: held it sprints, tapped twice it jumps. Two of the four
 	// face buttons on one control, which is what a screen with room for three has to do - and
 	// what a phone player already expects, because every touch platformer since has done it.
 	{ "foot.run",
 		 NKCODE_BUTTON_A,      kVCSPadJumpButton,    Kind::JumpSprint,
-		"run", nullptr, "RUN",         kColA, kRow2, kMid,   Anchor::Edge, kOnFoot,           CondAlways, 0 },
+		"run", nullptr, "RUN",         kColA, kRow2, kMid,   Anchor::Edge, kOnFoot,           CondAlways, CondPicker },
 	{ "foot.car",
 		 NKCODE_BUTTON_Y,      NKCODE_UNKNOWN,       Kind::Hold,
-		"car", nullptr, "ENTER",       kColA, kRow3, kSmall, Anchor::Edge, kOnFoot,           CondAlways, 0 },
+		"car", nullptr, "ENTER",       kColA, kRow3, kSmall, Anchor::Edge, kOnFoot,           CondAlways, CondPicker },
 	// Aim is a TOGGLE here and a held trigger on every other device, and that is the one place
 	// this overlay deliberately disagrees with the pad scheme it otherwise stands on. A trigger
 	// is held because a finger can rest on it; a thumb holding a patch of glass is a thumb that
 	// cannot do anything else, and aiming is exactly when the other hand is busy.
 	{ "foot.crosshair",
 		 kVCSPadAimButton,     NKCODE_UNKNOWN,       Kind::Toggle,
-		"crosshair", nullptr, "TARGET", kColB, kRow1, kMid,  Anchor::Edge, kOnFoot | kAiming, CondWeapon | CondScoped, 0 },
+		"crosshair", nullptr, "TARGET", kColB, kRow1, kMid,  Anchor::Edge, kOnFoot | kAiming, CondWeapon | CondScoped, CondPicker },
 	{ "foot.pickup",
 		 NKCODE_BUTTON_THUMBL, NKCODE_UNKNOWN,       Kind::Hold,
-		"pickup", nullptr, "PICKUP",   kColB, kRow2, kSmall, Anchor::Edge, kOnFoot,           CondAlways, 0 },
+		"pickup", nullptr, "PICKUP",   kColB, kRow2, kSmall, Anchor::Edge, kOnFoot,           CondAlways, CondPicker },
+
+	// --- A menu the game runs in the world -----------------------------------------------------
+	//
+	// The wardrobe, the Empire site's business picker, the movie and race pickers, a shop counter,
+	// a "Pay $X?" prompt. None of them is a context: the player is on foot, the game has simply
+	// stopped listening to the stick and started listening for three things, and it says which in
+	// its own help line - see ReadHelpLineControls. So these are exactly those: the confirm where
+	// the thumb already is, a way out beside it, and - when there is something to step through -
+	// the pair of arrows a thumb already knows from steering, on the side the stick lives.
+	//
+	// The on-foot set stands down for them rather than sharing the corner, because every one of
+	// those five would press something the menu reads as a choice: ATTACK is the menu's own way
+	// out, RUN its confirm.
+	{ "pick.select",
+		 NKCODE_BUTTON_A,      NKCODE_UNKNOWN,       Kind::Hold,
+		"select", nullptr, "OK",        kColA, kRow1, kBig,   Anchor::Edge, kOnFoot,           CondPicker, 0 },
+	{ "pick.back",
+		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
+		"back", nullptr, "BACK",        kColB, -76.0f, kMid,  Anchor::Edge, kOnFoot,           CondPicker, 0 },
+	{ "pick.prev",
+		 NKCODE_DPAD_LEFT,     NKCODE_UNKNOWN,       Kind::Hold,
+		"arrow_left", nullptr, "<",     kLeftA, kWheelY, kBig, Anchor::Edge, kOnFoot,          CondPickerCycle, 0 },
+	{ "pick.next",
+		 NKCODE_DPAD_RIGHT,    NKCODE_UNKNOWN,       Kind::Hold,
+		"arrow_right", nullptr, ">",    kLeftB, kWheelY, kBig, Anchor::Edge, kOnFoot,          CondPickerCycle, 0 },
 
 	// --- Aiming ------------------------------------------------------------------------------
 	//
@@ -447,6 +474,10 @@ constexpr double kDoubleTapSeconds = 0.30;
 // 30Hz while this runs at vblank, so a press released on the next frame is a press it can miss.
 constexpr int kJumpHoldFrames = 8;
 
+// How far a finger may wander, in dp, and still have been a tap rather than a drag - in the layout
+// editor, where a tap resizes a control and a drag moves it.
+constexpr float kTapSlop = 10.0f;
+
 // Everything in the layout table is in dp and multiplied by this, so the controls grow and shrink
 // as one cluster anchored to its corner. Read once when the layout is built rather than per frame:
 // changing the size rebuilds the views, because a button's bounds are its layout parameters.
@@ -544,7 +575,10 @@ public:
 
 	const ControlSpec &Spec() const { return spec_; }
 	bool IsDown() const { return downMask_ != 0; }
-	float Radius() const { return spec_.radius * scale_; }
+	float Radius() const { return spec_.radius * scale_ * size_; }
+	// The player's own size for this one control - see VCSTouchOffset::size.
+	void SetSize(float size) { size_ = size; }
+	float Size() const { return size_; }
 
 	// Editing: a control is picked up and put down somewhere else, and what it remembers is how
 	// far from where the table put it - see VCSTouchOffset. Kept in dp, unscaled, so changing the
@@ -572,6 +606,7 @@ private:
 
 	const ControlSpec &spec_;
 	float scale_ = 1.0f;
+	float size_ = 1.0f;
 	bool *pause_;
 	bool editing_ = false;
 	uint32_t downMask_ = 0;
@@ -586,6 +621,8 @@ private:
 	double pressedAt_ = 0.0;
 	double releasedAt_ = -1.0;
 	int jumpFrames_ = 0;
+	// Editing: which way the next tap resizes this control - see ResizePicked.
+	bool growing_ = true;
 
 	friend class VCSTouchLayout;
 };
@@ -705,8 +742,10 @@ bool VCSTouchButton::Touch(const TouchInput &input) {
 			const VCS::VCSTouchState state = VCS::TouchState();
 			const bool onFoot = state.context == VCS::VCSInputContext::OnFoot ||
 				state.context == VCS::VCSInputContext::Aiming;
+			// Not in a menu the game runs in the world either, where B is BACK and a gun raised on
+			// the way out would be the last thing anyone wanted.
 			if (spec_.kind == Kind::Hold && spec_.pad == NKCODE_BUTTON_B && onFoot &&
-					state.armed && !state.scoped &&
+					state.armed && !state.scoped && !state.picker &&
 					!VCS::IsTouchButtonDown(kVCSPadAimButton)) {
 				VCS::SetTouchButton(kVCSPadAimButton, true);
 				holdingAim_ = true;
@@ -782,6 +821,21 @@ void VCSTouchButton::ForceUp() {
 	if (jumpFrames_ > 0) {
 		jumpFrames_ = 0;
 		VCS::SetTouchButton(spec_.padSecond, false);
+	}
+	// And the fingers. A finger-up hands back its pointer as it lifts, but a control that has left
+	// the screen never sees the lift - a hidden view is not sent the event - so the claim it took
+	// on the way down has to be given back here, or nobody ever gives it back.
+	//
+	// THAT WAS THE "UNRESPONSIVE AFTER A SCOPE" BUG. Tapping TARGET to lower a scope takes the
+	// context out of Aiming a frame before the game puts its HUD back, the overlay read that frame
+	// as a cutscene and hid every control - including TARGET, with the tapping finger still on it.
+	// Its pointer stayed claimed for the rest of the session, and a phone numbers the first finger
+	// down 0 every time: every control, the stick and the look drag all ignored a lone finger, and
+	// only a second one held alongside it got through.
+	for (int id = 0; id < 32; id++) {
+		if (downMask_ & (1u << id)) {
+			ReleasePointer(id);
+		}
 	}
 	FingerUp();
 }
@@ -1183,7 +1237,10 @@ public:
 	// Turn the overlay into something to arrange rather than something to press. In this mode
 	// every control that belongs to `context` is on screen whatever the game is doing, nothing is
 	// pressed, and dragging one moves it - see Touch.
-	void SetEditing(bool editing, VCS::VCSInputContext context);
+	//
+	// `picker` arranges the controls a menu the game runs in the world puts up - see the pick.* rows.
+	// Not a context, so it rides beside one.
+	void SetEditing(bool editing, VCS::VCSInputContext context, bool picker = false);
 
 private:
 	bool ShouldShow(const ControlSpec &spec, const VCS::VCSTouchState &state) const;
@@ -1195,6 +1252,11 @@ private:
 	void PlaceButton(VCSTouchButton *button) const;
 	// Where the finger went, in the dp the offsets are kept in.
 	void DragPicked(float x, float y);
+	// A tap rather than a drag: the next size along - see kTouchSizeSteps.
+	void ResizePicked();
+	// Push a control back onto the screen if `placed` - where it is, or is about to be - hangs
+	// off an edge. A control half off the edge is a control that cannot be pressed.
+	void KeepOnScreen(VCSTouchButton *button, const Bounds &placed);
 
 	std::vector<VCSTouchButton *> buttons_;
 	// The subset anchored to the radar rather than to a screen edge, kept so they can be moved
@@ -1215,12 +1277,15 @@ private:
 	// choice the player makes rather than something the game is doing - the game is paused.
 	bool editing_ = false;
 	VCS::VCSInputContext editContext_ = VCS::VCSInputContext::OnFoot;
+	bool editPicker_ = false;
 	VCSTouchButton *picked_ = nullptr;
 	int pickedPointer_ = -1;
 	float pickedGrabX_ = 0.0f;
 	float pickedGrabY_ = 0.0f;
 	float pickedStartDx_ = 0.0f;
 	float pickedStartDy_ = 0.0f;
+	// Whether the finger has gone far enough to be a drag. Until it has, lifting it is a tap.
+	bool pickedMoved_ = false;
 };
 
 VCSTouchLayout::VCSTouchLayout(float xres, float yres, bool *pause, UI::LayoutParams *layoutParams)
@@ -1303,8 +1368,11 @@ void VCSTouchLayout::PlaceHudViews() {
 // screen changes shape.
 void VCSTouchLayout::PlaceButton(VCSTouchButton *button) const {
 	const ControlSpec &spec = button->Spec();
-	const float r = spec.radius * scale_;
 	const VCS::VCSTouchOffset offset = VCS::TouchOffsetFor(spec.id);
+	// Grown or shrunk about its CENTRE, which is where the row and the offset put it - so tapping
+	// a control through its sizes in the editor never walks it across the screen.
+	button->SetSize(offset.size);
+	const float r = spec.radius * scale_ * offset.size;
 	const float x = spec.x * scale_ + offset.dx;
 	const float y = spec.y * scale_ + offset.dy;
 
@@ -1341,6 +1409,7 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.hide & CondScoped) && state.scoped) ||
 			((spec.hide & CondLockedOn) && state.lockedOn) ||
 			((spec.hide & CondScopeCannotShoot) && state.scopeCannotShoot) ||
+			((spec.hide & CondPicker) && state.picker) ||
 			((spec.hide & CondPlane) && state.vehicleClass == VCS::VehicleClass::Plane)) {
 		return false;
 	}
@@ -1353,6 +1422,8 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.cond & CondCameraUp) && state.cameraUp) ||
 			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike) ||
 			((spec.cond & CondMapPage) && state.mapPage) ||
+			((spec.cond & CondPicker) && state.picker) ||
+			((spec.cond & CondPickerCycle) && state.pickerCycle) ||
 			((spec.cond & CondPlane) && state.vehicleClass == VCS::VehicleClass::Plane);
 	}
 	// Steering by stick means no arrows, and by arrows means no stick. Both at once would be two
@@ -1430,6 +1501,8 @@ void VCSTouchLayout::Update() {
 		// Something that shoots in hand, so the armed-only controls are there to be moved - and
 		// their melee counterparts are not, which is the same screen the player will see.
 		pretend.armed = true;
+		pretend.picker = editPicker_;
+		pretend.pickerCycle = editPicker_;
 		for (VCSTouchButton *button : buttons_) {
 			const bool show = ShouldShow(button->Spec(), pretend);
 			button->SetVisibility(show ? V_VISIBLE : V_GONE);
@@ -1522,9 +1595,10 @@ void VCSTouchLayout::Update() {
 	}
 }
 
-void VCSTouchLayout::SetEditing(bool editing, VCS::VCSInputContext context) {
+void VCSTouchLayout::SetEditing(bool editing, VCS::VCSInputContext context, bool picker) {
 	editing_ = editing;
 	editContext_ = context;
+	editPicker_ = picker;
 	picked_ = nullptr;
 	pickedPointer_ = -1;
 	for (VCSTouchButton *button : buttons_) {
@@ -1554,25 +1628,68 @@ void VCSTouchLayout::SetEditing(bool editing, VCS::VCSInputContext context) {
 
 // Move the picked control to where the finger is, and remember it.
 //
-// The offset is kept in the direction the control is ANCHORED in, which is why the sign flips on
-// a right- or bottom-anchored row: dragging left has to increase a distance measured from the
-// right edge, or the control would run away from the finger.
+// The offset is the finger's own movement, the same sign whichever edge the control hangs from -
+// PlaceButton adds it to the row's SIGNED position, where a right-anchored row is already a
+// negative number, so moving left already makes it more negative and further from the right edge.
+// The first build flipped the sign for right- and bottom-anchored rows as well, which flipped it
+// twice: every control in the right-hand cluster ran away from the finger, measured dragging
+// PICKUP left and watching it pile into the right edge.
 void VCSTouchLayout::DragPicked(float x, float y) {
 	if (!picked_) {
 		return;
 	}
 	const ControlSpec &spec = picked_->Spec();
-	const float signX = (spec.anchor == Anchor::Radar || spec.x >= 0.0f) ? 1.0f : -1.0f;
-	const float signY = (spec.anchor == Anchor::Radar || spec.y >= 0.0f) ? 1.0f : -1.0f;
-	const float dx = pickedStartDx_ + (x - pickedGrabX_) * signX;
-	const float dy = pickedStartDy_ + (y - pickedGrabY_) * signY;
+	const float dx = pickedStartDx_ + (x - pickedGrabX_);
+	const float dy = pickedStartDy_ + (y - pickedGrabY_);
 	VCS::SetTouchOffset(spec.id, dx, dy);
 	PlaceButton(picked_);
 
 	// Then keep it on the screen, measured against WHERE IT LANDED rather than against an
-	// estimate: a row anchored to the radar has no other way of knowing, and a control half off
-	// the edge is a control that cannot be pressed.
-	const Bounds &placed = picked_->GetBounds();
+	// estimate: a row anchored to the radar has no other way of knowing.
+	KeepOnScreen(picked_, picked_->GetBounds());
+}
+
+// The sizes a tap steps a control through, smallest to largest. 1 is the row's own size, so a
+// control nobody has tapped is in the middle of the ladder with room either way.
+constexpr float kTouchSizeSteps[] = { 0.7f, 0.85f, 1.0f, 1.15f, 1.3f, 1.5f };
+
+// Up to the largest and then back down to the smallest, one size a tap, which is how the
+// trilogy's phone ports size a control: no slider, nothing else to find, and a size gone past is
+// a few taps from coming round again. The direction is the control's own and is not kept - a
+// control at either end turns round by itself, which is the only place it has to.
+void VCSTouchLayout::ResizePicked() {
+	if (!picked_) {
+		return;
+	}
+	const ControlSpec &spec = picked_->Spec();
+	const float current = VCS::TouchOffsetFor(spec.id).size;
+	const int last = (int)ARRAY_SIZE(kTouchSizeSteps) - 1;
+	int index = 0;
+	for (int i = 1; i <= last; i++) {
+		if (std::fabs(kTouchSizeSteps[i] - current) < std::fabs(kTouchSizeSteps[index] - current)) {
+			index = i;
+		}
+	}
+	if (index >= last) {
+		picked_->growing_ = false;
+	} else if (index <= 0) {
+		picked_->growing_ = true;
+	}
+	index += picked_->growing_ ? 1 : -1;
+
+	// The centre stays where it is, so where the control is about to be is that centre and the new
+	// radius - its bounds will not catch up until the next layout pass, and a control grown into
+	// the screen's edge has to be pushed back now rather than after the player has let go.
+	const float cx = picked_->GetBounds().centerX();
+	const float cy = picked_->GetBounds().centerY();
+	VCS::SetTouchSize(spec.id, kTouchSizeSteps[index]);
+	PlaceButton(picked_);
+	const float r = picked_->Radius();
+	KeepOnScreen(picked_, Bounds(cx - r, cy - r, r * 2.0f, r * 2.0f));
+}
+
+void VCSTouchLayout::KeepOnScreen(VCSTouchButton *button, const Bounds &placed) {
+	const ControlSpec &spec = button->Spec();
 	float clampX = 0.0f, clampY = 0.0f;
 	if (placed.x < 0.0f) {
 		clampX = -placed.x;
@@ -1585,8 +1702,9 @@ void VCSTouchLayout::DragPicked(float x, float y) {
 		clampY = yres_ - placed.y2();
 	}
 	if (clampX != 0.0f || clampY != 0.0f) {
-		VCS::SetTouchOffset(spec.id, dx + clampX * signX, dy + clampY * signY);
-		PlaceButton(picked_);
+		const VCS::VCSTouchOffset offset = VCS::TouchOffsetFor(spec.id);
+		VCS::SetTouchOffset(spec.id, offset.dx + clampX, offset.dy + clampY);
+		PlaceButton(button);
 	}
 }
 
@@ -1612,6 +1730,7 @@ bool VCSTouchLayout::Touch(const TouchInput &input) {
 				const VCS::VCSTouchOffset offset = VCS::TouchOffsetFor(button->Spec().id);
 				pickedStartDx_ = offset.dx;
 				pickedStartDy_ = offset.dy;
+				pickedMoved_ = false;
 				if (VCS::TouchSettings().haptics && g_Config.bHapticFeedback) {
 					System_Vibrate(HAPTIC_VIRTUAL_KEY);
 				}
@@ -1620,10 +1739,25 @@ bool VCSTouchLayout::Touch(const TouchInput &input) {
 			return picked_ != nullptr;
 		}
 		if ((input.flags & TouchInputFlags::MOVE) && picked_ && input.id == pickedPointer_) {
-			DragPicked(input.x, input.y);
+			// A finger never lands perfectly still, so a press only becomes a drag once it has
+			// travelled - otherwise every tap would also nudge the control by a pixel or two.
+			if (!pickedMoved_) {
+				const float tx = input.x - pickedGrabX_;
+				const float ty = input.y - pickedGrabY_;
+				pickedMoved_ = tx * tx + ty * ty > kTapSlop * kTapSlop;
+			}
+			if (pickedMoved_) {
+				DragPicked(input.x, input.y);
+			}
 			return true;
 		}
 		if ((input.flags & TouchInputFlags::UP) && input.id == pickedPointer_) {
+			if (!pickedMoved_) {
+				ResizePicked();
+				if (VCS::TouchSettings().haptics && g_Config.bHapticFeedback) {
+					System_Vibrate(HAPTIC_VIRTUAL_KEY);
+				}
+			}
 			picked_ = nullptr;
 			pickedPointer_ = -1;
 			return true;
@@ -1661,6 +1795,7 @@ private:
 
 	VCSTouchLayout *layout_ = nullptr;
 	VCS::VCSInputContext context_ = VCS::VCSInputContext::OnFoot;
+	bool picker_ = false;
 };
 
 void VCSTouchEditScreen::DrawBackground(UIContext &dc) {
@@ -1692,15 +1827,19 @@ void VCSTouchEditScreen::CreateViews() {
 	// drag.
 	layout_ = root_->Add(new VCSTouchLayout(bounds.w, bounds.h, nullptr,
 		new AnchorLayoutParams(FILL_PARENT, FILL_PARENT, 0.0f, 0.0f, 0.0f, 0.0f)));
-	layout_->SetEditing(true, context_);
+	layout_->SetEditing(true, context_, picker_);
 
 	// Which set of controls is being arranged. They are per-context, so there is no one screen to
 	// lay out - and a player who never drives should not have to look at a car's pedals.
-	static const struct { const char *label; VCS::VCSInputContext context; } kTabs[] = {
-		{ "ON FOOT", VCS::VCSInputContext::OnFoot },
-		{ "AIMING", VCS::VCSInputContext::Aiming },
-		{ "DRIVING", VCS::VCSInputContext::InVehicle },
-		{ "FLYING", VCS::VCSInputContext::InAircraft },
+	//
+	// SHOPS is the wardrobe, the Empire site and the rest of the menus the game runs in the world.
+	// Not a context of its own - the player is on foot - so it is that context with the picker up.
+	static const struct { const char *label; VCS::VCSInputContext context; bool picker; } kTabs[] = {
+		{ "ON FOOT", VCS::VCSInputContext::OnFoot, false },
+		{ "AIMING", VCS::VCSInputContext::Aiming, false },
+		{ "DRIVING", VCS::VCSInputContext::InVehicle, false },
+		{ "FLYING", VCS::VCSInputContext::InAircraft, false },
+		{ "SHOPS", VCS::VCSInputContext::OnFoot, true },
 	};
 	LinearLayout *bar = root_->Add(new LinearLayout(ORIENT_HORIZONTAL,
 		new AnchorLayoutParams(FILL_PARENT, WRAP_CONTENT, 0.0f, 0.0f, 0.0f, NONE)));
@@ -1708,8 +1847,10 @@ void VCSTouchEditScreen::CreateViews() {
 	for (const auto &tab : kTabs) {
 		Choice *choice = bar->Add(new Choice(tab.label, new LinearLayoutParams(1.0f)));
 		const VCS::VCSInputContext target = tab.context;
-		choice->OnClick.Add([this, target](UI::EventParams &e) {
+		const bool picker = tab.picker;
+		choice->OnClick.Add([this, target, picker](UI::EventParams &e) {
 			context_ = target;
+			picker_ = picker;
 			RecreateViews();
 		});
 	}
@@ -1726,7 +1867,7 @@ void VCSTouchEditScreen::CreateViews() {
 			TriggerFinish(DR_OK);
 		});
 
-	root_->Add(new TextView("Drag a control to move it.", ALIGN_CENTER, false,
+	root_->Add(new TextView("Drag a control to move it. Tap it to change its size.", ALIGN_CENTER, false,
 		new AnchorLayoutParams(FILL_PARENT, WRAP_CONTENT, 0.0f, NONE, 0.0f, 8.0f)));
 }
 

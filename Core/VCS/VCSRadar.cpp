@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "Core/VCS/VCSAddresses.h"
@@ -150,6 +151,40 @@ bool RadarOnScreen() {
 		return false;
 	}
 	return true;
+}
+
+HelpLineControls ReadHelpLineControls() {
+	HelpLineControls out;
+	const std::optional<u32> hud = ReadAddrU32(VCSAddr::HudObject);
+	if (!hud || *hud == 0) {
+		return out;
+	}
+	// Both witnesses - see kVCSHudHelpSource. An empty displayed line means no line, whatever the
+	// pointer still says.
+	const std::optional<u16> shown = ReadU16(*hud + kVCSHudHelpText);
+	const std::optional<u32> source = ReadU32(*hud + kVCSHudHelpSource);
+	if (!shown || *shown == 0 || !source || *source == 0) {
+		return out;
+	}
+
+	// The tokens, in the PSP's own names. AM is the shop family - left, right, buy, exit - and
+	// VECRS is the radio's left and right, which the Empire site and the movie picker borrow for
+	// their own stepping. A GXT line is UTF-16 and the help box takes 256 characters, so that is
+	// as far as this reads.
+	std::string text;
+	for (u32 i = 0; i < 256; i++) {
+		const std::optional<u16> c = ReadU16(*source + i * 2);
+		if (!c || *c == 0) {
+			break;
+		}
+		text.push_back(*c < 0x80 ? (char)*c : '?');
+	}
+	auto names = [&text](const char *token) {
+		return text.find(token) != std::string::npos;
+	};
+	out.choose = names("~AMBUY~") || names("~AMEXI~");
+	out.cycle = names("~AMLEF~") || names("~AMRIG~") || names("~VECRS~");
+	return out;
 }
 
 VCSRadarSettings &RadarSettings() {

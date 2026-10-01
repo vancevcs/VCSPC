@@ -532,8 +532,18 @@ static void VCSSquashScissor(ViewportAndScissor &out, float frameWidth, float fr
 	const float centre = frameOriginX + frameWidth * 0.5f;
 	// Rounded outward rather than truncated: the clip is in whole pixels and the content it is
 	// following is not, so losing a fraction off each edge would shave the HUD's own border.
-	const float right = centre + (out.scissorX + out.scissorW - centre) * VCS::g_widescreenSquash;
-	const float left = centre + (out.scissorX - centre) * VCS::g_widescreenSquash;
+	float right = centre + (out.scissorX + out.scissorW - centre) * VCS::g_widescreenSquash;
+	float left = centre + (out.scissorX - centre) * VCS::g_widescreenSquash;
+	// A fill the transform left on the frame's edge keeps its clip there too, or the clip would
+	// cut it back to exactly where the squash would have put it - see VCS::g_widescreenEdgeFill.
+	if (VCS::g_widescreenEdgeFill) {
+		if (out.scissorX <= frameOriginX + 0.5f) {
+			left = (float)out.scissorX;
+		}
+		if (out.scissorX + out.scissorW >= frameOriginX + frameWidth - 0.5f) {
+			right = (float)(out.scissorX + out.scissorW);
+		}
+	}
 	out.scissorX = (int)floorf(left);
 	out.scissorW = std::max(0, (int)ceilf(right) - out.scissorX);
 }

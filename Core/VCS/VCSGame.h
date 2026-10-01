@@ -318,6 +318,10 @@ extern bool g_widescreenSquashesHud;
 // map sideways inside the ring, which is exactly how it was reported - "the minimap content is
 // displaced by one half".
 extern bool g_widescreenSquashedDraw;
+// ... and whether it was a flat fill reaching the frame's edge, which the transform squashed
+// everywhere except at that edge. The scissor keeps the same edge, for the same reason it follows
+// the squash at all. See the edge-fill note in SoftwareTransform.
+extern bool g_widescreenEdgeFill;
 
 inline bool WidescreenActive() { return g_widescreenSquash < 0.999f; }
 

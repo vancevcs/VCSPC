@@ -133,6 +133,19 @@ bool RouteIsMission();
 // is the one state where everything else this reads stays valid while the radar is gone.
 bool RadarOnScreen();
 
+// What the help line on screen asks the player to press, read from the game's own text - the GXT
+// entry it was printed from, with its control tokens intact - rather than from what is drawn.
+//
+// It is how the phone overlay knows a menu the game runs in the world is open: the wardrobe, the
+// Empire site's business picker, the movie and race pickers, the shop and the "Pay $X?" prompts.
+// None of them has a mode or a flag of its own anyone has found, and every one of them prints a
+// line naming its controls, which is the more useful fact anyway - it says which buttons to put up.
+struct HelpLineControls {
+	bool choose = false;  // ~AMBUY~ or ~AMEXI~: a confirm and a way out
+	bool cycle = false;   // ~AMLEF~, ~AMRIG~ or ~VECRS~: something to step through
+};
+HelpLineControls ReadHelpLineControls();
+
 // The line is drawn while DRIVING a road vehicle and at no other time - not on foot, not in a
 // boat, not in the air. See the gate in RadarTick: the route is a path through the road graph, so
 // anywhere those roads are not the way to travel it is not merely useless but wrong about the
