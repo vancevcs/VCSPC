@@ -132,14 +132,30 @@ def sanitise_vcs_ini(text, force=None):
     return "\n".join(out).rstrip() + "\n"
 
 
-def sanitise_ini(text, extra_force=None):
+def sanitise_ini(text, extra_force=None, add=None):
+    """`add` is {section: {key: value}} for keys the dev ini never wrote at all - a default this
+    machine never had a reason to save, like ScreenRotation on Windows. Forcing only rewrites a
+    line that is already there, so without it a phone would get whatever its platform defaults to."""
     forced = dict(INI_FORCE, **(extra_force or {}))
+    add = {sec: dict(keys) for sec, keys in (add or {}).items()}
+    section = None
+    for line in text.splitlines():
+        # PPSSPP writes a byte order mark, which sits in front of the first section's name.
+        stripped = line.strip().lstrip("\ufeff")
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+        elif "=" in stripped and section in add:
+            add[section].pop(stripped.split("=", 1)[0].strip(), None)
     out = []
     section = None
     for line in text.splitlines():
-        stripped = line.strip()
+        stripped = line.strip().lstrip("\ufeff")
         if stripped.startswith("[") and stripped.endswith("]"):
             section = stripped[1:-1]
+            if section not in INI_DROP_SECTIONS:
+                out.append(line)
+                out.extend(f"{key} = {value}" for key, value in add.pop(section, {}).items())
+                continue
         if section in INI_DROP_SECTIONS:
             continue
         key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
@@ -149,6 +165,8 @@ def sanitise_ini(text, extra_force=None):
             out.append(f"{key} = {forced[key]}")
             continue
         out.append(line)
+    if any(add.values()):
+        fail(f"no section to add {add} to in ppsspp.ini")
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -341,15 +359,15 @@ def build(out_dir, make_zip, with_textures):
 # The memory stick is the same on every platform, and so is everything said about it above: the
 # keyboard text, the tuned settings with this machine taken out of them, and the HD pack.
 # The converted pack, if Tools/vcsktx2.py has been run. A phone cannot read the .dds pack at all
-# - see that script - so on Android this is the only pack worth shipping, and its absence is worth
+# - see that script - so on a phone this is the only pack worth shipping, and its absence is worth
 # saying out loud rather than quietly shipping 748MB the GPU will skip.
 KTX2_PACK = ROOT / "dist" / "textures-ktx2" / "ULUS10160"
 
 
-def stage_memstick(out_dir, with_textures, android=False):
+def stage_memstick(out_dir, with_textures, phone=False, ini_add=None):
     # The keyboard text names keys - LEFT MOUSE, WASD - which on a phone is worse than the PSP's
     # own button names the game falls back to without it. A touch vocabulary replaces it later.
-    if not android:
+    if not phone:
         gxt = ROOT / "memstick" / "PSP" / "VCS" / "ENGLISH.GXT"
         vcs_dir = out_dir / "memstick" / "PSP" / "VCS"
         vcs_dir.mkdir(parents=True)
@@ -362,7 +380,7 @@ def stage_memstick(out_dir, with_textures, android=False):
         fail("memstick/PSP/SYSTEM/ppsspp.ini is missing - it is what the package ships")
     (system / "ppsspp.ini").write_text(
         sanitise_ini(dev_ini.read_text(encoding="utf-8", errors="replace"),
-                     ANDROID_INI_FORCE if android else None), encoding="utf-8")
+                     PHONE_INI_FORCE if phone else None, ini_add), encoding="utf-8")
 
     # Everything else the running build keeps in SYSTEM, so a packaged copy is the same program
     # in the same state - see SYSTEM_SKIP_NAMES.
@@ -374,7 +392,7 @@ def stage_memstick(out_dir, with_textures, android=False):
         if entry.name == "vcs.ini":
             (system / "vcs.ini").write_text(
                 sanitise_vcs_ini(entry.read_text(encoding="utf-8", errors="replace"),
-                                 ANDROID_VCS_INI_FORCE if android else None),
+                                 PHONE_VCS_INI_FORCE if phone else None),
                 encoding="utf-8")
             continue
         shutil.copy2(entry, system / entry.name)
@@ -383,7 +401,7 @@ def stage_memstick(out_dir, with_textures, android=False):
     # `new/` is where SaveNewTextures dumps and is referenced by nothing in textures.ini.
     if with_textures:
         src_tex = ROOT / "memstick" / "PSP" / "TEXTURES" / "ULUS10160"
-        if android:
+        if phone:
             if not KTX2_PACK.is_dir():
                 fail("the converted pack is missing - run Tools/vcsktx2.py, or pass --no-textures."
                      " The .dds pack cannot be used on a phone: the GPU cannot sample BC7 and"
@@ -778,8 +796,8 @@ ANDROID_APK_NAME = "GTA Vice City Stories.apk"
 ANDROID_FOLDER = "GTAVCS"
 
 # What a phone needs different from the tuned desktop config. The rule stays "keep everything and
-# name what changes" - see INI_FORCE - and these are the changes.
-ANDROID_INI_FORCE = {
+# name what changes" - see INI_FORCE - and these are the changes. iOS takes the same set.
+PHONE_INI_FORCE = {
     "CacheFullIsoInRam": "False",    # 1.6 GB of RAM on a PC; the whole phone has 6
     "InternalResolution": "2",       # 960x544. Auto would pick 4x on a 1080p screen; raise it once measured
     "DisplayStretch": "True",        # the widescreen fix renders pre-corrected for this
@@ -789,7 +807,7 @@ ANDROID_INI_FORCE = {
 }
 # Both of these capture and transform the scene on the CPU every frame. Start a phone at the cheap
 # end and raise them once the frame rate is known - the same defaults the code gives a phone.
-ANDROID_VCS_INI_FORCE = {
+PHONE_VCS_INI_FORCE = {
     "Shadows": "0",
     "Water": "1",
 }
@@ -887,12 +905,286 @@ def build_android(out_dir, make_zip, with_textures):
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
 
-    stage_memstick(out_dir / ANDROID_FOLDER, with_textures, android=True)
+    stage_memstick(out_dir / ANDROID_FOLDER, with_textures, phone=True)
     finish_package(out_dir, make_zip, ANDROID_README)
     # Beside the package, not in it - see the note at the top of this section.
     apk = out_dir.parent / ANDROID_APK_NAME
     shutil.copy2(ANDROID_APK, apk)
     print(f"copied the APK -> {apk}")
+
+
+# --- iOS ----------------------------------------------------------------------------------------
+#
+# An .ipa and a folder of game files, two downloads for the reason the Android ones are two: the app
+# changes far more often than the 700MB of textures. The folder is the Android one with GTAVCS taken
+# off the top - on iOS the game's folder is the app's own Documents, which NativeInit uses and which
+# Finder's file sharing and the Files app both show, so a player copies `memstick` and the disc
+# straight into it.
+#
+# Built by b-ios-vcs.sh, unsigned. Everything that makes it this game rather than PPSSPP happens here,
+# the same split the Mac package makes: the name, the icon, the launch screen, and an ad hoc
+# signature. Nobody without an Apple developer account can sign for a device, so the .ipa is for a
+# sideloading tool - AltStore, SideStore, Sideloadly - which re-signs it with the player's own
+# Apple ID. TrollStore installs it as it is.
+IOS_BUILT_APP = ROOT / "build-ios" / "Release-iphoneos" / "PPSSPP.app"
+IOS_MOLTENVK = ROOT / "ext" / "vulkan" / "iOS" / "Frameworks" / "libMoltenVK.dylib"
+IOS_ICONS = ROOT / "ios" / "vcs.xcassets"
+IOS_LAUNCH_STORYBOARD = ROOT / "ios" / "Launch Screen.storyboard"
+IOS_APP_NAME = "ViceCityStories.app"
+# What the home screen shows, and the Files app names the folder after. The Android launcher's name,
+# and for the same reason: "GTA Vice City Stories" is cut off under an icon.
+IOS_DISPLAY_NAME = "Vice City Stories"
+IOS_BUNDLE_ID = "io.github.vancevcs.vcsmobile"
+IOS_MIN_OS = "15.0"                  # cmake/Toolchains/ios.cmake - the oldest Xcode 27 builds for
+IOS_IPA_NAME = "GTA Vice City Stories.ipa"
+IOS_FOLDER = "GTA Vice City Stories iOS"
+# Either landscape, never portrait. Android gets that from its platform default; iOS's default is
+# to follow the phone round, and the desktop ini never wrote the key down to be forced.
+IOS_INI_ADD = {"General": {"ScreenRotation": "5"}}
+# get-task-allow is what lets a JIT enabler attach to the app as a debugger, which is the only way
+# a sideloaded app gets to generate code. A re-signing tool keeps it from the free developer
+# profile anyway; this is for TrollStore, which keeps whatever is here.
+IOS_ENTITLEMENTS = {"get-task-allow": True}
+
+IOS_README = """GTA: Vice City Stories - iPhone
+===============================
+
+A build of PPSSPP that only plays Vice City Stories, for an iPhone or an
+iPad.  Touch controls of its own, a menu of its own, and the HD texture pack
+converted to a format the phone's GPU can read.
+
+It needs iOS 15 or later.
+
+
+Installing the app
+------------------
+
+"GTA Vice City Stories.ipa" is a separate download beside this zip.  It is
+not signed by Apple, so it goes on with a sideloading tool, which signs it
+with your own Apple ID:
+
+- AltStore or SideStore, on the phone
+- Sideloadly, from a Mac or a PC with the phone plugged in
+- TrollStore, if your iOS version has it
+
+With a free Apple ID the signature lasts seven days.  AltStore and SideStore
+refresh it for you; refreshing or installing a newer .ipa over the old one
+keeps your saves and settings.
+
+
+Setting it up
+-------------
+
+1. Open the app once, then close it again - swipe it away in the app
+   switcher.  That gives it a folder.
+
+2. Copy the "memstick" folder from this zip into that folder, and replace
+   the one the app made when it asks:
+
+   - On the phone: unzip this in the Files app, then move "memstick" to
+     Files -> On My iPhone -> Vice City Stories.
+   - From a Mac: plug the phone in, select it in Finder, open Files, and
+     drag "memstick" onto Vice City Stories.  On Windows the Apple Devices
+     app has the same list.
+
+3. Put your own copy of the game in the same folder, beside memstick.  The
+   USA disc, ULUS10160, as .iso or .cso.  It is not included and cannot
+   be.
+
+4. Open the app.  The game starts by itself once it finds the disc.
+
+Copy things in while the app is closed.  It writes its settings into
+memstick as it goes to the background, and would write over the ones you
+have just copied.
+
+
+Speed
+-----
+
+iOS does not let an app it did not sign generate code, which is how PPSSPP
+normally runs a PSP game quickly.  Without that the game runs on PPSSPP's
+interpreter, which is slower.  If you have a JIT enabler set up for your
+iOS version, such as StikDebug, start the game through it.
+
+OPTIONS -> DISPLAY SETUP starts with shadows off and water at MEDIUM, which
+is the cheap end.  Turn them up once you know how the game runs on yours.
+
+WIDESCREEN fills a screen wider than the PSP's without stretching anything.
+CROP trims the top and bottom of the view.  WIDER shows about 20% more of
+the world instead, which looks better standing still - but the game only
+loads what it expects to draw, so scenery appears and vanishes at the edges
+as you turn.
+
+
+The controls
+------------
+
+They change with what you are doing - on foot, aiming, driving, flying, and
+on the game's own map and stats pages - so what is on screen is what there
+is to press.  A few that are not obvious:
+
+- One button is jump AND sprint.  Hold it to sprint, tap it twice to jump.
+- TARGET is a toggle, not a button to hold down.
+- In a car, the two buttons on the left look to that side and fire, which is
+  how a drive-by works.
+- Tap the radar to open the menu.  Tap the weapon in the corner to change
+  weapon.
+- During a cutscene the controls come off and you get SKIP and PAUSE.
+
+OPTIONS -> TOUCH CONTROLS has size, look speed and steering, and ARRANGE
+CONTROLS, which lets you drag every button to wherever your thumbs are.
+
+A controller works as well - an Xbox or PlayStation pad over Bluetooth -
+with the layout the PC build uses for a pad: the triggers aim and fire, the
+right stick looks, Start opens the menu.
+
+The game's help text still names PSP buttons - "press the X button" - rather
+than naming a control on screen.
+
+
+The HD textures
+---------------
+
+Included, converted to KTX2/UASTC, which the phone turns into a format its
+GPU can read as each texture loads.  OPTIONS -> DISPLAY SETUP -> TEXTURE
+QUALITY switches between these and the PSP's own.
+
+
+Licence
+-------
+
+PPSSPP is free software under the GNU GPL, version 2 or later, and so is
+this build - see LICENSE.TXT.  That licence entitles you to its complete
+source code.
+
+    Upstream PPSSPP:  https://github.com/hrydgard/ppsspp
+
+The app also carries MoltenVK (Apache 2.0).  The Pricedown typeface used by
+the menu is by Ray Larabie.  No game data of any kind is included in this
+download.
+"""
+
+
+def ios_version():
+    """git_version() pared down to what CFBundleVersion accepts: dot-separated numbers."""
+    numbers = git_version().split("-")[0].split(".")
+    if not all(n.isdigit() for n in numbers):
+        return "0"
+    return ".".join(str(int(n)) for n in numbers[:3])
+
+
+def build_ios_app(app):
+    """PPSSPP.app as this game: the name, the icon, the launch screen, MoltenVK, a signature."""
+    shutil.copytree(IOS_BUILT_APP, app, symlinks=True)
+
+    for skip in ASSET_SKIP:
+        shutil.rmtree(app / "assets" / skip, ignore_errors=True)
+
+    # Where VulkanLoader looks first - "@executable_path/Frameworks". The CMake sideload target
+    # never copies it in, which is why upstream's b-ios.sh does it by hand too. Without it the
+    # app falls back to OpenGL, where the shadows and the water do not exist.
+    (app / "Frameworks").mkdir(exist_ok=True)
+    shutil.copy2(IOS_MOLTENVK, app / "Frameworks" / IOS_MOLTENVK.name)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        # The launch screen. CMake's Xcode generator lists the storyboard in the target and never
+        # puts it in a build phase, so the bundle has none - and an app with no launch storyboard
+        # is a legacy app to iOS, run letterboxed in an iPhone 5 sized window. PPSSPP's own is
+        # PPSSPP's blue; the game opens on black logos, so this one is black.
+        board = IOS_LAUNCH_STORYBOARD.read_text(encoding="utf-8")
+        start = board.find('<color key="backgroundColor"')
+        end = board.find("/>", start)
+        if start < 0 or end < 0:
+            fail(f"{IOS_LAUNCH_STORYBOARD.name} has no background colour to replace")
+        board = (board[:start] + '<color key="backgroundColor" red="0" green="0" blue="0" '
+                 'alpha="1" colorSpace="custom" customColorSpace="sRGB"' + board[end:])
+        black_board = tmp / IOS_LAUNCH_STORYBOARD.name
+        black_board.write_text(board, encoding="utf-8")
+        run("xcrun", "ibtool", "--compile", app / "Launch Screen.storyboardc", black_board,
+            "--target-device", "iphone", "--target-device", "ipad",
+            "--minimum-deployment-target", IOS_MIN_OS)
+
+        # The icon, compiled from the fork's own catalog over PPSSPP's.
+        for old in list(app.glob("AppIcon*.png")) + [app / "Assets.car"]:
+            old.unlink(missing_ok=True)
+        partial = tmp / "icons.plist"
+        run("xcrun", "actool", IOS_ICONS, "--compile", app, "--platform", "iphoneos",
+            "--minimum-deployment-target", IOS_MIN_OS, "--app-icon", "AppIcon",
+            "--target-device", "iphone", "--target-device", "ipad",
+            "--output-partial-info-plist", partial)
+        with open(partial, "rb") as f:
+            icons = plistlib.load(f)
+
+        plist_path = app / "Info.plist"
+        with open(plist_path, "rb") as f:
+            plist = plistlib.load(f)
+        for key in MAC_PLIST_DROP + ("UILaunchImageFile",):
+            plist.pop(key, None)
+        version = ios_version()
+        plist.update(icons)
+        plist.update({
+            "CFBundleName": IOS_DISPLAY_NAME,
+            "CFBundleDisplayName": IOS_DISPLAY_NAME,
+            "CFBundleIdentifier": IOS_BUNDLE_ID,
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
+            "MinimumOSVersion": IOS_MIN_OS,
+            "UILaunchStoryboardName": "Launch Screen",
+            # Both of these, so the app's folder shows in the Files app as well as in Finder.
+            "UIFileSharingEnabled": True,
+            "LSSupportsOpeningDocumentsInPlace": True,
+            "UISupportedInterfaceOrientations": [
+                "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"],
+            "UISupportedInterfaceOrientations~ipad": [
+                "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"],
+        })
+        with open(plist_path, "wb") as f:
+            plistlib.dump(plist, f, fmt=plistlib.FMT_BINARY)
+
+        # Launch images for a 4-inch screen, from before launch storyboards. The storyboard
+        # replaces them, and they are PPSSPP's.
+        for old in app.glob("Default*.png"):
+            old.unlink()
+
+        # Ad hoc: no identity, which is all anyone without a developer account has. MoltenVK first,
+        # because signing the bundle seals what is inside it.
+        entitlements = tmp / "app.entitlements"
+        with open(entitlements, "wb") as f:
+            plistlib.dump(IOS_ENTITLEMENTS, f)
+        run("xattr", "-cr", app)
+        run("codesign", "--force", "--sign", "-", "--timestamp=none",
+            app / "Frameworks" / IOS_MOLTENVK.name)
+        run("codesign", "--force", "--sign", "-", "--timestamp=none",
+            "--entitlements", entitlements, app)
+        run("codesign", "--verify", "--strict", app)
+
+
+def build_ios(out_dir, make_zip, with_textures):
+    if not IOS_BUILT_APP.is_dir():
+        fail(f"{IOS_BUILT_APP.relative_to(ROOT)} not found - run ./b-ios-vcs.sh first")
+    if not IOS_MOLTENVK.is_file():
+        fail(f"{IOS_MOLTENVK.relative_to(ROOT)} is missing")
+
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+
+    # Beside the package, not in it - the APK's reasoning.
+    ipa = out_dir.parent / IOS_IPA_NAME
+    with tempfile.TemporaryDirectory() as tmp:
+        payload = Path(tmp) / "Payload"
+        payload.mkdir()
+        build_ios_app(payload / IOS_APP_NAME)
+        ipa.unlink(missing_ok=True)
+        # An .ipa is a zip with Payload/ at its root. No resource forks or extended attributes:
+        # they would land in the archive as ._ files inside a signed bundle.
+        run("ditto", "-c", "-k", "--norsrc", "--noextattr", "--noqtn", "--keepParent", payload, ipa)
+    print(f"wrote the .ipa, {ipa.stat().st_size / (1024 * 1024):.1f} MB -> {ipa}")
+
+    stage_memstick(out_dir, with_textures, phone=True, ini_add=IOS_INI_ADD)
+    finish_package(out_dir, make_zip, IOS_README)
 
 
 def main():
@@ -908,7 +1200,16 @@ def main():
                     help="skip the separate saves package")
     ap.add_argument("--android", action="store_true",
                     help="package the Android APK and its GTAVCS folder instead")
+    ap.add_argument("--ios", action="store_true",
+                    help="package the iOS .ipa and its game files instead")
     args = ap.parse_args()
+    if args.ios:
+        out = args.out
+        if out == ap.get_default("out"):
+            out = str(ROOT / "dist" / IOS_FOLDER)
+        # No saves package, for the Android reason.
+        build_ios(Path(out), args.zip, not args.no_textures)
+        return
     if args.android:
         out = args.out
         if out == ap.get_default("out"):

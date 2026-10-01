@@ -101,7 +101,8 @@ bool IsGameBuild();
 // looked for. On Windows that is the exe's own folder, as it always was. On macOS the executable
 // sits inside its .app bundle, and the folder the player can see is the one holding the bundle.
 // On Android there is no exe folder the player can see, so NativeInit names one with
-// SetGameFolder before anything asks - GTAVCS at the root of storage.
+// SetGameFolder before anything asks - GTAVCS at the root of storage. On iOS it is the app's own
+// Documents folder, which is what Finder's file sharing and the Files app show.
 const Path &GameFolder();
 void SetGameFolder(const Path &path);
 

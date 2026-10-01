@@ -683,6 +683,13 @@ void NativeInit(int argc, const char *argv[], const CommandLineOptions &cmdLineO
 	g_Config.defaultCurrentDirectory = g_Config.internalDataDirectory;
 	g_Config.memStickDirectory = DarwinFileSystemServices::appropriateMemoryStickDirectoryToUse();
 	g_Config.flash0Directory = Path(external_dir) / "flash0";
+	// Fork-specific: the app's Documents folder is the one a player can reach - Finder's file
+	// sharing and the Files app both show it - so it holds memstick/ and the disc, the way GTAVCS
+	// does on Android. Used even before it exists, like there, so a first run has somewhere to put
+	// its settings. Not a PPSSPP memory stick picked from its own screen: the game build never shows one.
+	VCS::SetGameFolder(Path(savegame_dir));
+	g_Config.memStickDirectory = VCS::GameFolder() / "memstick";
+	File::CreateFullPath(g_Config.memStickDirectory);
 #elif PPSSPP_PLATFORM(MAC)
 	g_Config.memStickDirectory = DarwinFileSystemServices::appropriateMemoryStickDirectoryToUse();
 	// Fork-specific: a memstick folder beside the app is the memory stick, the way one beside the

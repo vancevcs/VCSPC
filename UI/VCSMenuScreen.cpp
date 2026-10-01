@@ -41,6 +41,7 @@
 #include "Common/UI/ScrollView.h"
 #include "Core/Config.h"
 #include "Core/System.h"
+#include "Core/Util/PathUtil.h"
 #include "UI/BackgroundAudio.h"
 #include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
@@ -1962,7 +1963,7 @@ void VCSNoDiscScreen::CreateViews() {
 
 	VCSMenuItem *choose = list->Add(new VCSMenuItem("CHOOSE DISC",
 		new LinearLayoutParams(FILL_PARENT, kRowHeight)));
-#if PPSSPP_PLATFORM(ANDROID)
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 	choose->SetHelp("Find your copy of the game anywhere on this phone.");
 #else
 	choose->SetHelp("Find your copy of the game anywhere on this computer.");
@@ -2022,6 +2023,19 @@ void VCSNoDiscScreen::DrawBackground(UIContext &dc) {
 			"or .cso - into the GTAVCS folder on this phone's internal storage, and it starts by "
 			"itself.\n\nOr choose one from anywhere on this phone below.";
 	}
+#elif PPSSPP_PLATFORM(IOS)
+	// The app's own folder is the one place both of iOS's ways in can reach: Finder's file sharing
+	// from a Mac, and the Files app on the phone. Copying through the Files app means coming back
+	// to this app afterwards, which is when the screen looks again.
+	if (!archiveFound_.empty()) {
+		body = "There is an archive in this app's folder - " + archiveFound_ +
+			" - and the game cannot read one. Extract the .iso inside it into the same folder.";
+	} else {
+		body = "Put your copy of Grand Theft Auto: Vice City Stories - the USA disc, as a .iso "
+			"or .cso - into this app's folder: Files -> On My iPhone -> Vice City Stories, or from "
+			"a Mac, Finder -> your iPhone -> Files. It starts by itself when you come back.\n\n"
+			"Or choose one from anywhere in Files below.";
+	}
 #else
 	if (!archiveFound_.empty()) {
 		body = "There is an archive here - " + archiveFound_ +
@@ -2041,7 +2055,7 @@ void VCSNoDiscScreen::DrawBackground(UIContext &dc) {
 	const Bounds bar(bounds.x, bounds.y2() - kBottomBarHeight, bounds.w, kBottomBarHeight);
 	dc.FillRect(UI::Drawable(kBarColor), bar);
 	dc.SetFontStyle(dc.GetTheme().uiFontSmall);
-#if PPSSPP_PLATFORM(ANDROID)
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 	dc.DrawText("TAP - SELECT", bar.x2() - kTitleLeft, bar.centerY(), kHintColor,
 		ALIGN_VCENTER | ALIGN_RIGHT);
 #else
@@ -2056,13 +2070,19 @@ UIScreen *CreateStartScreen() {
 	// This is the only caller that needs them before a game exists.
 	VCS::LoadSettings();
 
-	const std::string path = VCS::GamePath();
-	if (!path.empty() && File::Exists(Path(path))) {
+	Path path(VCS::GamePath());
+	// A no-op everywhere but iOS, where the app's own folder moves on every reinstall - and a
+	// sideloaded app is reinstalled every week - and a disc chosen from elsewhere is reached
+	// through a bookmark that has to be opened again.
+	if (!path.empty()) {
+		TryUpdateSavedPath(&path);
+	}
+	if (!path.empty() && File::Exists(path)) {
 		// Straight onto the disc, with no menu in front of it. VCS opens with logos and a
 		// credits sequence and then walks itself into the story; the menu belongs at the far
 		// end of that, which is where EmuScreen raises it. Putting one here as well would mean
 		// asking the player to start the game twice.
-		return new EmuScreen(Path(path));
+		return new EmuScreen(path);
 	}
 
 	// No disc remembered - a first run. Take the one beside the exe if there is exactly one.

@@ -6864,13 +6864,52 @@ about it:
   dialog base finishes for the keyboard; the button finishes it by hand, exactly as Backspace
   already did.
 
-### What iOS still needs
+### The iOS build
 
-Nothing here is Apple-specific, and the overlay and the menu are shared code, so what is left is
-the app: a `GameFolder()` branch for `Documents`, file sharing turned on so Finder can copy the ISO
-in, the system edge gestures deferred so a stick drag near the bezel does not pull down a shade,
-and the safe areas respected. The gate is still the one measurement that has not been taken - the
-frame rate under the IR interpreter, since a sideloaded app gets no JIT.
+**Status: built, packaged and released 2026-10-01 - NOT yet run on an iPhone.** There is no
+simulator runtime on the build Mac, so nothing past the packaging has been seen on iOS at all.
+
+`./b-ios-vcs.sh` builds an unsigned device app into `build-ios/`, and
+`python3 Tools/vcspackage.py --ios --zip` turns it into `dist/GTA Vice City Stories.ipa` plus a
+game-files folder and zip beside it - the Android split, for the Android reason. The overlay, the
+menu and every phone default are shared code, so the iOS-specific part is small:
+
+- **The game's folder is the app's Documents.** `NativeInit` names it with `SetGameFolder` and puts
+  the memory stick at `Documents/memstick`, which is what Finder's file sharing and the Files app
+  both show. The remembered disc goes through `TryUpdateSavedPath`, PPSSPP's own fix for the app
+  container moving on every reinstall - and a sideloaded app is reinstalled every week.
+- **Edge gestures and safe areas were already upstream's**: `preferredScreenEdgesDeferringSystemGestures`
+  defers every edge in game, and the safe insets reach the UI. Nothing to add.
+- **The packager does the rest, the way it does for the Mac**: the name, the bundle ID (the Android
+  app's), the icon from `ios/vcs.xcassets` through `actool`, MoltenVK into `Frameworks/`, landscape
+  only, `LSSupportsOpeningDocumentsInPlace`, and an ad hoc signature with `get-task-allow`. A
+  sideloading tool re-signs it with the player's Apple ID; nobody without a developer account can
+  sign for a device.
+
+Three things that would each have shipped a broken app, all found before it shipped:
+
+- **Xcode 27 will not build for anything older than iOS 15**, and this tree asked for 13 (11 for the
+  sideload target). Both are 15 now.
+- **CMake's Xcode generator never compiles the launch storyboard.** It is listed in the target and
+  in no build phase, so the bundle had none - and an app with no launch storyboard is a legacy app
+  to iOS, run letterboxed in an iPhone 5 sized window. The packager compiles it with `ibtool`, black
+  rather than PPSSPP's blue.
+- **The shipped ppsspp.ini starts with a byte order mark**, so `[General]` never matched as a section
+  in `sanitise_ini`. Harmless while nothing needed General; the iOS package adds `ScreenRotation = 5`
+  there, because iOS's default follows the phone into portrait and the desktop ini never wrote the
+  key down to be forced.
+
+**The interpreter holds full speed, measured on a Mac as a stand-in.** A sideloaded app gets no JIT
+unless something attaches as a debugger, so the iPhone runs PPSSPP's IR interpreter - a path this
+fork had never run. The Mac build with `--cpu=ir` on an M1, whose cores are roughly an A14's:
+
+| | standing, Vice Point | dragged west ~900 units across the bay | longest gap |
+|---|---|---|---|
+| IR interpreter | 30.0 fps | 30.0 fps | 62 ms |
+| JIT (control) | 30.0 fps | 29.7 fps | 273 ms |
+
+The chase camera's code patch installed under IR too. What this does not cover: GPU and thermals on
+a real phone, and anything older than A14.
 
 ## Working on this
 

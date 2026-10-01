@@ -1528,11 +1528,8 @@ if(NOT ANDROID)
 endif()
 # packaging and code signing
 if(IOS AND NOT LIBRETRO)
-	if(IOS_APP_STORE)
-		set(DEPLOYMENT_TARGET 13.0)
-	else()
-		set(DEPLOYMENT_TARGET 11.0)
-	endif()
+	# 15.0 is the oldest target Xcode 27 will build.
+	set(DEPLOYMENT_TARGET 15.0)
 	file(GLOB IOSAssets ios/assets/*.png)
 	list(REMOVE_ITEM IOSAssets ${CMAKE_CURRENT_SOURCE_DIR}/ios/assets/Default-568h@2x.png)
 	list(REMOVE_ITEM IOSAssets ${CMAKE_CURRENT_SOURCE_DIR}/ios/assets/Default-568h@3x.png)
