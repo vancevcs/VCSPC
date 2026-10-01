@@ -24,9 +24,10 @@ cd build-ios
 echo "const char *PPSSPP_GIT_VERSION = \"$(git describe --always)\";" > git-version.cpp
 echo "#define PPSSPP_GIT_VERSION_NO_UPDATE 1" >> git-version.cpp
 
-if [ ! -d PPSSPP.xcodeproj ]; then
-	cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/Toolchains/ios.cmake -GXcode ..
-fi
+# Every time, not only the first. The project's own ZERO_CHECK step regenerates it after a
+# CMakeLists change, but only once xcodebuild has already loaded the old one - so a changed compile
+# flag otherwise takes effect a build late, with this one recompiling nothing.
+cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/Toolchains/ios.cmake -GXcode .. > /dev/null
 xcodebuild -project PPSSPP.xcodeproj -scheme PPSSPP -sdk iphoneos -configuration Release build \
 	CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO -quiet
 echo "Built build-ios/Release-iphoneos/PPSSPP.app"

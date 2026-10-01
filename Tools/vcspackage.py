@@ -420,6 +420,23 @@ def stage_memstick(out_dir, with_textures, phone=False, ini_add=None):
 
 
 
+def check_no_home_path(root):
+    """Fail if anything about to ship names this machine's home folder - and with it the name of
+    whoever built it. Nothing that identifies the builder goes out in a release.
+
+    Two ways it has got in, both through binaries: __FILE__ in asserts and logs (CMakeLists maps
+    it to the checkout with -ffile-prefix-map, Windows/fix_2017.props with /d1trimfile), and on
+    Apple platforms the linker's debug map, which names every prebuilt library it read by full
+    path (strip_debug_map). This checks the bytes rather than either mechanism, so a third route
+    fails here too instead of shipping."""
+    home = str(Path.home()).encode()
+    files = [root] if root.is_file() else sorted(f for f in root.rglob("*") if f.is_file())
+    leaks = [f for f in files if home in f.read_bytes()]
+    if leaks:
+        shown = ", ".join(str(f.relative_to(root.parent)) for f in leaks[:5])
+        fail(f"{len(leaks)} file(s) still contain {home.decode()}: {shown}")
+
+
 def finish_package(out_dir, make_zip, readme):
     licence = ROOT / "LICENSE.TXT"
     if licence.is_file():
@@ -433,6 +450,8 @@ def finish_package(out_dir, make_zip, readme):
     # so out loud if one ever arrives by another route.
     if (out_dir / "installed.txt").exists():
         fail("installed.txt in the package would break the portable layout")
+
+    check_no_home_path(out_dir)
 
     total = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
     count = sum(1 for f in out_dir.rglob("*") if f.is_file())
@@ -700,6 +719,14 @@ def ico_to_icns(ico, icns):
         run("iconutil", "-c", "icns", iconset, "-o", icns)
 
 
+def strip_debug_map(binary):
+    """The linker's debug map names every object and prebuilt library by its full path on this
+    machine - ffmpeg's, around 230 of them. lldb wants it on the build machine and nobody else
+    can use it. -S takes only the debug entries; every symbol stays. Before signing, since it
+    changes the file."""
+    run("xcrun", "strip", "-S", binary)
+
+
 def build_mac(out_dir, make_zip, with_textures):
     if not MAC_BUILT_APP.is_dir():
         fail(f"{MAC_BUILT_APP.relative_to(ROOT)} not found - run ./b-macos.sh first")
@@ -716,6 +743,7 @@ def build_mac(out_dir, make_zip, with_textures):
     shutil.copytree(MAC_BUILT_APP, app, symlinks=True)
     contents = app / "Contents"
     exe = contents / "MacOS" / "PPSSPPSDL"
+    strip_debug_map(exe)
     resources = contents / "Resources"
     frameworks = contents / "Frameworks"
 
@@ -1076,6 +1104,7 @@ def ios_version():
 def build_ios_app(app):
     """PPSSPP.app as this game: the name, the icon, the launch screen, MoltenVK, a signature."""
     shutil.copytree(IOS_BUILT_APP, app, symlinks=True)
+    strip_debug_map(app / "PPSSPP")
 
     for skip in ASSET_SKIP:
         shutil.rmtree(app / "assets" / skip, ignore_errors=True)
@@ -1177,6 +1206,7 @@ def build_ios(out_dir, make_zip, with_textures):
         payload = Path(tmp) / "Payload"
         payload.mkdir()
         build_ios_app(payload / IOS_APP_NAME)
+        check_no_home_path(payload)
         ipa.unlink(missing_ok=True)
         # An .ipa is a zip with Payload/ at its root. No resource forks or extended attributes:
         # they would land in the archive as ._ files inside a signed bundle.
