@@ -182,7 +182,7 @@ const InputKeyCode kVCSPadJumpButton = NKCODE_BUTTON_X;
 // per-configuration table of control names, and for the shipping configuration `C0TGSUB` reads
 // "the up button" against the help line `H_GANG1`, "To recruit henchmen into your group, target
 // them and use ~TGSUB~". That table is the whole control scheme written down by the people who
-// made it - see "Ask the GXT what a control is called" in CLAUDE.md before probing for the next
+// made it - see "Ask the GXT what a control is called" in docs/vcs/aiming.md before probing for the next
 // one.
 //
 // G on the keyboard, which was the lock-on toggle until that moved to L and has been free since.
@@ -199,7 +199,7 @@ const InputKeyCode kVCSPadJumpButton = NKCODE_BUTTON_X;
 //
 // Read as "recruit" first, off `H_GANG1` alone, and bound in the Aiming context only. The keyboard
 // help then named a key that did nothing in thirteen of the fourteen places it appeared. The lesson
-// is the one the GXT section in CLAUDE.md already teaches, one level further in: the table answers
+// is the one the GXT section in docs/vcs/aiming.md already teaches, one level further in: the table answers
 // what a control is CALLED, and one help line is not the whole of what it does. Grep the token.
 const InputKeyCode kVCSSubMissionKey = NKCODE_G;
 const InputKeyCode kVCSPadSubMissionButton = NKCODE_DPAD_UP;
@@ -613,7 +613,7 @@ const size_t kVCSKeyMappingCount = ARRAY_SIZE(kVCSKeyMappings);
 // The gamepad scheme. Xbox names throughout; LT and RT arrive as axes and are turned into
 // NKCODE_BUTTON_L2 / R2 by HandleHostAxis before they reach this table.
 //
-// Read it against "What each PSP button actually does in VCS" in CLAUDE.md and the shape is
+// Read it against "What each PSP button actually does in VCS" in docs/vcs/input.md and the shape is
 // clear: the face buttons stay where the handheld put them, because Xbox A/B/X/Y sit in the same
 // four places as Cross/Circle/Square/Triangle and VCS already has the right actions on them. What
 // moves is everything a PSP had nowhere to put - aim and fire onto the triggers, the camera onto
@@ -2380,7 +2380,7 @@ void ApplyAnalog(VCSInputContext context) {
 // For the binoculars that last part is the game saying so rather than this fork inferring it: the
 // mission's own help line is `H_BINO1`, "Use ~SNZI~ and ~SNZO~ to zoom in and out with the
 // binoculars", and SNZI/SNZO are the keys the GXT resolves to Square and Cross, which is exactly
-// what the sniper zoom rows already send. See "Ask the GXT what a control is called" in CLAUDE.md.
+// what the sniper zoom rows already send. See "Ask the GXT what a control is called" in docs/vcs/aiming.md.
 // The photo camera has no help line of its own, so it was measured instead, raised and live:
 // Square took the FOV from 70.00 to 59.25 and the zoom level from 1.000 to 1.181, Cross put both
 // back.

@@ -48,7 +48,7 @@ A Debug build produces `PPSSPPDebug64.exe` instead, which also has the in-game d
 | `assets/compat.ini` | the `VCSInputOverhaul`, `VCSDynamicShadows` and `VCSWaterQuality` flags that switch it all on for this disc |
 | `Tools/vcs*.py` | packaging, address scanning, offline disassembly, the keyboard-key GXT patcher |
 | `docs/VCS_ADDRESSES.md` | how every game address was found |
-| `CLAUDE.md` | design notes for the fork |
+| `CLAUDE.md`, `docs/vcs/` | design notes for the fork: a short entry point, and one deep-dive per subsystem |
 
 `python Tools/vcspackage.py --zip` builds the release zip from a Release build and a populated
 `memstick` folder.

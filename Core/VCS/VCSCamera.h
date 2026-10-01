@@ -88,7 +88,7 @@ struct VCSCameraSettings {
 	// carries a FOV/80 term, and AimAxisStep keeps rather than cancels it. See FOVLookScale.
 	//
 	// What it does is MEASURED; where it fires is only partly so. Known FOV values, from the arsenal
-	// sweep and the sniper zoom trace in CLAUDE.md:
+	// sweep and the sniper zoom trace in docs/vcs/aiming.md and input.md:
 	//
 	//     ordinary play              70.00   ->  1.00x, i.e. nothing happens
 	//     assault rifle raised       50.00   ->  0.71x

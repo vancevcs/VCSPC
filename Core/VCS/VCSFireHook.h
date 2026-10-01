@@ -73,7 +73,7 @@ void FireHookStats(u64 *seen, u64 *redirected);
 // What the last redirect actually solved, so the debugger can show it without recomputing
 // anything - and so that a wrong answer can be read off the numbers instead of inferred from
 // where the bullets went. Filled in on the emu thread by the hook and read on the same thread by
-// ImVCS; see the threading note in CLAUDE.md.
+// ImVCS; see the threading note in docs/vcs/architecture.md.
 struct VCSFireHookTrace {
 	bool valid = false;        // false until a shot has been redirected at least once
 	bool haveBasis = false;    // whether Front/Up/Source read back

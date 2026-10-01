@@ -67,7 +67,7 @@ enum class VCSInputContext {
 	// ResolveContext for why. This context is about BINDINGS (Q/E cycle targets rather than
 	// weapons, the aim trigger stays held); it does NOT by itself mean the mouse becomes a
 	// reticle. Whether it does is a separate question with a separate answer - see
-	// ReticleActive, and "Aiming is a stick, not a camera" in CLAUDE.md.
+	// ReticleActive, and "Aiming is a stick, not a camera" in docs/vcs/aiming.md.
 	Aiming,
 
 	Menu,

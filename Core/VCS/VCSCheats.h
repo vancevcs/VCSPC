@@ -106,7 +106,7 @@ struct VCSCheat {
 
 // Tunables. In this header rather than in the menu's option table because the numbers describe
 // the game's pad sampling, not a preference: they are the kind of knob that needs a paragraph of
-// measurement to interpret, which by the rule in CLAUDE.md means the debugger window, not a
+// measurement to interpret, which by the rule in docs/vcs/front-end.md means the debugger window, not a
 // player-facing row.
 struct VCSCheatSettings {
 	// Game frames each press is held, and each gap between presses lasts. Two is the shortest

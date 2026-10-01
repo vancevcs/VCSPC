@@ -812,7 +812,7 @@ track in it. It just isn't reachable with the game as shipped: it needs `CameraI
 (`gp-0x3F00`) set to 1, and then the lock broken with a large aim deflection. Neither was known
 when the note above was written, so "aim at empty space and watch" could never have found it.
 
-See "Mouse free aim — how it actually works" in `CLAUDE.md`. The lesson worth keeping: a negative
+See "Mouse free aim — how it actually works" in `docs/vcs/aiming.md`. The lesson worth keeping: a negative
 result only covers the conditions you actually tried, and this one got quoted back for weeks as if
 it were a property of the game.
 
@@ -871,7 +871,7 @@ That changed in two steps:
 without it. It now gates `ReticleActive()` — whether the mouse drives the analog stick (free aim)
 or the camera (everything else). Holding the aim trigger in VCS gives **lock-on**, where the nub
 strafes; gating the reticle on the key alone meant moving the mouse walked the character around
-with no crosshair anywhere. See "VCS has no free aim for ordinary weapons" in `CLAUDE.md`.
+with no crosshair anywhere. See "VCS has no free aim for ordinary weapons" in `docs/vcs/aiming.md`.
 
 That narrower role is also what makes it safe. It's only consulted with the player on foot and aim
 held, and all it decides is where the stick's input comes from — it no longer changes which buttons
@@ -1510,7 +1510,7 @@ settings found this way needed the check.
 ## The silent auto-save, and why a save cannot be asked for from the world
 
 The auto-save after a mission works by opening the game's own front end and walking it to the save
-list, behind a loading screen (see "A loading screen over both of them" in CLAUDE.md). The obvious
+list, behind a loading screen (see "A loading screen over both of them" in docs/vcs/boot-and-saves.md). The obvious
 improvement is to skip the menu entirely - call the game's save routine directly, with nothing on
 screen. **It cannot be done**, and the reason is the game's own resource discipline rather than
 anything about the plumbing. This is the record of finding that out, so nobody spends the evening

@@ -8,7 +8,7 @@ addresses the game really uses, so `--disasm` answers "what does this code do" a
 answers "what was in memory at that moment", both from a file.
 
 The entire aim response model in Core/VCS/VCSCamera.cpp was worked out with this, in one sitting,
-with the emulator closed. See "Why free aim felt like a thumbstick" in CLAUDE.md.
+with the emulator closed. See "Why free aim felt like a thumbstick" in docs/vcs/aiming.md.
 
     pip install zstandard capstone
 
@@ -32,7 +32,7 @@ Savestate layout: a 48-byte SChunkHeader, then a 128-byte title (revision >= 5),
 zstd-compressed serialized blob. Main RAM is somewhere inside the blob; rather than parse the
 whole serialization format, it is located by searching for an instruction pair whose address is
 already known - the CameraInputMode test at 0x0898bb4c, which is stable across builds of this
-disc and is documented in CLAUDE.md.
+disc and is documented in docs/vcs/aiming.md.
 """
 
 import argparse

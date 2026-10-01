@@ -181,7 +181,7 @@ void InitMemorySizeForGame() {
 	// whole world in it. On the retail 32MB partition that leaves it 4.75MB, running about 95%
 	// full, which is the real reason the view is what it is: four separate distance mechanisms
 	// in this game were patched and measured and NONE of them decides anything, so what is
-	// drawn is simply what fits. See CLAUDE.md.
+	// drawn is simply what fits. See docs/vcs/draw-distance.md.
 	//
 	// The game asks rather than assumes, so handing it a PSP-2000 partition costs no game patch
 	// at all - the heap it builds for itself grows with the answer. Deliberately NOT an entry in

@@ -203,7 +203,7 @@ def main():
 
     # make_background() is deliberately not called: the menu draws a flat fill in the backdrop's
     # own base colour instead of loading an image. The generator is kept because it is the only
-    # record of how that backdrop was built - see the leaflet-width note in CLAUDE.md - and
+    # record of how that backdrop was built - see the leaflet-width note in docs/vcs/front-end.md - and
     # calling it here again is all it takes to go back to the patterned version.
 
     used_font = None

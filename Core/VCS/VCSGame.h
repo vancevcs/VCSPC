@@ -56,7 +56,7 @@ void Shutdown();
 // the input mapping. Returns immediately when inactive.
 // Where the game is in its boot sequence, which the front end needs because VCS has no menu of
 // its own - it goes logos, credits, straight into the story. See "The boot sequence, measured"
-// in CLAUDE.md for the measurements behind this.
+// in docs/vcs/boot-and-saves.md for the measurements behind this.
 enum class BootPhase {
 	Intro,    // logos and credits are playing; FrameCounter reads 0
 	AtMenu,   // the world has just started - the moment to put our menu up
@@ -287,7 +287,7 @@ u64 GetTickCount();
 // window, that can be widened while the projection stays put, and a build that did it dropped
 // objects the player was looking straight at. Reverted. So the strip either side that WIDER
 // reveals is still a strip the game never expected to show, and CROP is still the honest default.
-// See "VCS culls to the camera, and widening it is worse than the pop-in" in CLAUDE.md.
+// See "VCS culls to the camera, and widening it is worse than the pop-in" in docs/vcs/draw-distance.md.
 //
 // The HUD is squashed in both, because the frame is stretched horizontally in both.
 

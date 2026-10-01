@@ -453,7 +453,7 @@ constexpr int kAutoSavePatience = 1800;
 //
 // Keyed on the mission rather than on "is the game in a cutscene", which would be the general
 // version of this and needs a signal this fork has never found. See the GameState note in
-// CLAUDE.md for why that hunt is closed. A measured key is worth more than a guessed state.
+// docs/vcs/input.md for why that hunt is closed. A measured key is worth more than a guessed state.
 struct NoAutoSaveMission {
 	const char *key;
 	const char *why;

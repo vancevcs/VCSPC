@@ -157,7 +157,7 @@ inline constexpr u32 kVCSPedClimbStageOffset = 0x1D9;   // 0, then 1..4 through 
 // first test is `bltz $a1` - a negative audio entity id is dropped before it touches the queue.
 // That is the whole suppression mechanism: the hook hands it -1 and the call runs to a no-op, so
 // the game's own instruction is never rewritten and a genuine climb out of the water still
-// splashes. See "Vaulting" in CLAUDE.md.
+// splashes. See "Vaulting" in docs/vcs/vaulting.md.
 //
 // A `jal` in the middle of a function, like the fire hook's site and unlike kVCSFindGroundZOp2 -
 // nothing branches here, so no JIT block starts here and the live word really is the game's.
@@ -364,7 +364,7 @@ inline constexpr u32 kVCSRwCameraSetNearClipOp = 0xE60C0078;  // +0x14: swc1 $f1
 // and in play it dropped objects the player was looking straight at. Reverted. They stay in the
 // table because the hunt for them took four failed attempts and the next person deserves the
 // answer rather than the search - see "VCS culls to the camera, and widening it is worse than the
-// pop-in" in CLAUDE.md before spending a day on it again.
+// pop-in" in docs/vcs/draw-distance.md before spending a day on it again.
 //
 // RwCamera + 0x60 is the RenderWare view window: the tangent of the half field of view, one for
 // each axis, with its reciprocals at +0x68. It reads 0.7002 - tan(35 degrees) - and near clip at
@@ -826,7 +826,7 @@ enum class VCSAddr {
 	// VCS internally wants two analog sticks and the PSP only has one, so the game synthesises the
 	// second one from the d-pad. These four are int16 fields inside CPad, holding 0 or 255 from the
 	// digital buttons - but the game reads them as an ANALOG pair, so writing intermediate values
-	// gives smooth camera and aim input through the game's own code path. See CLAUDE.md.
+	// gives smooth camera and aim input through the game's own code path. See "VCS has a second analog stick" in docs/vcs/aiming.md.
 	PadDPadUp,
 	PadDPadDown,
 	PadDPadLeft,

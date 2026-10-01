@@ -375,7 +375,7 @@ static void SolveProbe() {
 // "climbing": the state machine waits in AskingGame, and falls back to the written motion if the
 // game declines.
 //
-// Two dead ends behind this, both recorded in CLAUDE.md so nobody re-walks them: writing the ped
+// Two dead ends behind this, both recorded in docs/vcs/vaulting.md so nobody re-walks them: writing the ped
 // state (44) by hand engages the climb and then aborts, because nothing told it WHAT to climb; and
 // the in-water flag cannot be forced, because the game recomputes it from the world every frame.
 static bool TryStartNativeClimb(u32 ped, const Vec2 &landXY) {
