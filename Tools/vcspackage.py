@@ -766,7 +766,10 @@ def build_mac(out_dir, make_zip, with_textures):
 
 # --- Android ------------------------------------------------------------------------------------
 #
-# An APK and a GTAVCS folder. NativeInit on Android looks for exactly that folder at the root of
+# An APK and a GTAVCS folder, shipped as two downloads: the zip carries only the game files, and
+# the APK is written beside it rather than inside. The app changes far more often than the 700MB
+# of textures, so an update is one small file, and a zip with a copy of the app inside it would go
+# stale the first time only the app was replaced. NativeInit on Android looks for exactly that folder at the root of
 # the phone's storage and uses its memstick/, and the disc goes in beside it - the PC layout with
 # the exe taken out. Built by `./gradlew :android:assembleVcsRelease`, which signs with the repo's
 # debug keystore: this is sideloaded, never sent to a store.
@@ -815,8 +818,9 @@ Setting it up
 
        adb push "Vice City Stories.iso" /sdcard/GTAVCS/
 
-3. Install "GTA Vice City Stories.apk".  Android asks you to allow installs
-   from whichever app opens it.  Or:
+3. Install "GTA Vice City Stories.apk", which is a separate download beside
+   this zip.  Android asks you to allow installs from whichever app opens it.
+   An update is usually only a new APK, installed over the old one.  Or:
 
        adb install "GTA Vice City Stories.apk"
 
@@ -883,9 +887,12 @@ def build_android(out_dir, make_zip, with_textures):
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
 
-    shutil.copy2(ANDROID_APK, out_dir / ANDROID_APK_NAME)
     stage_memstick(out_dir / ANDROID_FOLDER, with_textures, android=True)
     finish_package(out_dir, make_zip, ANDROID_README)
+    # Beside the package, not in it - see the note at the top of this section.
+    apk = out_dir.parent / ANDROID_APK_NAME
+    shutil.copy2(ANDROID_APK, apk)
+    print(f"copied the APK -> {apk}")
 
 
 def main():

@@ -134,6 +134,7 @@ enum Cond : uint32_t {
 	CondCameraUp = 1 << 6,         // the camera is up
 	CondBike = 1 << 7,             // riding a motorcycle
 	CondMapPage = 1 << 8,          // the game's own map page
+	CondPlane = 1 << 9,            // flying a plane rather than a helicopter
 	CondWeapon = CondArmed | CondMelee,
 };
 
@@ -335,10 +336,19 @@ const ControlSpec kControls[] = {
 	// a rotor's lift into forward flight, and a pair of arrows cannot express it.
 	{ "air.descend",
 		 NKCODE_BUTTON_L2,     NKCODE_UNKNOWN,       Kind::Hold,
-		"descend", nullptr, "DOWN",     kColA, kRow1, kBig,   Anchor::Edge, kAircraft,        CondAlways, 0 },
+		"descend", nullptr, "DOWN",     kColA, kRow1, kBig,   Anchor::Edge, kAircraft,        CondAlways, CondPlane },
 	{ "air.climb",
 		 NKCODE_BUTTON_R2,     NKCODE_UNKNOWN,       Kind::Hold,
-		"climb", nullptr, "UP",         kColA, kRow2, kMid,   Anchor::Edge, kAircraft,        CondAlways, 0 },
+		"climb", nullptr, "UP",         kColA, kRow2, kMid,   Anchor::Edge, kAircraft,        CondAlways, CondPlane },
+	// A plane flies on the same two controls, but they are its THROTTLE: Cross is what moves it
+	// forward and the stick is what lifts it. Up and down arrows there read as a helicopter's
+	// lift, which a plane does not have - so it gets the car's pedals, where the car has them.
+	{ "air.pedal_gas",
+		 NKCODE_BUTTON_R2,     NKCODE_UNKNOWN,       Kind::Hold,
+		"pedal_gas", nullptr, "GAS",   kColA, kRow1, kBig,   Anchor::Edge, kAircraft,         CondPlane, 0 },
+	{ "air.pedal_brake",
+		 NKCODE_BUTTON_L2,     NKCODE_UNKNOWN,       Kind::Hold,
+		"pedal_brake", nullptr, "BRAKE", kColB, -84.0f, kMid, Anchor::Edge, kAircraft,        CondPlane, 0 },
 	{ "air.gun",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
 		"missile", nullptr, "FIRE",     kColB, -96.0f, kSmall, Anchor::Edge, kAircraft,       CondAlways, 0 },
@@ -1329,7 +1339,9 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 	if (((spec.hide & CondArmed) && state.armed) ||
 			((spec.hide & CondMelee) && state.melee) ||
 			((spec.hide & CondScoped) && state.scoped) ||
-			((spec.hide & CondLockedOn) && state.lockedOn)) {
+			((spec.hide & CondLockedOn) && state.lockedOn) ||
+			((spec.hide & CondScopeCannotShoot) && state.scopeCannotShoot) ||
+			((spec.hide & CondPlane) && state.vehicleClass == VCS::VehicleClass::Plane)) {
 		return false;
 	}
 	if (spec.cond != CondAlways) {
@@ -1340,7 +1352,8 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.cond & CondScopeZooms) && state.scopeZooms) ||
 			((spec.cond & CondCameraUp) && state.cameraUp) ||
 			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike) ||
-			((spec.cond & CondMapPage) && state.mapPage);
+			((spec.cond & CondMapPage) && state.mapPage) ||
+			((spec.cond & CondPlane) && state.vehicleClass == VCS::VehicleClass::Plane);
 	}
 	// Steering by stick means no arrows, and by arrows means no stick. Both at once would be two
 	// things writing one axis.
