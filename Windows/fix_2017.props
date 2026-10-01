@@ -14,10 +14,15 @@
 		<!-- UI and PPSSPP set their compile options to this outright, without %(AdditionalOptions). -->
 		<EXTERNAL_COMPILE_OPTIONS>/d1trimfile:$(VCSSourceRoot) $(EXTERNAL_COMPILE_OPTIONS)</EXTERNAL_COMPILE_OPTIONS>
 	</PropertyGroup>
+	<!-- The linker writes the .pdb's full path into the exe as well, which /d1trimfile cannot reach.
+	     /PDBALTPATH:%_PDB% records the file name alone; %25 is MSBuild's escape for a literal %. -->
 	<ItemDefinitionGroup>
 		<ClCompile>
 			<AdditionalOptions>/d1trimfile:$(VCSSourceRoot) %(AdditionalOptions)</AdditionalOptions>
 		</ClCompile>
+		<Link>
+			<AdditionalOptions>/PDBALTPATH:%25_PDB%25 %(AdditionalOptions)</AdditionalOptions>
+		</Link>
 	</ItemDefinitionGroup>
   <ItemGroup />
 </Project>
