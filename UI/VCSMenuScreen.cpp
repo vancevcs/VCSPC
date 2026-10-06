@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
@@ -52,6 +53,9 @@
 #include "UI/GameSettingsScreen.h"
 #include "Common/File/FileUtil.h"
 #include "Common/System/Request.h"
+#include "Common/System/System.h"
+#include "Common/System/NativeApp.h"
+#include "Core/KeyMap.h"
 #include "UI/EmuScreen.h"
 #include "UI/MainScreen.h"
 #include "UI/PauseScreen.h"
@@ -347,6 +351,51 @@ private:
 	const char *key_;
 };
 
+// Where the project lives. Shown on the root page as two icons in the bottom-left corner. An empty
+// one is simply not drawn, so a link can be taken out without leaving a button that opens nothing.
+static const char *const kVCSGitHubUrl = "https://github.com/vancevcs/VCSPC";
+static const char *const kVCSDiscordUrl = "https://discord.gg/SCcnMRaggm";
+
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+static constexpr float kLinkIconSize = 36.0f;
+#else
+static constexpr float kLinkIconSize = 44.0f;
+#endif
+
+// An icon that opens a web page. Not a row: it is not part of what the menu is FOR, so it sits in
+// a corner where the eye does not start, out of the keyboard's way - not focusable, like the
+// phone's back icon, so the arrow keys never wander down into it. The art is white
+// (assets/vcs/link_*.png) and tinted here, so it takes the rows' cyan and lights cream on hover
+// exactly as a row does.
+class VCSMenuLink : public UI::Clickable {
+public:
+	VCSMenuLink(struct VCSMenuArt *art, const char *path, const char *url,
+	            UI::LayoutParams *layoutParams)
+		: UI::Clickable(layoutParams), art_(art), path_(path), url_(url) {
+		OnClick.Add([this](UI::EventParams &) {
+			System_LaunchUrl(LaunchUrlType::BROWSER_URL, url_);
+		});
+	}
+
+	void Draw(UIContext &dc) override;
+	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override {
+		w = h = kLinkIconSize;
+	}
+	bool Touch(const TouchInput &input) override {
+		if (input.flags & TouchInputFlags::MOVE) {
+			hovered_ = bounds_.Contains(input.x, input.y);
+		}
+		return UI::Clickable::Touch(input);
+	}
+	bool CanBeFocused() const override { return false; }
+
+private:
+	struct VCSMenuArt *art_;
+	const char *path_;
+	const char *url_;
+	bool hovered_ = false;
+};
+
 // A value shown as a row of blocks rather than a number, which is how this front end renders
 // anything that is really "a position within a range".
 static bool ShowsBlocks(const VCS::Option &opt) {
@@ -373,11 +422,17 @@ float VCSMenuItem::CenterX() const {
 	return centerX_ >= 0.0f ? centerX_ : ScreenCenterX();
 }
 
+// Ten, unless the row's own steps say otherwise - see Option::blocks.
+static int SliderBlocks(const VCS::Option *opt) {
+	return opt && opt->blocks > 0 ? opt->blocks : kSliderBlocks;
+}
+
 // Where the blocks sit: immediately past the value column's left edge.
 Bounds VCSMenuItem::BlockStripBounds() const {
 	const float blockH = bounds_.h * 0.34f;
 	const float gap = blockH * 0.28f;
-	const float width = kSliderBlocks * blockH + (kSliderBlocks - 1) * gap;
+	const int blocks = SliderBlocks(option_);
+	const float width = blocks * blockH + (blocks - 1) * gap;
 	return Bounds(CenterX() + kValueGap, bounds_.centerY() - blockH * 0.5f, width, blockH);
 }
 
@@ -675,6 +730,18 @@ void VCSMenuIconButton::Draw(UIContext &dc) {
 	}
 }
 
+void VCSMenuLink::Draw(UIContext &dc) {
+	Draw::Texture *tex = art_ ? art_->Image(dc, path_, path_) : nullptr;
+	if (!tex) {
+		return;
+	}
+	// The same drop shadow the rows' text has, so the icons sit on the backdrop the way the words do.
+	const float shadow = 2.0f;
+	DrawTexture(dc, tex, Bounds(bounds_.x + shadow, bounds_.y + shadow, bounds_.w, bounds_.h),
+		0x80000000);
+	DrawTexture(dc, tex, bounds_, hovered_ || down_ ? kItemSelectedColor : kItemColor);
+}
+
 void VCSMenuItem::Draw(UIContext &dc) {
 	const bool selected = HasFocus() || down_;
 	const uint32_t color = !IsEnabled() ? colorAlpha(kItemColor, 0.35f)
@@ -715,11 +782,12 @@ void VCSMenuItem::Draw(UIContext &dc) {
 		const Bounds strip = BlockStripBounds();
 		const float blockH = strip.h;
 		const float gap = blockH * 0.28f;
-		const int filled = (int)(VCS::GetNormalized(*option_) * kSliderBlocks + 0.5f);
+		const int blocks = SliderBlocks(option_);
+		const int filled = (int)(VCS::GetNormalized(*option_) * blocks + 0.5f);
 
 		dc.Flush();
 		dc.BeginNoTex();
-		for (int i = 0; i < kSliderBlocks; i++) {
+		for (int i = 0; i < blocks; i++) {
 			const float x = strip.x + i * (blockH + gap);
 			dc.Draw()->Rect(x, strip.y, blockH, blockH, i < filled ? color : kSliderEmptyColor);
 		}
@@ -781,10 +849,14 @@ bool VCSBindingRow::Touch(const TouchInput &input) {
 		UI::SetFocusedView(this, UI::FocusFlags::CAUSE_OTHER);
 	}
 	// Forced, so the press does not immediately unfocus the row it just selected - see
-	// VCSMenuItem::ClaimFocus for the mechanism. Nothing else happens on a press: there is
-	// nothing to activate, and so no select sound either.
+	// VCSMenuItem::ClaimFocus for the mechanism.
 	if ((input.flags & TouchInputFlags::DOWN) && contains) {
 		UI::SetFocusedView(this, UI::FocusFlags::CAUSE_FORCED, true);
+	}
+	// A line with a rebindable action behind it is a button; the rest are a reference card, and
+	// a click on one does nothing at all rather than something surprising.
+	if (!actions_.empty()) {
+		UI::ClickableItem::Touch(input);
 	}
 	return contains;
 }
@@ -822,6 +894,13 @@ void VCSBindingRow::Draw(UIContext &dc) {
 	// An empty cell draws nothing at all, which is the whole point of a card with every device on
 	// it: the gap under XBOX CONTROLLER next to WASD is what says the pad walks with a stick.
 	for (size_t i = 0; i < cells_.size() && i < ARRAY_SIZE(kListDeviceFrac); i++) {
+		// The keyboard cell asks for the key while one is being captured, in the selected row's
+		// colour so it reads as the thing waiting on the player.
+		if (i == 0 && !prompt_.empty()) {
+			dc.DrawTextShadow(prompt_, g_display.dp_xres * kListDeviceFrac[i], bounds_.centerY(),
+				kItemSelectedColor, ALIGN_VCENTER | ALIGN_LEFT);
+			continue;
+		}
 		if (cells_[i].empty()) {
 			continue;
 		}
@@ -829,6 +908,8 @@ void VCSBindingRow::Draw(UIContext &dc) {
 			kListKeyColor, ALIGN_VCENTER | ALIGN_LEFT);
 	}
 }
+
+static const char *MenuTestSpec();
 
 VCSMenuScreen::VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode mode)
 	: UIBaseDialogScreen(gamePath), bootPending_(bootPending), mode_(mode),
@@ -854,6 +935,24 @@ VCSMenuScreen::VCSMenuScreen(const Path &gamePath, bool bootPending, VCSMenuMode
 	// answering the mouse, which arrives by another path. Nothing is lost by dropping it: this
 	// menu is opaque, so it already hides everything the curtain was hiding.
 	VCS::DropCurtain();
+
+	// The page VCS_MENU_TEST asked for, on the first menu of the run only.
+	static bool testApplied = false;
+	if (MenuTestSpec() && !testApplied && mode_ == VCSMenuMode::Pause) {
+		testApplied = true;
+		const std::string spec = MenuTestSpec();
+		const size_t colon = spec.find(':');
+		const std::string name = spec.substr(0, colon);
+		for (int i = 0; i <= (int)VCSMenuPage::CheatsWorld; i++) {
+			if (name == PageTitle((VCSMenuPage)i)) {
+				page_ = (VCSMenuPage)i;
+				break;
+			}
+		}
+		if (colon != std::string::npos) {
+			testFocusRow_ = atoi(spec.c_str() + colon + 1);
+		}
+	}
 }
 
 void VCSMenuScreen::deviceLost() {
@@ -882,7 +981,14 @@ VCSMenuScreen::~VCSMenuScreen() {
 	//
 	// Harmless when no game menu is open, and it deliberately does not override a row that just
 	// asked to go somewhere - see RequestCloseGameMenu.
-	VCS::RequestCloseGameMenu();
+	//
+	// Not for the save icon: its answer has the dialog walk holding the pad, and that walk closes
+	// whatever is left of the game's menu itself when it ends.
+	if (!iconSave_) {
+		VCS::RequestCloseGameMenu();
+	} else if (!iconSaveAnswered_) {
+		CancelIconSave();
+	}
 
 	// Every way out of this menu comes through here, which is why the save lives here rather
 	// than on the resume row.
@@ -906,6 +1012,7 @@ VCSMenuPage VCSMenuScreen::ParentPage(VCSMenuPage page) const {
 	case VCSMenuPage::Game: return VCSMenuPage::Root;
 	case VCSMenuPage::LoadGame: return VCSMenuPage::Game;
 	case VCSMenuPage::DeleteGame: return VCSMenuPage::Game;
+	case VCSMenuPage::SaveGame: return VCSMenuPage::Root;
 	// Back out of a question and you are where you asked it from.
 	case VCSMenuPage::Confirm: return confirmParent_;
 	case VCSMenuPage::Mouse: return VCSMenuPage::Controls;
@@ -1017,6 +1124,7 @@ const char *VCSMenuScreen::PageTitle(VCSMenuPage page) const {
 	case VCSMenuPage::Game: return "game";
 	case VCSMenuPage::LoadGame: return "loadgame";
 	case VCSMenuPage::DeleteGame: return "deletegame";
+	case VCSMenuPage::SaveGame: return "savegame";
 	// Whatever the page that asked was using, so the heading does not jump.
 	case VCSMenuPage::Confirm: return confirmTitle_;
 	// Fixed now that the card shows every device at once. It was the one heading that changed
@@ -1057,7 +1165,66 @@ bool VCSMenuScreen::ShowingControllerNote() const {
 	return page_ == VCSMenuPage::Bindings || IsKeyListPage(page_);
 }
 
+void VCSMenuScreen::BeginKeyCapture(VCSBindingRow *row) {
+	if (!row || row->actions().empty()) {
+		return;
+	}
+	PlayMenuSound(UI::UISound::VCS_SELECT);
+	captureRow_ = row;
+	captureStep_ = 0;
+	const VCS::VCSKeyAction &action = VCS::kVCSKeyActions[row->actions()[0]];
+	row->SetPrompt(action.step ? std::string("PRESS A KEY - ") + action.step : "PRESS A KEY");
+}
+
+void VCSMenuScreen::EndKeyCapture() {
+	if (captureRow_) {
+		captureRow_->SetPrompt("");
+		refocusBinding_ = captureRow_->name();
+	}
+	captureRow_ = nullptr;
+	captureStep_ = 0;
+	// Rebuilt rather than patched, because one key can move two lines - a swap hands the other
+	// action this one's old key - and the card is built from the bindings in one place.
+	RecreateViews();
+}
+
+bool VCSMenuScreen::touch(const TouchInput &touch) {
+	if (captureRow_) {
+		return true;
+	}
+	return UIBaseDialogScreen::touch(touch);
+}
+
 bool VCSMenuScreen::key(const KeyInput &key) {
+	// A key is being captured for a line of the card: the next press IS the binding, whatever it
+	// is, and nothing else on this screen hears it. Escape - and a pad's back - cancels instead,
+	// and that is also why Escape cannot be bound: it is the one key that has to mean "never mind".
+	if (captureRow_) {
+		if (!(key.flags & KeyInputFlags::DOWN) || (key.flags & KeyInputFlags::IS_REPEAT)) {
+			return true;
+		}
+		if (UI::IsEscapeKey(key) && key.deviceId != DEVICE_ID_MOUSE) {
+			PlayMenuSound(UI::UISound::VCS_BACK);
+			EndKeyCapture();
+			return true;
+		}
+		if (key.deviceId != DEVICE_ID_KEYBOARD && key.deviceId != DEVICE_ID_MOUSE) {
+			return true;  // a pad button, which binds through the pad's own scheme, not here
+		}
+		const std::vector<size_t> &actions = captureRow_->actions();
+		VCS::SetActionKey(actions[captureStep_], key.keyCode);
+		captureStep_++;
+		if (captureStep_ < actions.size()) {
+			PlayMenuSound(UI::UISound::VCS_HIGHLIGHT);
+			const VCS::VCSKeyAction &next = VCS::kVCSKeyActions[actions[captureStep_]];
+			captureRow_->SetPrompt(std::string("PRESS A KEY - ") + (next.step ? next.step : ""));
+		} else {
+			PlayMenuSound(UI::UISound::VCS_SELECT);
+			EndKeyCapture();
+		}
+		return true;
+	}
+
 	// Left and right used to flip the card between the two devices here. Nothing claims them on a
 	// listing page any more - there is nothing left to flip - so they go back to the focused row
 	// like everywhere else in this menu.
@@ -1076,18 +1243,43 @@ bool VCSMenuScreen::key(const KeyInput &key) {
 	// map and stats. `IsEscapeKey` does not include it - that is PPSSPP's question about its own
 	// UI - so it is asked separately rather than by changing what Escape means everywhere.
 	const bool backspace = key.keyCode == NKCODE_DEL;
-	const bool back = UI::IsEscapeKey(key) || backspace;
+	// A PlayStation pad on Windows comes through PPSSPP's HID driver numbered rather than named, and
+	// PPSSPP's generic pad defaults then put its Circle on the PSP's Triangle - so IsEscapeKey said
+	// no to Circle and yes to Triangle. Asked by what the button IS instead, the way the game layer
+	// asks: Circle is Back, Triangle is not.
+	const InputKeyCode named = VCS::NamedPadButton(key);
+	const bool psPad = named != key.keyCode;
+	const bool padBack = psPad && named == NKCODE_BUTTON_B;
+	const bool back = (psPad ? padBack : UI::IsEscapeKey(key)) || backspace;
 	if ((key.flags & KeyInputFlags::DOWN) && back) {
 		// Escape on the root of the pause menu is the one Back this does NOT handle: the dialog
 		// base finishes the screen for it, which is the path every other PPSSPP screen takes out.
-		// Backspace has to be finished off by hand because the base has never heard of it.
-		if (GoBack() || !backspace) {
+		// Backspace and the pad's translated Circle have to be finished off by hand, because the
+		// base has never heard of either.
+		if (GoBack() || !(backspace || padBack)) {
 			return true;
 		}
 		TriggerFinish(DR_CANCEL);
 		return true;
 	}
+	// ...and the PlayStation pad's Triangle, which PPSSPP still calls Circle, must not reach the
+	// dialog base either, or it would close the whole menu from wherever it was.
+	if (psPad && UI::IsEscapeKey(key)) {
+		return true;
+	}
 	return UIBaseDialogScreen::key(key);
+}
+
+void VCSMenuScreen::OpenForIconSave() {
+	iconSave_ = true;
+	page_ = VCSMenuPage::SaveGame;
+}
+
+void VCSMenuScreen::CancelIconSave() {
+	if (iconSave_ && !iconSaveAnswered_) {
+		iconSaveAnswered_ = true;
+		VCS::AnswerIconSave(-1);
+	}
 }
 
 bool VCSMenuScreen::GoBack() {
@@ -1095,6 +1287,13 @@ bool VCSMenuScreen::GoBack() {
 	// world, or the main menu declining to close. The one that declines still makes the sound:
 	// something was pressed, and silence there reads as a dropped input.
 	PlayMenuSound(UI::UISound::VCS_BACK);
+	// Back from the save icon's page is "do not save", and out - not up to a root the player never
+	// came through.
+	if (iconSave_ && page_ == VCSMenuPage::SaveGame) {
+		CancelIconSave();
+		TriggerFinish(DR_CANCEL);
+		return true;
+	}
 	if (page_ != VCSMenuPage::Root) {
 		GoToPage(ParentPage(page_));
 		return true;
@@ -1230,9 +1429,53 @@ void VCSMenuScreen::AddBackRow(UI::ViewGroup *parent) {
 		new LinearLayoutParams(FILL_PARENT, kRowHeight)));
 	// page_ is read at click time, not captured, so one lambda serves every page.
 	row->OnClick.Add([this](UI::EventParams &e) {
+		if (iconSave_ && page_ == VCSMenuPage::SaveGame) {
+			CancelIconSave();
+			TriggerFinish(DR_CANCEL);
+			return;
+		}
 		GoToPage(ParentPage(page_));
 	});
 	rows_.push_back(row);
+}
+
+void VCSMenuScreen::AddSaveSlotRows(UI::ViewGroup *parent) {
+	using namespace UI;
+
+	const std::vector<VCS::SaveSlot> slots = VCS::EnumerateSaves();
+	for (const VCS::SaveSlot &slot : slots) {
+		char label[128];
+		if (!slot.present) {
+			snprintf(label, sizeof(label), "%d.  EMPTY", slot.index + 1);
+		} else {
+			snprintf(label, sizeof(label), "%d.  %s%s", slot.index + 1, slot.title.c_str(),
+				slot.autoSave ? "  (Autosave)" : "");
+		}
+		VCSMenuItem *row = parent->Add(new VCSMenuItem(label,
+			new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+		row->SetHelp(slot.present ? "Save over " + slot.summary : std::string("Save the game here."));
+		row->SetLeftAligned(ScreenCenterX() - kSaveListInset);
+
+		const int index = slot.index;
+		if (slot.present) {
+			// Overwriting asks first, on this menu's own confirmation page, as deleting does - and
+			// the firmware's own overwrite prompt on the far side is answered by the walk, so the
+			// player is asked once rather than twice.
+			const std::string name = slot.title;
+			const std::string when = slot.summary;
+			row->OnClick.Add([this, index, name, when](UI::EventParams &e) {
+				GoToConfirm(PageTitle(page_), "Are you sure you wish to overwrite this save file?",
+					name + " - " + when, [this, index]() {
+						pendingSaveSlot_ = index;
+					});
+			});
+		} else {
+			row->OnClick.Add([this, index](UI::EventParams &e) {
+				pendingSaveSlot_ = index;
+			});
+		}
+		rows_.push_back(row);
+	}
 }
 
 void VCSMenuScreen::AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page) {
@@ -1299,8 +1542,13 @@ void VCSMenuScreen::AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page) {
 	listRowCount_ = (int)listing.size();
 	listRowHeight_ = ListRowHeight(listRowCount_);
 	for (const VCS::VCSListingRow &row : listing) {
-		parent->Add(new VCSBindingRow(row,
+		VCSBindingRow *line = parent->Add(new VCSBindingRow(row,
 			new LinearLayoutParams(FILL_PARENT, listRowHeight_)));
+		line->SetActions(VCS::ActionsForRow(ToKeyList(page), row.name));
+		line->OnClick.Add([this, line](UI::EventParams &e) {
+			BeginKeyCapture(line);
+		});
+		bindingRows_.push_back(line);
 	}
 
 	// Clear of the panel, which is sized to the rows above.
@@ -1365,6 +1613,8 @@ void VCSMenuScreen::CreateViews() {
 	using namespace UI;
 
 	rows_.clear();
+	bindingRows_.clear();
+	captureRow_ = nullptr;
 	listRowCount_ = 0;
 	listRowHeight_ = kListRowHeight;
 
@@ -1412,6 +1662,23 @@ void VCSMenuScreen::CreateViews() {
 	list->SetSpacing(0.0f);
 
 	if (page_ == VCSMenuPage::Root) {
+		// The project's two links, in the bottom-left corner above the help bar, which is empty on
+		// this page - its rows carry no help line. Root only: every other page is about a setting,
+		// and a link there would be in the way of reading it.
+		{
+			float left = kTitleLeft;
+			for (const auto &link : { std::make_pair("vcs/link_discord.png", kVCSDiscordUrl),
+					std::make_pair("vcs/link_github.png", kVCSGitHubUrl) }) {
+				if (!*link.second) {
+					continue;
+				}
+				root_->Add(new VCSMenuLink(art_.get(), link.first, link.second,
+					new AnchorLayoutParams(kLinkIconSize, kLinkIconSize, left, NONE, NONE,
+						kBottomBarHeight + kLinkIconSize * 0.5f)));
+				left += kLinkIconSize * 1.6f;
+			}
+		}
+
 		const bool mainMenu = mode_ == VCSMenuMode::MainMenu;
 		// Startup sits over a game that is already running, so its top row resumes like the
 		// pause menu's does - the game is mid-way into starting and just needs to be let go.
@@ -1482,11 +1749,11 @@ void VCSMenuScreen::CreateViews() {
 		AddPageRow(list, "CONTROLLER", VCSMenuPage::Controller);
 		AddPageRow(list, "AIMING", VCSMenuPage::Aiming);
 
-		// Read-only, and that is the whole design: the bindings are context-aware, so one key
-		// is several things depending on what you are doing, and a rebinding screen that cannot
-		// express that would be lying about what it changed. PPSSPP's own mapper is deliberately
-		// not offered here either, for the same reason - it binds keys to PSP buttons, one step
-		// below the layer that decides what a PSP button means.
+		// The cards, and the keyboard half of them is editable: a line is one action on one page,
+		// so JUMP on foot and HANDBRAKE in a car are separate bindings even though both ship on
+		// Space - which is how the context-aware scheme survives being rebound. PPSSPP's own
+		// mapper is still not offered: it binds keys to PSP buttons, one step below the layer that
+		// decides what a PSP button means.
 		//
 		// Named for what it lists rather than for a device, because it lists two.
 		AddPageRow(list, "KEY BINDINGS", VCSMenuPage::Bindings);
@@ -1500,6 +1767,21 @@ void VCSMenuScreen::CreateViews() {
 		AddPageRow(list, "IN VEHICLE", VCSMenuPage::KeysVehicle);
 		AddPageRow(list, "AIRCRAFT", VCSMenuPage::KeysAircraft);
 		AddPageRow(list, "MELEE COMBAT", VCSMenuPage::KeysMelee);
+		list->Add(new Spacer(kRowHeight * 0.5f));
+		{
+			VCSMenuItem *reset = list->Add(new VCSMenuItem("RESET KEYS",
+				new LinearLayoutParams(FILL_PARENT, kRowHeight)));
+			reset->SetHelp("Put every keyboard key back where it started. The controllers are not "
+				"affected.");
+			reset->OnClick.Add([this](UI::EventParams &e) {
+				GoToConfirm(PageTitle(page_), "Put every key back where the game started it?", "",
+					[this]() {
+						// Recorded, not done - see pendingNewGame_.
+						pendingResetKeys_ = true;
+					});
+			});
+			rows_.push_back(reset);
+		}
 		AddBackRow(list);
 	} else if (page_ == VCSMenuPage::Game) {
 		// The game's own Game tab, rebuilt. Same three things it offers, in the same order, and
@@ -1545,6 +1827,9 @@ void VCSMenuScreen::CreateViews() {
 	} else if (page_ == VCSMenuPage::DeleteGame) {
 		AddSaveRows(list, true);
 		AddBackRow(list);
+	} else if (page_ == VCSMenuPage::SaveGame) {
+		AddSaveSlotRows(list);
+		AddBackRow(list);
 	} else if (page_ == VCSMenuPage::Cheats) {
 		AddPageRow(list, "PLAYER", VCSMenuPage::CheatsPlayer);
 		AddPageRow(list, "VEHICLES", VCSMenuPage::CheatsVehicles);
@@ -1559,9 +1844,25 @@ void VCSMenuScreen::CreateViews() {
 		AddOptionRows(list, page_);
 	}
 
-	if (!rows_.empty()) {
-		UI::SetFocusedView(rows_[0], UI::FocusFlags::CAUSE_OTHER);
+	// A card has no menu rows above its lines, so the first line takes focus - and after a rebind,
+	// the line that was rebound, which the card has just been rebuilt around.
+	if (!bindingRows_.empty()) {
+		VCSBindingRow *focus = bindingRows_[0];
+		for (VCSBindingRow *line : bindingRows_) {
+			if (line->name() == refocusBinding_) {
+				focus = line;
+			}
+		}
+		if (testFocusRow_ >= 0 && testFocusRow_ < (int)bindingRows_.size()) {
+			focus = bindingRows_[testFocusRow_];
+		}
+		UI::SetFocusedView(focus, UI::FocusFlags::CAUSE_OTHER);
+	} else if (!rows_.empty()) {
+		const int focus = testFocusRow_ >= 0 && testFocusRow_ < (int)rows_.size() ? testFocusRow_ : 0;
+		UI::SetFocusedView(rows_[focus], UI::FocusFlags::CAUSE_OTHER);
 	}
+	testFocusRow_ = -1;
+	refocusBinding_.clear();
 }
 
 void VCSMenuScreen::update() {
@@ -1599,6 +1900,19 @@ void VCSMenuScreen::update() {
 		pendingQuitApp_ = false;
 		System_ExitApp();
 		return;
+	}
+	if (pendingSaveSlot_ >= 0) {
+		const int slot = pendingSaveSlot_;
+		pendingSaveSlot_ = -1;
+		iconSaveAnswered_ = true;
+		VCS::AnswerIconSave(slot);
+		TriggerFinish(DR_CANCEL);
+		return;
+	}
+	if (pendingResetKeys_) {
+		pendingResetKeys_ = false;
+		VCS::ResetActionKeys();
+		GoToPage(VCSMenuPage::Bindings);
 	}
 	if (pendingDelete_ >= 0) {
 		const int index = pendingDelete_;
@@ -1723,8 +2037,16 @@ void VCSMenuScreen::DrawBackground(UIContext &dc) {
 	}
 #else
 	const char *hint = "ENTER / LMB - SELECT     ESC - BACK";
-	if (IsKeyListPage(page_)) {
-		hint = "ESC - BACK";
+	if (captureRow_) {
+		hint = "PRESS THE NEW KEY     ESC - CANCEL";
+	} else if (IsKeyListPage(page_)) {
+		bool editable = false;
+		for (const VCSBindingRow *line : bindingRows_) {
+			if (line->HasFocus() && !line->actions().empty()) {
+				editable = true;
+			}
+		}
+		hint = editable ? "ENTER / LMB - CHANGE KEY     ESC - BACK" : "ESC - BACK";
 	} else if (focused && focused->option()) {
 		hint = focused->option()->type == VCS::OptionType::Bool
 			? "ENTER / LMB - TOGGLE     ESC - BACK"
@@ -1839,6 +2161,133 @@ void DrawVCSBootCurtain(UIContext &dc, float alpha, const char *word) {
 			colorAlpha(kItemColor, alpha), ALIGN_LEFT | ALIGN_BOTTOM);
 	}
 	dc.Flush();
+}
+
+// A developer's way in, for checking a page by screenshot on a machine where nothing can type into
+// the window - the Mac this fork is measured on, with no accessibility permission to send keys.
+// VCS_MENU_TEST=<page>[:<row>] raises the pause menu once the world is up, on the page whose
+// PageTitle key is <page> ("displaysetup", "keybindings"), with row <row> focused. Same family
+// as VCS_TOUCH_TEST, and like it, unset - which is always, for a player - it costs one getenv.
+static const char *MenuTestSpec() {
+	static const char *spec = getenv("VCS_MENU_TEST");
+	return spec && *spec ? spec : nullptr;
+}
+
+bool VCSMenuTestDue() {
+	static bool done = false;
+	static int settledFrames = 0;
+	if (done || !MenuTestSpec()) {
+		return false;
+	}
+	// Settled rather than merely Playing: the auto-load raises its curtain a few frames after the
+	// world starts, and a menu pushed in that gap would pause the walk it is waiting on.
+	const bool settled = VCS::GetBootPhase() == VCS::BootPhase::Playing &&
+		VCS::AutoCurtain() == VCS::CurtainKind::None && !VCS::FrontEndDriving() &&
+		!VCS::GameMenuActive();
+	settledFrames = settled ? settledFrames + 1 : 0;
+	if (settledFrames < 180) {
+		return false;
+	}
+	done = true;
+	return true;
+}
+
+// The other half of a developer's way in: KEYS, on a machine that cannot send any to the window.
+//
+// VCS_KEY_PIPE=<file> makes every frame look for that file; whatever it holds is queued and the
+// file deleted, so a shell can drive the game and this menu with `echo ... > file`. One command per
+// line: `down NAME`, `up NAME`, `press NAME` (down, then up two frames later), `wait N` (frames),
+// `look DX DY` (a mouse movement).
+// NAME is PPSSPP's own key name ("F", "Space", "Escape") or a number; mouse buttons are
+// "MOUSE1".."MOUSE5", "WHEELUP" and "WHEELDOWN". Everything goes through NativeKey, the same door
+// a real keyboard uses, so what it tests is the real path. Unset, it costs one getenv per run.
+static bool ParseDevKey(const std::string &name, InputKeyCode *code, InputDeviceID *device) {
+	*device = DEVICE_ID_KEYBOARD;
+	if (name.size() == 6 && !strncasecmp(name.c_str(), "MOUSE", 5) && name[5] >= '1' && name[5] <= '5') {
+		*code = (InputKeyCode)(NKCODE_EXT_MOUSEBUTTON_1 + (name[5] - '1'));
+		*device = DEVICE_ID_MOUSE;
+		return true;
+	}
+	if (!strcasecmp(name.c_str(), "WHEELUP") || !strcasecmp(name.c_str(), "WHEELDOWN")) {
+		*code = !strcasecmp(name.c_str(), "WHEELUP") ? NKCODE_EXT_MOUSEWHEEL_UP : NKCODE_EXT_MOUSEWHEEL_DOWN;
+		*device = DEVICE_ID_MOUSE;
+		return true;
+	}
+	if (!name.empty() && isdigit((unsigned char)name[0])) {
+		*code = (InputKeyCode)atoi(name.c_str());
+		return true;
+	}
+	for (int i = 1; i < 1000; i++) {
+		if (!strcasecmp(KeyMap::GetKeyName((InputKeyCode)i).c_str(), name.c_str())) {
+			*code = (InputKeyCode)i;
+			return true;
+		}
+	}
+	return false;
+}
+
+void VCSDevKeyPipeTick() {
+	static const char *path = getenv("VCS_KEY_PIPE");
+	if (!path || !*path) {
+		return;
+	}
+	static std::deque<std::string> queue;
+	static int wait = 0;
+	{
+		std::string contents;
+		if (File::ReadTextFileToString(Path(path), &contents)) {
+			File::Delete(Path(path));
+			std::vector<std::string> lines;
+			SplitString(contents, '\n', lines, true);
+			for (const std::string &line : lines) {
+				if (!line.empty()) {
+					queue.push_back(line);
+				}
+			}
+		}
+	}
+	if (wait > 0) {
+		wait--;
+		return;
+	}
+	while (!queue.empty()) {
+		const std::string line = queue.front();
+		queue.pop_front();
+		const size_t space = line.find(' ');
+		const std::string verb = line.substr(0, space);
+		const std::string arg = space == std::string::npos ? "" : line.substr(space + 1);
+		if (verb == "wait") {
+			wait = atoi(arg.c_str());
+			return;
+		}
+		// `look DX DY`: a mouse movement, through NativeMouseDelta like a real one.
+		if (verb == "look") {
+			float dx = 0.0f, dy = 0.0f;
+			if (sscanf(arg.c_str(), "%f %f", &dx, &dy) == 2) {
+				NativeMouseDelta(dx, dy);
+			}
+			continue;
+		}
+		InputKeyCode code;
+		InputDeviceID device;
+		if (!ParseDevKey(arg, &code, &device)) {
+			WARN_LOG(Log::System, "VCS_KEY_PIPE: no key called '%s'", arg.c_str());
+			continue;
+		}
+		if (verb == "press") {
+			NativeKey(KeyInput(device, code, KeyInputFlags::DOWN));
+			queue.push_front("up " + arg);
+			wait = 2;
+			return;
+		}
+		NativeKey(KeyInput(device, code, verb == "up" ? KeyInputFlags::UP : KeyInputFlags::DOWN));
+	}
+}
+
+UIScreen *CreateIconSaveScreen(const Path &gamePath, bool bootPending) {
+	VCSMenuScreen *screen = new VCSMenuScreen(gamePath, bootPending);
+	screen->OpenForIconSave();
+	return screen;
 }
 
 UIScreen *CreatePauseScreen(const Path &gamePath, bool bootPending) {

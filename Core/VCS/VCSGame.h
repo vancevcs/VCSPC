@@ -156,6 +156,10 @@ inline constexpr int kVCSWaterDefault = kVCSWaterSeaAndRoads;
 inline constexpr int kVCSWidescreenDefault = 0;
 #endif
 
+// The two positions of the frame limiter row.
+inline constexpr int kVCSFrameRate30 = 0;
+inline constexpr int kVCSFrameRate60 = 1;
+
 struct VCSGameSettings {
 	bool showFps = false;
 
@@ -218,6 +222,37 @@ struct VCSGameSettings {
 	int sfxVolume = kVCSVolumeMax;
 	int radioVolume = kVCSVolumeMax;
 
+	// The game's own BRIGHTNESS, off the same Display page as the two switches above, in the
+	// game's own units - kVCSBrightnessMin..Max, eight notches of 32. Defaults to the value the
+	// game itself starts a fresh install at, so turning the row on changes nothing for a player
+	// who never touched the game's own slider.
+	int brightness = kVCSBrightnessDefault;
+
+	// Which of the disc's five GXTs the game reads its text from: 0 English, then French, German,
+	// Italian and Spanish, in the game's own order. The USA build never chooses for itself - see
+	// kVCSGameLanguage - so this is applied before the game runs and takes effect on the next boot.
+	int language = 0;
+
+	// The PSP release's CUSTOM SOUNDTRACKS: the player's own music, in place of every radio. Off by
+	// default, which is the game's own default. See kVCSSetCustomTracks for what turning it on does
+	// and why it is a call rather than a write.
+	bool customTracks = false;
+
+	// The frame limiter: the game's own 30, or 60. One of two positions rather than a range because
+	// the game paces itself in whole vblanks of a 60 Hz display - two per frame at retail - so 30
+	// and 60 are the steps it has, and anything between would be uneven frames rather than a rate.
+	int frameRate = kVCSFrameRate30;
+
+	// SMAA over the 3D scene - see GPU/Common/VCSSmaa.h. Another renderer setting, pushed by an
+	// onChange like `shadows`. On by default on a desktop, where three full-screen passes are
+	// nothing; off on a phone, where they are a real share of the frame and the screen's density
+	// hides most of the stairs anyway.
+#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+	bool antiAliasing = false;
+#else
+	bool antiAliasing = true;
+#endif
+
 	// A wider view on a screen wider than the PSP's - see the Widescreen section at the bottom of
 	// this file for what the three positions do. On a phone, where the screen always IS wider,
 	// the default is the one that keeps the HUD's shape.
@@ -225,6 +260,25 @@ struct VCSGameSettings {
 };
 
 VCSGameSettings &GameSettings();
+
+// What the game itself says about custom soundtracks, for the menu row - which cannot read PSP
+// memory to ask. kVCSCustomTracksNone when the folder held nothing it could play; -1 before the
+// game has said anything at all.
+int CustomTracksState();
+
+// Where the player puts their music: PSP/SAVEDATA/ULUS10160CUSTOMTRACKS on the memory stick,
+// the folder the PSP release reads. Made at boot so it is there to be found.
+Path CustomTracksFolder();
+
+// Whether PPSSPP should skip DRAWING a frame when the host falls behind, rather than slow emulated
+// time down to match - its auto frameskip, forced on while the frame limiter is at 60 and the
+// player's own setting left alone. Read by sceDisplay's frame timing; false for every other game.
+//
+// Measured why: 60 game frames a second at 6x with every pass on was more than the Mac could
+// draw, so PPSSPP ran the emulator at 78% - and a game whose timestep follows the clock follows
+// the emulator's clock, so everything moved at 78%. That IS the slow motion a 60 fps patch is known
+// for. With frames dropped instead, the same scene ran at full speed and showed 51 a second.
+bool ForceAutoFrameSkip();
 
 // Substitute a file on the UMD as it is read, by BYTE RANGE rather than by name.
 //

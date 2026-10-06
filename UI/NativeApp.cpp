@@ -1190,6 +1190,9 @@ void NativeFrame(GraphicsContext *graphicsContext) {
 
 	g_OSD.Update();
 
+	// Fork-specific, and dev-only: VCS_KEY_PIPE's synthetic keys. Nothing when it is unset.
+	VCSDevKeyPipeTick();
+
 	_dbg_assert_(graphicsContext != nullptr);
 	_dbg_assert_(g_screenManager != nullptr);
 

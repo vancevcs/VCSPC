@@ -97,6 +97,40 @@ The one place the sequence is patient rather than strict is the very first Start
 inside the opening scene, where that button may be spent skipping something. It gets three goes,
 and only the auto-load does - everything else still gives up after one.
 
+### The curtain goes up when the movie ends, not at the seam
+
+After the credits - played out or skipped - the game used to show three screens of PSP machinery
+before the seam: a title-and-legal card, the firmware's "Loading from Memory Stick, do not remove..."
+over `MEMCARD.XTX` while it autoloads, and its own jet-ski loading screen while the world streams.
+Then the seam, where the auto-load raised this fork's curtain anyway. The curtain goes up at the END
+OF THE MOVIE now and the seam simply takes it over.
+
+**The end of the movie is a disc read.** Every read of a boot logged by file, with the credits
+skipped:
+
+| t (s) | read | on screen |
+|---|---|---|
+| 0.87 | `LOGO.PMF` | logos |
+| 2.94 | `TITLES.PMF` | the credits |
+| **3.45** | **`SCEALE.XTX`** | the title card - the movie has just ended or been skipped |
+| 4.63 | `MEMCARD.XTX` | "Loading from Memory Stick" |
+| 6.88 | `LOADSC*.XTX` | the game's loading screen |
+| 7.45 | | the seam; `FrameCounter` nonzero |
+
+`SCEALE.XTX` is read at that moment and at no other in the boot, and the fork already sees every read
+in `PatchDiscRead` - so the trigger needed no new seam into PPSSPP. It matches the file's 16-byte
+header at its sector (26960) before raising anything, because a curtain raised over the movie by a
+different layout would be worse than none.
+
+At the seam `RequestAutoLoad` re-raises it fresh and its sequence takes it down as before. With
+nothing to load - a first run - `ReleaseBootCurtain` lets it settle thirty game frames and drop on its
+own, instead of sitting there until its 1800-vblank ceiling. What shows after that on a first run is
+the game's black "Loading..." card for the opening mission, which every mission start shows and is
+left alone.
+
+Measured both ways: with saves, LOADING from the first frame after the skip until the safe house;
+with the memory stick empty, LOADING until the seam and then the opening mission.
+
 ### What a save is actually made of, and the bug that hid in it
 
 **The save-menu request byte is not a save.** Setting `gp+0x1076` opens the save UI and the game
@@ -261,6 +295,35 @@ gives up, and `AbandonSequence` boots the disc and tells that one autoload to fi
 (`TakeNewGameBoot`, consumed by `PSPSaveDialog`'s autoload path). It costs the intro, which is
 what walking was worth avoiding, and it beats a row that does nothing. That give-up used to stop
 at an error toast, which is how "NEW GAME during a cutscene" came to do nothing at all.
+
+### The save icon opens this fork's SAVE GAME page
+
+**Status: working, measured.** Walking into the save icon at a safe house used to put up the
+firmware's savedata list - PPSSPP's own slot browser in PPSSPP's own look, the last screen in
+ordinary play that still looked like an emulator. Now this fork's menu goes up over it on a SAVE
+GAME page: the eight slots as the load page shows them, EMPTY ones included because an empty slot is
+somewhere to save, and an occupied one asking "overwrite?" on the confirmation page first. The pick
+is walked through the firmware list behind a SAVING curtain - steered to the slot, its own overwrite
+prompt answered, "save completed" dismissed - which is the auto-save's dialog phase with a slot of
+the player's choosing (`g_saveSlot`). BACK, Escape, or any other way out of the page cancels: the
+walk presses the dialog's own Back until it is gone.
+
+**How it knows the icon opened it**: a firmware SAVE list on screen while the bridge is Idle. Every
+sequence of ours that opens that dialog is in a phase of its own by then, so a list that arrives with
+nothing running can only be the game's. The tick sets `g_iconSaveAsk`, `EmuScreen::update` takes it
+and pushes `CreateIconSaveScreen`, and the page's answer comes back through `AnswerIconSave`. The
+menu's destructor answers "cancel" if nothing else did, so the firmware dialog is never left waiting.
+
+**Nothing of the script's preamble is repeated**, unlike `RequestSaveMenu`: the safe house routine
+has already done it before it called `0260` - see "What a save is actually made of" above.
+
+**Tested by writing the request byte (`gp+0x1076`) over the debugger** rather than walking to an
+icon, which opens the same UI but skips that preamble - so the file it writes is the broken kind. The
+memory stick's saves were copied aside first and the slot used was put back afterwards. Measured: the
+page came up over the list, slot 8 picked and confirmed, SAVING, and `ULUS10160S92F7/PARAM.SFO`
+rewritten; cancelled, the world was back within a second with the game's menu closed.
+
+`ownSaveMenu` on `VCSFrontEndSettings` hands the icon back to the firmware dialog.
 
 ### The questions are pages, not popups
 

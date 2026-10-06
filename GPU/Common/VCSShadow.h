@@ -240,6 +240,8 @@ struct Settings {
 	// frustum. Frustum fitting is strictly better and belongs in milestone 4; this gets a shadow
 	// map on screen without first having to decompose the game's projection matrix.
 	float cascadeRadius;
+	// The most the box may lead the camera along its direction of TRAVEL - never along the view,
+	// which swung the box with every turn of the camera. See CascadeLead.
 	float centreDistance;
 
 	// The near half of the split. One cascade cannot be both wide enough to cover the road
@@ -353,6 +355,13 @@ struct Settings {
 	// mirrored back above the horizon - which is roughly where the moon is - and the shadows it
 	// casts are scaled by this. Zero turns night shadows off.
 	float moonStrength;
+
+	// The sun's elevation (the z of its unit direction) under which its shadows fade, reaching
+	// nothing at the moon's threshold. A sun a few degrees up throws shadows long enough to cover
+	// nearly everything, at the full strength its colour carries - reported as "around 19:00 - 21:00
+	// the world gets very dark, then brighter because of the moon": the dark band WAS the shadows,
+	// until the sun crossed the horizon and the moon (lifted, and at moonStrength) took over.
+	float lowSunFade;
 
 	// Shadows fade out while it rains, and stay out until the roads have dried.
 	//
@@ -761,6 +770,12 @@ inline bool IsActive() { return g_active; }
 // Runtime on/off. This is an experiment living inside a working emulator, so it needs to be
 // switchable without a rebuild and without touching compat.ini.
 void SetEnabled(bool enabled);
+
+// This frame's shadow mask, once it has been composited into the frame - and the tint (rgb) and
+// strength (a) it was composited with, so a later pass can take it back out of what it reads: the
+// wet roads' reflections, which would otherwise mirror the shadows. Null before the composite, when
+// the shadows are off or skipped, or when a debug view replaced the composite.
+Draw::Framebuffer *CompositedMask(float tintStrength[4]);
 bool IsEnabled();
 
 void Init();

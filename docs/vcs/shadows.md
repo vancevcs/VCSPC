@@ -8,7 +8,7 @@
 **Status: working, confirmed in play, on by default.** Three passes inside every frame, at full
 speed (30.0 fps measured on an ordinary Vice Point street with 1369 draws and ~146k vertices in
 the frame). `GPU/Common/VCSShadow.cpp` holds all of it; the hooks are four lines in
-`DrawEngineVulkan` and one in `GPU_Vulkan`. The row is `Dynamic shadows` on the Graphics page, and
+`DrawEngineVulkan` and one in `GPU_Vulkan`. The row is `Shadow quality` on Display Setup → ADVANCED, and
 everything worth tuning is on the debugger's **Shadows** tab.
 
 ```
@@ -1091,10 +1091,74 @@ perfectly acceptable at the distance it is cast from, and the cheap way to find 
 rather than another number: one build where stand-in cells do not cast at all, and whatever
 disappears from the frame is what they were contributing.
 
-#### Shadows go out in the rain
+#### A thin lit ring round the player was the near cascade's edge fade
 
-Reported from play: when it starts raining the shadows project strangely onto the puddle
-reflections. `hideInRain` fades them out over `rainFadeSeconds` (2) and keeps them out while the
+Reported: "when under a building's shadow, it's like a 2px cut in the otherwise full shadow that
+follows the player in distance, like an end of a radius". The mask shader fades a cascade's shadow
+towards lit near the cascade's edge (`edgeFade`, 0.15 of the box), and it did that for the near
+cascade too. But the near cascade hands over to the far one at 0.92 of its box. So just inside the
+handover every shadow was faded to about half (0.53 at 0.92), and one step further out the far
+cascade drew it at full strength: a lit ring at the near box's radius that moved with the player.
+The fade now applies to the far cascade's edge only, which is where shadows really end. Past the near
+box the far cascade carries them.
+
+#### In the rain the passes ran on a quarter of the city: an early 2D draw
+
+Reported: "shadows in rain act still strange... it feels like the same case when I opened the map,
+they were very weirdly misplaced". Forcing rain (weather 2) and reading the log settled it. In the
+rain the "second frame" re-capture fired on every frame, 1000 times in 40 seconds, and the passes
+ran twice a frame. A probe on the restart showed the same framebuffer, the same camera, no mirroring
+(view determinant 1.000). The seam the passes first fired at was a blended, textured 2D draw on the
+same texture every frame (`09715bd0`), with about 10,000 of the frame's 42,000 caster indices in.
+That is the game's rain overlay, drawn a quarter of the way through its world. So the passes ran on
+part of the city, the rest arrived as "a second frame", and the passes ran again on that rest: two
+composites, each from part of the world. That, not the puddles, was what `hideInRain` hid.
+
+The answer is to learn the draw. When a frame's passes run twice at two DIFFERENT draws, the first
+draw's texture is remembered (`s_earlySeamTex`, up to four). From then on a 2D draw with it is
+passed over, the capture carries on, and the passes run once, at the seam after the world.
+Requiring two different draws matters. A real second frame, which happens a few times a session in
+clear weather, runs at the HUD's first draw both times, and learning that texture would pass over
+the only seam there is. The textures are forgotten after 600 frames without one. The log says `comes
+before the world is finished` when it learns one and `passed over the early 2D draw` as it works.
+
+Two approaches that did not work, recorded. A share of the casters ("defer a seam reached with under
+60% of last frame's casters") failed because an early seam arrives with anywhere from a quarter to
+over half of them, depending on the view. The first build of it also summed a restarted frame's two
+captures for the baseline, so no seam ever reached the bar and the shadows went out completely. The
+cheap guard beside it stays: a re-capture with under a quarter of the first's casters is not a
+second frame, and the first composite is kept.
+
+Whether the pause map's misplacement is the same mechanism (a 2D draw before the world when the map
+closes) is not measured.
+
+#### The dark band at dusk was the shadows, and a low sun now fades them
+
+Reported from play: "during around 19:00 - 21:00 the world gets very dark (sun is falling and moon is
+slowly rising), then it gets brighter because of the moon as it should". Measured at one spot with
+the clock set to 18:00, 19:00, 19:30, 20:00, 20:30 and 21:30, shadows on and off. Off, the game's own
+dusk is dim but even. On, 19:00 and 19:30 went grey-green dark. A sun a few degrees up throws shadows
+long enough to cover nearly everything, and it kept the full strength its colour carries until it
+crossed `kMinSunElevation` (0.05, about 3 degrees). Only then did the moon take over: lifted to 0.35,
+at `moonStrength`, which is why it got brighter.
+
+`lowSunFade` (0.26, about 15 degrees) fades the sun's strength with a smoothstep from there down to
+the moon threshold. The swap now starts from nothing and the moon's shadows ease in through
+`EaseShadowStrength`. Ambient occlusion follows, since it takes its share from the composite's
+strength. Re-measured: 19:00-20:30 now look like shadows off, with the moon's arriving after 21:00.
+The slider is on the Shadows tab.
+
+#### Shadows go out in the rain - no longer
+
+**Superseded 2026-10-06: `hideInRain` is off by default.** The main thing it hid was the passes
+running twice a frame in the rain - see "In the rain the passes ran on a quarter of the city". The
+puddles also mirrored the shadows, because the water pass runs after the composite and reflects the
+frame. For that, `VCSShadow::CompositedMask` hands the road pass this frame's mask and the tint and
+strength it was composited with, and the water shader divides that factor back out of what a road
+reflects. See "Puddles reflected the shadows" in water.md. The fade is kept as a switch.
+
+The original note: reported from play, when it starts raining the shadows project strangely onto the
+puddle reflections. `hideInRain` faded them out over `rainFadeSeconds` (2) and keeps them out while the
 roads are wet, because the puddles outlast the rain. They start back once VCSWater's lagged wetness
 drops under `rainShadowsReturnWetness` (0.30, about 10% of a road still wet) and are fully back at
 half of it (2%). It was 0.1 down to 0, reported as shadows returning only once every puddle had gone.
@@ -1102,6 +1166,29 @@ With the water pass off it
 goes by the game's rain level alone. Fully faded, `OnFlush` skips all three passes but the capture
 carries on, so the caster cache is warm when they come back. A skipped frame is not a BLINK; the log
 says `off for the rain` and `back, the roads are dry` at NOTICE; both knobs are on the Shadows tab.
+
+#### ULTRA flickered with the camera because the box followed the VIEW
+
+Reported as "ULTRA flickers when the camera moves", with the suggestion to cast less if that was the
+cause. It was not how many were cast - ULTRA runs at full speed - but WHERE the box was: centred
+`centreDistance` (40) along the view direction, so a half turn of the camera swung the whole cascade
+80 units. Large casters at the box's edge - buildings, which only ULTRA casts - entered and left the
+shadow map, and the remembered cells' replay test (`reaches`) is measured from the same centre, so
+whole building shadows came and went. HIGH's casters are people, cars and props a few units from
+the player, inside the box wherever it points, which is why HIGH never showed it. The near cascade
+had the same habit at a sixth of the scale, moving things between the sharp tile and the soft one.
+
+The lead exists so a car does not outrun its shadows, which is a lead along the TRAVEL. So that is
+what it follows: `CascadeLead` smooths the camera's horizontal velocity over half a second and
+leads by 1.2 s of it, clamped to `centreDistance`; a jump over fifteen units in a frame is a rebase
+or a teleport and leaves the velocity alone. Standing and turning, the lead is zero and the shadow
+map does not change at all. Centred on the camera at rest, the box reaches as far behind as ahead,
+so `cascadeRadius` went from 70 to 85 to keep most of a street's reach in front - about 4.2 cm a
+texel in the far tile.
+
+Checked with a slow 360 turn on ULTRA on Ocean Beach at 16:00, frames grabbed continuously: the long
+building and palm shadows on the walkway hold their shapes through the turn. There is no clean
+"before" capture to set beside it - the player was playing in the same instance during that one.
 
 #### Ambient occlusion, read off the mask's depth (prototype, 2026-09-30)
 

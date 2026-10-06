@@ -3,6 +3,57 @@
 > Read before touching `VCSCamera`, `VCSFireHook`, the aim response model, deadbands or the fire-site ray.
 > Moved verbatim out of the old CLAUDE.md; sections cross-reference each other by title, so `grep -rn "<title>" docs/vcs`.
 
+### The passenger drive-by is aimed with the view, like free aim
+
+**Status: confirmed in play on Jive Drive, 2026-10-06, "works well now".** `driveByCameraAim`, on by
+default. In the passenger seat (camera mode 11 and weapon camera mode 11, `DriveByAimActive`), all of
+this happens at once:
+
+- **The mouse turns the view.** The chase camera builds a drive-by view (`g_driveByView`: the
+  vehicle view with no glances and no recentring), looking 1.3 m above the car so the car sits low
+  in the frame. It uses free aim's numbers: Aiming sensitivity and "invert aim vertically".
+- **The shot goes down the middle of that view.** `CameraDrivenAimHeld` counts the seat as aiming,
+  and the fire hook takes the ray from `ChaseCamDriveByBasis`, the view exactly as rendered, through
+  screen centre. `EmuScreen` draws a crosshair there.
+- **The passenger's gun follows the view.** `ApplyAnalog` drives the stick with a proportional loop
+  on the angle between the view and the gun (`driveByFollowYaw` 8, `driveByFollowPitch` 20). The
+  gun's direction is what the game writes into `CameraYaw`/`CameraPitch` in this mode each frame
+  (front yaw = `CameraYaw` − π, as on foot).
+
+**Why not the stick, which is how it was aimed before.** Reported from a tester: "inverted by
+default, even if I change it in the settings", "very insensitive". Four builds of tuning the mouse
+onto the nub went inverted, then too slow, then "one very small move moves it like crazy", then
+"like moving a joystick". The reason is in the code: the drive-by's stick is target selection, not
+free aim. `0x0894fddc` reads the scaled axes (`0x0898de2c` X, `0x0898df58` Y, which return
+`trunc(stick * CPad+0xd0/+0xd4)` with no clamp) and nudges an aim point that it also snaps onto
+entities: it copies a target's position into `CPed+0xcf0`. The game's own hint says the same thing:
+"Hold [fine aim] to make fine adjustments to your aim". No mapping of a mouse onto that can be
+precise. For the record:
+
+- vertical WAS inverted relative to the reticle's convention; horizontal was not, and flipping it
+  played as "right moves it left";
+- a write to `CameraYaw` in mode 11 is overwritten within the frame, so it is derived, not stored.
+
+**Shots first landed off the crosshair, because the hook read the wrong camera.** The chase camera
+writes the camera update's working vectors (`0x08a225a4`'s stack, see `kVCSCamPreShake`), which
+become the CCamera matrix the renderer uses. It never writes CCam[0]'s stored basis (`kVCSCam0` +
+0x10 front, + 0x20 source). That basis is what the fire hook reads on foot, where it IS the view. In
+the drive-by it is the game's own mode-11 camera, so every shot went down the game's line, "in some
+kind of offset". Fixed with `ChaseCamDriveByBasis`.
+
+**And the fire hook did not survive a savestate.** `InstallFireHook` installed once per boot and never
+looked again, while loading a state puts the game's own `jal` back at `0x08A41D74`. Free aim stopped
+redirecting anything for the rest of the session, on foot as well. A breakpoint on that address
+stopped on the plain `jal`, which is what showed it. It now checks every tick through
+`Read_Instruction`, the way the chase camera checks its own hooks. The drive-by's shots come through
+that same site, from the weapon routine at `0x08A48DEC`.
+
+**Testing this without replaying the mission.** A scratch memstick (see the test-fixture memory)
+with Save State / Load State on F2 / F4 in its `controls.ini`: the tester presses F2 in the car once,
+and every later build is checked with F4 through `VCS_KEY_PIPE`. The first F4 after boot does not
+take, so press it twice. Keep the game window in front: macOS App Nap throttles it in the background,
+and every measurement taken that way was noise.
+
 ### There was never a deadband: the free-aim camera turns toward the gun target
 
 **Status: fixed 2026-09-15, confirmed in play. Supersedes the three sections below** - the deadband

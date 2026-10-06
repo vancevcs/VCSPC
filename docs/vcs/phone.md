@@ -76,6 +76,19 @@ thing from the rows that do. They are the same kind of thing doing something els
   `kVCSPadJumpButton`, so vaulting still sees it.
 - **`Menu`**, **`Skip`**, **`SteerLeft`** and **`SteerRight`** press nothing at all.
 
+#### FIRE in the fire truck and the Rhino
+
+Both vehicles fire with the vehicle fire control ("Hold ~VEWEP~ to use the fire engine's water
+cannon"), which is pad B here. Touch had no button for it: the bike's SHOOT is the only other row
+that presses B alone, and it shows only on a bike. `car.gun` shows while `MountedGunVehicle` says so:
+model 194 (`firetruk`) or 246 (`rhino`), both read out of the game's model-name table. It sits in
+the inner column's free top slot.
+
+Aiming needs nothing new. The steering already yaws the cannon. A vertical drag raises and lowers
+it, because `AddTouchLook` feeds the same delta the mouse does, and `CannonAimActive` spends that
+delta's Y on the cannon while in the fire truck. The arrange screen shows the button in DRIVING so
+it can be moved. Not played yet.
+
 #### The glances shoot
 
 On the PSP a drive-by is the glance modifier and a stick direction, and then Circle - three

@@ -46,6 +46,7 @@ TITLES = {
     "quit": "Quit Game",
     "loadgame": "Load Game",
     "deletegame": "Delete Game",
+    "savegame": "Save Game",
     "onfoot": "On Foot",
     "invehicle": "In Vehicle",
     "aircraft": "Aircraft",

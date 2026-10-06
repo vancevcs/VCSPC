@@ -28,6 +28,7 @@
 #include "Core/KeyMap.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/VCS/VCSCamera.h"
+#include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSCheats.h"
 #include "Core/VCS/VCSFrontEnd.h"
 #include "Core/VCS/VCSFireHook.h"
@@ -38,6 +39,13 @@
 #include "Core/VCS/VCSVault.h"
 
 namespace VCS {
+
+// Short names for the four contexts the rebindable actions live in, for the table that lists them
+// and for the questions that ask a binding in one particular context.
+static constexpr VCSInputContext kFoot = VCSInputContext::OnFoot;
+static constexpr VCSInputContext kAim = VCSInputContext::Aiming;
+static constexpr VCSInputContext kCar = VCSInputContext::InVehicle;
+static constexpr VCSInputContext kAir = VCSInputContext::InAircraft;
 
 // The pad's own held set, its sticks, and its settings.
 //
@@ -249,7 +257,7 @@ static const int kLatchDropSprintAt = 7;  // sprint for the first half, run for 
 static bool PadLeftStick(float *x, float *y);
 
 bool MovementKeysHeld() {
-	if (IsHostKeyDown(NKCODE_W)) {
+	if (IsHostKeyDown(BoundKey(kFoot, NKCODE_W))) {
 		return true;
 	}
 	// The stick pushed FORWARD, which is the pad's W. Any deflection would be the wrong test: the
@@ -609,6 +617,255 @@ const VCSKeyMapping kVCSKeyMappings[] = {
 };
 
 const size_t kVCSKeyMappingCount = ARRAY_SIZE(kVCSKeyMappings);
+
+// --- What a player can rebind -------------------------------------------------------------------
+//
+// One row per line of the controls card, owning the (context, shipped key) pairs that line is made
+// of. The pairs are what the table above and the code below name, so this is a list of what moves
+// together and nothing else - see BoundKey.
+//
+// Some lines own pairs that are not on the card at all, and they matter more than the visible ones:
+// the aim key also holds aim while aiming, the move keys also strafe under lock-on, and S also
+// enters free aim. Leave one out and a rebind leaves half its action on the old key.
+//
+// Deliberately absent: LOOK (the mouse), MENU (Escape, which belongs to PPSSPP), the debug spawner
+// rows, and the Menu context's keys - the game's own menus are worked the same way whatever the
+// player has done to the world's bindings.
+
+const VCSKeyAction kVCSKeyActions[] = {
+	// --- On foot ---
+	{ "foot_forward",    "Move", VCSKeyList::OnFoot, "FORWARD", { { kFoot, NKCODE_W }, { kAim, NKCODE_W } } },
+	{ "foot_back",       "Move", VCSKeyList::OnFoot, "BACK",    { { kFoot, NKCODE_S }, { kAim, NKCODE_S } } },
+	{ "foot_left",       "Move", VCSKeyList::OnFoot, "LEFT",    { { kFoot, NKCODE_A }, { kAim, NKCODE_A } } },
+	{ "foot_right",      "Move", VCSKeyList::OnFoot, "RIGHT",   { { kFoot, NKCODE_D }, { kAim, NKCODE_D } } },
+	{ "foot_walk",       "Walk", VCSKeyList::OnFoot, nullptr,
+		{ { kFoot, NKCODE_ALT_LEFT }, { kFoot, NKCODE_ALT_RIGHT }, { kAim, NKCODE_ALT_LEFT }, { kAim, NKCODE_ALT_RIGHT } } },
+	{ "foot_jump",       "Jump", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_SPACE } } },
+	{ "foot_sprint",     "Sprint", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_SHIFT_LEFT } } },
+	{ "foot_fire",       "Fire", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_EXT_MOUSEBUTTON_1 }, { kFoot, NKCODE_CTRL_LEFT } } },
+	{ "foot_aim",        "Aim weapon", VCSKeyList::OnFoot, nullptr, { { kFoot, kVCSAimKey }, { kAim, kVCSAimKey } } },
+	{ "foot_enter",      "Enter vehicle", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_F } } },
+	{ "foot_nextweapon", "Next weapon", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_E } } },
+	{ "foot_prevweapon", "Previous weapon", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_Q } } },
+	{ "foot_pickup",     "Take nearby weapon", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_TAB }, { kAim, NKCODE_TAB } } },
+	{ "foot_camera",     "Change camera", VCSKeyList::OnFoot, nullptr, { { kFoot, NKCODE_V } } },
+	{ "foot_submission", "Sub-mission / recruit", VCSKeyList::OnFoot, nullptr, { { kFoot, kVCSSubMissionKey }, { kAim, kVCSSubMissionKey } } },
+	{ "foot_lockon",     "Toggle lock-on mode", VCSKeyList::OnFoot, nullptr, { { kFoot, kVCSLockOnKey }, { kAim, kVCSLockOnKey } } },
+	// On two pages, because the card lists them on two: something you do on foot and mid-fight.
+	{ "foot_prevtarget", "Previous target", VCSKeyList::OnFoot | VCSKeyList::Melee, nullptr, { { kAim, NKCODE_Q } } },
+	{ "foot_nexttarget", "Next target", VCSKeyList::OnFoot | VCSKeyList::Melee, nullptr, { { kAim, NKCODE_E } } },
+	{ "foot_zoomin",     "Zoom in (scope, binoculars, camera)", VCSKeyList::OnFoot, nullptr,
+		{ { kAim, NKCODE_Z }, { kAim, NKCODE_EXT_MOUSEWHEEL_UP } } },
+	{ "foot_zoomout",    "Zoom out (scope, binoculars, camera)", VCSKeyList::OnFoot, nullptr,
+		{ { kAim, NKCODE_Y }, { kAim, NKCODE_EXT_MOUSEWHEEL_DOWN } } },
+
+	// --- Hand to hand ---
+	{ "melee_attack",    "Light attack / fire", VCSKeyList::Melee, nullptr, { { kAim, NKCODE_EXT_MOUSEBUTTON_1 }, { kAim, NKCODE_CTRL_LEFT } } },
+	{ "melee_heavy",     "Heavy hit / stomp", VCSKeyList::Melee, nullptr, { { kAim, NKCODE_SHIFT_LEFT } } },
+	{ "melee_block",     "Block", VCSKeyList::Melee, nullptr, { { kAim, NKCODE_SPACE } } },
+	{ "melee_grab",      "Grab / throw", VCSKeyList::Melee, nullptr, { { kAim, NKCODE_F } } },
+
+	// --- In a vehicle ---
+	{ "car_accelerate",  "Accelerate", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_W } } },
+	{ "car_brake",       "Brake / reverse", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_S } } },
+	{ "car_left",        "Steer", VCSKeyList::InVehicle, "LEFT",  { { kCar, NKCODE_A } } },
+	{ "car_right",       "Steer", VCSKeyList::InVehicle, "RIGHT", { { kCar, NKCODE_D } } },
+	{ "car_handbrake",   "Handbrake", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_SPACE } } },
+	{ "car_leftbutton",  "Left button", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_TAB } } },
+	{ "car_exit",        "Exit vehicle", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_F } } },
+	{ "car_fire",        "Drive-by fire", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_EXT_MOUSEBUTTON_1 }, { kCar, NKCODE_CTRL_LEFT } } },
+	{ "car_horn",        "Horn", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_H } } },
+	{ "car_nextradio",   "Next radio station", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_T } } },
+	{ "car_prevradio",   "Previous radio station", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_R } } },
+	{ "car_camera",      "Change camera", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_V } } },
+	{ "car_submission",  "Sub-mission / recruit", VCSKeyList::InVehicle, nullptr, { { kCar, kVCSSubMissionKey } } },
+	{ "car_lookleft",    "Look left", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_Q } } },
+	{ "car_lookright",   "Look right", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_E } } },
+
+	// --- Helicopters and planes ---
+	{ "air_climb",       "Climb", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_W } } },
+	{ "air_descend",     "Descend", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_S } } },
+	{ "air_yawleft",     "Yaw left", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_Q } } },
+	{ "air_yawright",    "Yaw right", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_E } } },
+	{ "air_rollleft",    "Roll left", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_A }, { kAir, NKCODE_DPAD_LEFT } } },
+	{ "air_rollright",   "Roll right", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_D }, { kAir, NKCODE_DPAD_RIGHT } } },
+	{ "air_pitchdown",   "Pitch nose down", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_DPAD_UP } } },
+	{ "air_pitchup",     "Pitch nose up", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_DPAD_DOWN } } },
+	{ "air_exit",        "Exit aircraft", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_F } } },
+	{ "air_fire",        "Fire (Hunter)", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_EXT_MOUSEBUTTON_1 }, { kAir, NKCODE_CTRL_LEFT } } },
+	{ "air_nextradio",   "Next radio station", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_T } } },
+	{ "air_prevradio",   "Previous radio station", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_R } } },
+	{ "air_camera",      "Change camera", VCSKeyList::Aircraft, nullptr, { { kAir, NKCODE_V } } },
+	{ "air_submission",  "Sub-mission / recruit", VCSKeyList::Aircraft, nullptr, { { kAir, kVCSSubMissionKey } } },
+};
+
+const size_t kVCSKeyActionCount = ARRAY_SIZE(kVCSKeyActions);
+
+// 0 while an action is still on its shipped keys. Atomics because the input thread reads these on
+// every key event while the menu - on another thread on Windows - writes them.
+static std::atomic<int> g_actionKeys[ARRAY_SIZE(kVCSKeyActions)];
+// How many are not 0, so the overwhelmingly common case - nothing rebound - costs one load.
+static std::atomic<int> g_actionKeysSet{0};
+
+static int FindAction(VCSInputContext context, InputKeyCode key) {
+	for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+		for (const VCSKeyBindPair &pair : kVCSKeyActions[i].pairs) {
+			if (pair.key == key && pair.key != 0 && pair.context == context) {
+				return (int)i;
+			}
+		}
+	}
+	return -1;
+}
+
+InputKeyCode BoundKey(VCSInputContext context, InputKeyCode key) {
+	if (g_actionKeysSet.load(std::memory_order_relaxed) == 0) {
+		return key;
+	}
+	const int action = FindAction(context, key);
+	if (action < 0) {
+		return key;
+	}
+	const int bound = g_actionKeys[action].load(std::memory_order_relaxed);
+	return bound ? (InputKeyCode)bound : key;
+}
+
+// Whether a rebound action has TAKEN this key in this context. A row nothing can rebind - the
+// spawner's arrows, a psp = 0 suppression - stands down for a key the player has given to
+// something else, or binding an arrow key to movement would also cycle the spawner and press L.
+static bool KeyTakenByAction(VCSInputContext context, InputKeyCode key) {
+	if (g_actionKeysSet.load(std::memory_order_relaxed) == 0) {
+		return false;
+	}
+	for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+		if (g_actionKeys[i].load(std::memory_order_relaxed) != (int)key) {
+			continue;
+		}
+		for (const VCSKeyBindPair &pair : kVCSKeyActions[i].pairs) {
+			if (pair.key != 0 && pair.context == context) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// The key a mapping row answers to right now: its action's binding, or nothing at all when the
+// row belongs to no action and its key has been given to one.
+static InputKeyCode RowKey(VCSInputContext context, InputKeyCode key) {
+	if (FindAction(context, key) < 0 && KeyTakenByAction(context, key)) {
+		return (InputKeyCode)0;
+	}
+	return BoundKey(context, key);
+}
+
+InputKeyCode ActionKey(size_t action) {
+	return action < kVCSKeyActionCount
+		? (InputKeyCode)g_actionKeys[action].load(std::memory_order_relaxed) : (InputKeyCode)0;
+}
+
+// The keys an action answers to now, de-duplicated and in table order.
+static std::vector<InputKeyCode> ActionKeys(size_t action) {
+	std::vector<InputKeyCode> keys;
+	if (const InputKeyCode bound = ActionKey(action)) {
+		keys.push_back(bound);
+		return keys;
+	}
+	for (const VCSKeyBindPair &pair : kVCSKeyActions[action].pairs) {
+		if (pair.key != 0 && std::find(keys.begin(), keys.end(), pair.key) == keys.end()) {
+			keys.push_back(pair.key);
+		}
+	}
+	return keys;
+}
+
+std::string ActionKeyText(size_t action) {
+	std::string text;
+	for (InputKeyCode key : ActionKeys(action)) {
+		if (!text.empty()) {
+			text += " / ";
+		}
+		text += KeyDisplayName(key);
+	}
+	return text;
+}
+
+static void StoreActionKey(size_t action, InputKeyCode key) {
+	// Back on its one shipped key is the shipped binding, and is stored as such - otherwise a key
+	// swapped away and back again would sit in vcs.ini forever as an override that changes nothing.
+	bool onlyDefault = key != 0;
+	for (const VCSKeyBindPair &pair : kVCSKeyActions[action].pairs) {
+		if (pair.key != 0 && pair.key != key) {
+			onlyDefault = false;
+		}
+	}
+	if (onlyDefault) {
+		key = (InputKeyCode)0;
+	}
+	const int previous = g_actionKeys[action].exchange((int)key, std::memory_order_relaxed);
+	if ((previous != 0) != (key != 0)) {
+		g_actionKeysSet.fetch_add(key != 0 ? 1 : -1, std::memory_order_relaxed);
+	}
+}
+
+void SetActionKeyRaw(size_t action, InputKeyCode key) {
+	if (action < kVCSKeyActionCount) {
+		StoreActionKey(action, key);
+	}
+}
+
+static bool ActionsShareContext(size_t a, size_t b) {
+	for (const VCSKeyBindPair &pa : kVCSKeyActions[a].pairs) {
+		for (const VCSKeyBindPair &pb : kVCSKeyActions[b].pairs) {
+			if (pa.key != 0 && pb.key != 0 && pa.context == pb.context) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool SetActionKey(size_t action, InputKeyCode key) {
+	// Escape is PPSSPP's pause, and claiming it is the trap the mapping table warns about in
+	// capitals: a player who bound it would have no way left to open this menu and undo it.
+	if (action >= kVCSKeyActionCount || key == 0 || key == NKCODE_ESCAPE) {
+		return false;
+	}
+	const std::vector<InputKeyCode> before = ActionKeys(action);
+	if (before.size() == 1 && before[0] == key) {
+		return true;
+	}
+	// The key's old owner, in any context this action shares, takes this action's old key.
+	// Swapping rather than unbinding, because an action left with no key is a thing the game can
+	// no longer do - and the player was not asking for that, only for this key.
+	for (size_t other = 0; other < kVCSKeyActionCount; other++) {
+		if (other == action || !ActionsShareContext(action, other)) {
+			continue;
+		}
+		const std::vector<InputKeyCode> theirs = ActionKeys(other);
+		if (std::find(theirs.begin(), theirs.end(), key) != theirs.end()) {
+			StoreActionKey(other, before.empty() ? (InputKeyCode)0 : before[0]);
+		}
+	}
+	StoreActionKey(action, key);
+	return true;
+}
+
+void ResetActionKeys() {
+	for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+		StoreActionKey(i, (InputKeyCode)0);
+	}
+}
+
+std::vector<size_t> ActionsForRow(VCSKeyList list, const char *name) {
+	std::vector<size_t> actions;
+	for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+		if ((kVCSKeyActions[i].list & list) && !strcmp(kVCSKeyActions[i].name, name)) {
+			actions.push_back(i);
+		}
+	}
+	return actions;
+}
 
 // The gamepad scheme. Xbox names throughout; LT and RT arrive as axes and are turned into
 // NKCODE_BUTTON_L2 / R2 by HandleHostAxis before they reach this table.
@@ -1002,6 +1259,66 @@ std::string PadButtonName(InputKeyCode button, VCSListDevice device) {
 	return name;
 }
 
+static int ActionById(const char *id) {
+	for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+		if (!strcmp(kVCSKeyActions[i].id, id)) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+// The keyboard cell of an extras row, which is a literal until the player rebinds one of the keys
+// it names. Kept as the literal while nothing has moved, because "W / A / S / D" and "ALT + WASD"
+// read better than anything assembled from key names - and the moment one has moved, the literal
+// is a lie.
+static std::string ExtraKeyboardCell(const VCSListingExtra &extra) {
+	auto keyText = [](const char *id) {
+		const int action = ActionById(id);
+		return action >= 0 ? ActionKeyText((size_t)action) : std::string();
+	};
+	auto anyRebound = [](std::initializer_list<const char *> ids) {
+		for (const char *id : ids) {
+			const int action = ActionById(id);
+			if (action >= 0 && ActionKey((size_t)action) != 0) {
+				return true;
+			}
+		}
+		return false;
+	};
+	const std::string name = extra.name;
+	if (name == "Move") {
+		if (!anyRebound({ "foot_forward", "foot_back", "foot_left", "foot_right" })) {
+			return extra.controls[0];
+		}
+		return keyText("foot_forward") + " / " + keyText("foot_left") + " / " +
+			keyText("foot_back") + " / " + keyText("foot_right");
+	}
+	if (name == "Walk") {
+		return anyRebound({ "foot_walk" }) ? keyText("foot_walk") + " + MOVE" : std::string(extra.controls[0]);
+	}
+	if (name == "Steer") {
+		if (!anyRebound({ "car_left", "car_right" })) {
+			return extra.controls[0];
+		}
+		return keyText("car_left") + " / " + keyText("car_right");
+	}
+	// The same keys as the radio, which is the game's doing - see the rows above.
+	if (name == "Raise forks / turret") {
+		return keyText("car_nextradio");
+	}
+	if (name == "Lower forks / turret") {
+		return keyText("car_prevradio");
+	}
+	if (name == "Look left" && (extra.list & VCSKeyList::InVehicle)) {
+		return keyText("car_lookleft");
+	}
+	if (name == "Look right" && (extra.list & VCSKeyList::InVehicle)) {
+		return keyText("car_lookright");
+	}
+	return extra.controls[0];
+}
+
 std::vector<VCSListingRow> KeyListing(VCSKeyList list) {
 	std::vector<VCSListingRow> rows;
 	if (list == VCSKeyList::None) {
@@ -1043,7 +1360,8 @@ std::vector<VCSListingRow> KeyListing(VCSKeyList list) {
 			}
 			for (size_t i = 0; i < kVCSListDeviceCount; i++) {
 				if (extra.controls[i]) {
-					addRow(extra.name, (VCSListDevice)i, extra.controls[i]);
+					addRow(extra.name, (VCSListDevice)i,
+						i == (size_t)VCSListDevice::Keyboard ? ExtraKeyboardCell(extra) : extra.controls[i]);
 				}
 			}
 		}
@@ -1065,7 +1383,9 @@ std::vector<VCSListingRow> KeyListing(VCSKeyList list) {
 		if (!(mapping.list & list) || !mapping.listName) {
 			continue;
 		}
-		addRow(mapping.listName, VCSListDevice::Keyboard, KeyDisplayName(mapping.key));
+		// What the player presses now, which after a rebind is not what the table says.
+		addRow(mapping.listName, VCSListDevice::Keyboard,
+			KeyDisplayName(BoundKey(mapping.context, mapping.key)));
 	}
 	for (size_t i = 0; i < kVCSPadMappingCount; i++) {
 		const VCSPadMapping &mapping = kVCSPadMappings[i];
@@ -1162,7 +1482,7 @@ VCSInputContext ResolveContext(const VCSState &state) {
 		// Either device's aim control. The pad's is the left trigger, which by the time it gets
 		// here is an ordinary held button - HandleHostAxis turns the axis into one, precisely so
 		// that questions like this one have a single shape to ask.
-		if (IsHostKeyDown(kVCSAimKey) || IsPadButtonDown(kVCSPadAimButton)) {
+		if (IsHostKeyDown(BoundKey(kFoot, kVCSAimKey)) || IsPadButtonDown(kVCSPadAimButton)) {
 			return VCSInputContext::Aiming;
 		}
 		return VCSInputContext::OnFoot;
@@ -1269,9 +1589,16 @@ void ResetTouchInput() {
 
 
 // Assumes g_hostKeyMutex is held. Whether this context maps this key at all.
+//
+// A row claims its SHIPPED key as well as the one it is bound to, and the first half is not a
+// leftover. A key the player has moved an action off still has a default waiting for it in
+// PPSSPP's own mapper - Space is the PSP's Start there - so letting it go would be the inverse
+// Escape trap, opening a menu from the key that used to jump.
 static bool ContextMapsKeyLocked(VCSInputContext context, InputKeyCode key) {
 	for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
-		if (kVCSKeyMappings[i].context == context && kVCSKeyMappings[i].key == key) {
+		const VCSKeyMapping &mapping = kVCSKeyMappings[i];
+		if (mapping.context == context &&
+				(mapping.key == key || RowKey(context, mapping.key) == key)) {
 			return true;
 		}
 	}
@@ -1297,7 +1624,8 @@ static bool ContextMapsKeyLocked(VCSInputContext context, InputKeyCode key) {
 // It also explains why the L trigger looked like it did nothing in the button tester - it is a
 // modifier, inert on its own, and only means anything combined with a stick direction.
 static bool IsGlanceKey(InputKeyCode key) {
-	return key == NKCODE_Q || key == NKCODE_E;
+	return key == NKCODE_Q || key == NKCODE_E ||
+		key == BoundKey(kCar, NKCODE_Q) || key == BoundKey(kCar, NKCODE_E);
 }
 
 // Resolves the held glance keys into a stick direction. Returns false when no glance is active.
@@ -1314,8 +1642,8 @@ static bool GlanceDirection(VCSInputContext context, float *x, float *y) {
 	bool q, e;
 	{
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
-		q = IsHostKeyDownLocked(NKCODE_Q) || IsPadButtonDownLocked(NKCODE_BUTTON_L1);
-		e = IsHostKeyDownLocked(NKCODE_E) || IsPadButtonDownLocked(NKCODE_BUTTON_R1);
+		q = IsHostKeyDownLocked(BoundKey(kCar, NKCODE_Q)) || IsPadButtonDownLocked(NKCODE_BUTTON_L1);
+		e = IsHostKeyDownLocked(BoundKey(kCar, NKCODE_E)) || IsPadButtonDownLocked(NKCODE_BUTTON_R1);
 	}
 
 	if (q && e) {
@@ -1338,15 +1666,22 @@ static bool GlanceDirection(VCSInputContext context, float *x, float *y) {
 static bool ContextUsesKeyForMovement(VCSInputContext context, InputKeyCode key) {
 	switch (context) {
 	case VCSInputContext::OnFoot:
-		return key == NKCODE_W || key == NKCODE_A || key == NKCODE_S || key == NKCODE_D
-			|| IsWalkKey(key);
+		// The shipped keys and the bound ones both - see ContextMapsKeyLocked for why a key the
+		// player moved away from stays claimed.
+		for (InputKeyCode move : { NKCODE_W, NKCODE_A, NKCODE_S, NKCODE_D, kVCSWalkKeyLeft, kVCSWalkKeyRight }) {
+			if (key == move || key == BoundKey(context, move)) {
+				return true;
+			}
+		}
+		return false;
 	// Aiming is deliberately absent even though WASD usually DOES steer there. Whether it steers
 	// flips with free aim, which changes mid-context, and this function is also called from the
 	// input thread - where reading the decoded game state would be a race. The psp = 0 rows in
 	// the table cover the claim unconditionally instead, which is the answer that never varies.
 	case VCSInputContext::InVehicle:
 		// W/S are handled as buttons by the mapping table, so only steering here.
-		return key == NKCODE_A || key == NKCODE_D;
+		return key == NKCODE_A || key == NKCODE_D ||
+			key == BoundKey(context, NKCODE_A) || key == BoundKey(context, NKCODE_D);
 	default:
 		return false;
 	}
@@ -1691,6 +2026,45 @@ void SetHostKeyDown(InputKeyCode key, bool down) {
 	}
 }
 
+// A PlayStation pad read by PPSSPP's own Windows HID driver (Windows/Hid), translated to the named
+// buttons the pad table is written in.
+//
+// That driver reports buttons by NUMBER - Options is NKCODE_BUTTON_10, Cross NKCODE_BUTTON_2 - where
+// XInput, SDL and Android all report NKCODE_BUTTON_START and NKCODE_BUTTON_A. The table only knows
+// the names, so a DualSense on Windows went past this layer entirely and reached PPSSPP's generic
+// pad defaults instead: Options became the PSP's Start and opened the GAME's pause screen rather
+// than this fork's menu - reported from a PS5 pad as "the menu does not open correctly with Start,
+// Escape works" - and the rest of the pad scheme never applied to it either.
+//
+// Keyed on the names that driver registers (HidInputDevice.cpp, g_psInfos), because the numbers
+// mean different buttons on a DirectInput pad and on the driver's Switch Pro. The touchpad click
+// and the PS button are left as they come.
+static KeyInput TranslatePlayStationHidButton(const KeyInput &key) {
+	const std::string name = KeyMap::PadName(key.deviceId);
+	const bool playStationHid = name.rfind("DS4", 0) == 0 || name.rfind("DualSense", 0) == 0 ||
+		name == "PS Classic";
+	if (!playStationHid) {
+		return key;
+	}
+	KeyInput translated = key;
+	switch (key.keyCode) {
+	case NKCODE_BUTTON_2: translated.keyCode = NKCODE_BUTTON_A; break;       // Cross
+	case NKCODE_BUTTON_1: translated.keyCode = NKCODE_BUTTON_B; break;       // Circle
+	case NKCODE_BUTTON_4: translated.keyCode = NKCODE_BUTTON_X; break;       // Square
+	case NKCODE_BUTTON_3: translated.keyCode = NKCODE_BUTTON_Y; break;       // Triangle
+	case NKCODE_BUTTON_7: translated.keyCode = NKCODE_BUTTON_L1; break;
+	case NKCODE_BUTTON_8: translated.keyCode = NKCODE_BUTTON_R1; break;
+	case NKCODE_BUTTON_9: translated.keyCode = NKCODE_BUTTON_SELECT; break;  // Create / Share
+	case NKCODE_BUTTON_10: translated.keyCode = NKCODE_BUTTON_START; break;  // Options
+	default: break;
+	}
+	return translated;
+}
+
+InputKeyCode NamedPadButton(const KeyInput &key) {
+	return IsPadDevice(key.deviceId) ? TranslatePlayStationHidButton(key).keyCode : key.keyCode;
+}
+
 bool HandleHostKey(const KeyInput &key) {
 	// Cheapest gate first, and the one that guarantees no effect on any other game.
 	if (!IsActive()) {
@@ -1704,7 +2078,7 @@ bool HandleHostKey(const KeyInput &key) {
 	// with a pad feel like playing a handheld: not the buttons being wrong, but nothing in this
 	// file ever seeing them.
 	if (IsPadDevice(key.deviceId)) {
-		return HandlePadKey(key);
+		return HandlePadKey(TranslatePlayStationHidButton(key));
 	}
 
 	if (key.deviceId != DEVICE_ID_KEYBOARD && key.deviceId != DEVICE_ID_MOUSE) {
@@ -1728,7 +2102,7 @@ bool HandleHostKey(const KeyInput &key) {
 	// The lock-on toggle flips on the press edge, before the context gate below - it has to work
 	// even in a context that maps nothing, and it is the one key here whose whole job is to change
 	// what the other mappings do.
-	if (down && key.keyCode == kVCSLockOnKey) {
+	if (down && key.keyCode == BoundKey(kFoot, kVCSLockOnKey)) {
 		g_lockOnMode.store(!g_lockOnMode.load(std::memory_order_relaxed),
 			std::memory_order_relaxed);
 	}
@@ -1824,7 +2198,7 @@ u32 ComputeButtonMask(VCSInputContext context) {
 	u32 mask = 0;
 	for (size_t i = 0; i < kVCSKeyMappingCount; i++) {
 		const VCSKeyMapping &mapping = kVCSKeyMappings[i];
-		if (mapping.context == context && IsHostKeyDownLocked(mapping.key)) {
+		if (mapping.context == context && IsHostKeyDownLocked(RowKey(context, mapping.key))) {
 			mask |= mapping.psp;
 		}
 	}
@@ -2112,6 +2486,41 @@ void ApplyAnalog(VCSInputContext context) {
 		return;
 	}
 
+	// The drive-by aimed with the view: the view is where the shot goes (the fire hook), and the
+	// stick turns the passenger's gun to follow it, so what he points at is what you are aiming at.
+	// Reported from the first build of this: "smooth now", but "the character moves by WASD and not
+	// by mouse" - the gun was still on the stick and nothing was on the stick but WASD.
+	//
+	// Steered, not set: the game's own drive-by aim is an aim point it moves by the stick, so this
+	// is a plain proportional loop on the angle between the view and the gun. The gun's direction is
+	// what the game writes into CameraYaw/CameraPitch in this mode every frame (a write there is
+	// overwritten within the frame) - front yaw is CameraYaw - PI, as on foot. Signs from play: the
+	// stick to the right turned the gun right, and the stick away from the player turned it down.
+	if (DriveByCameraAimActive(context)) {
+		float viewYaw = 0.0f, viewPitch = 0.0f;
+		const std::optional<float> gunYaw = ReadAddrFloat(VCSAddr::CameraYaw);
+		const std::optional<float> gunPitch = ReadAddrFloat(VCSAddr::CameraPitch);
+		if (ChaseCamDriveByAim(&viewYaw, &viewPitch) && gunYaw && gunPitch) {
+			const float pi = 3.14159265358979f;
+			float errYaw = std::fmod(viewYaw - (*gunYaw - pi) + pi, 2.0f * pi);
+			if (errYaw < 0.0f) {
+				errYaw += 2.0f * pi;
+			}
+			errYaw -= pi;
+			const float errPitch = viewPitch - *gunPitch;
+			const VCSCameraSettings &cs = CameraSettings();
+			x = std::clamp(-errYaw * cs.driveByFollowYaw, -1.0f, 1.0f);
+			y = std::clamp(-errPitch * cs.driveByFollowPitch, -1.0f, 1.0f);
+			__CtrlSetAnalogXY(CTRL_STICK_LEFT, x, y);
+			g_analogHeld = true;
+			g_analogIsReticle = false;
+			AimModelReset();
+			g_analogX = x;
+			g_analogY = y;
+			return;
+		}
+	}
+
 	// The drive-by joins the reticle here rather than getting a branch of its own, because it is
 	// the same statement about the nub: it is the aim, not movement, so the mouse belongs on it.
 	// Everything below - the model, the frame pacing, the clamp - applies unchanged, and the one
@@ -2119,7 +2528,7 @@ void ApplyAnalog(VCSInputContext context) {
 	//
 	// A passenger cannot steer, so nothing is being taken away by A and D standing down here. They
 	// were only ever moving the gun because the gun is what this stick does in that seat.
-	if (DriveByAimActive(context) || ReticleActive(context)) {
+	if (DriveByStickAimActive(context) || ReticleActive(context)) {
 		// The reticle. In free aim the stick stops being movement and becomes "where the
 		// crosshair goes", which is what the game shoots along - so this is the one place the
 		// mouse has to end up on the stick rather than on the camera address.
@@ -2209,24 +2618,25 @@ void ApplyAnalog(VCSInputContext context) {
 		std::lock_guard<std::mutex> guard(g_hostKeyMutex);
 		// Read here rather than at the point of use, because it belongs to the same lock as the
 		// keys it modifies - and asking twice could see the modifier released between the two.
-		walkHeld = IsHostKeyDownLocked(kVCSWalkKeyLeft) || IsHostKeyDownLocked(kVCSWalkKeyRight);
+		walkHeld = IsHostKeyDownLocked(BoundKey(context, kVCSWalkKeyLeft)) ||
+			IsHostKeyDownLocked(BoundKey(context, kVCSWalkKeyRight));
 		switch (context) {
 		case VCSInputContext::OnFoot:
 		// Aiming without free aim is lock-on, where the stick strafes around the target - which
 		// is movement, so WASD drives it exactly as on foot. This is the common case: every
 		// ordinary weapon in VCS aims this way.
 		case VCSInputContext::Aiming:
-			if (IsHostKeyDownLocked(NKCODE_D)) x += 1.0f;
-			if (IsHostKeyDownLocked(NKCODE_A)) x -= 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_D))) x += 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_A))) x -= 1.0f;
 			// Positive Y is "away from the camera" on the PSP stick - see __CtrlSetAnalogXY,
 			// which negates before scaling. So W is +1, not -1.
-			if (IsHostKeyDownLocked(NKCODE_W)) y += 1.0f;
-			if (IsHostKeyDownLocked(NKCODE_S)) y -= 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_W))) y += 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_S))) y -= 1.0f;
 			break;
 		case VCSInputContext::InVehicle:
 			// Steering only. Accelerate and brake come from the button table.
-			if (IsHostKeyDownLocked(NKCODE_D)) x += 1.0f;
-			if (IsHostKeyDownLocked(NKCODE_A)) x -= 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_D))) x += 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_A))) x -= 1.0f;
 			break;
 		case VCSInputContext::InAircraft:
 			// Pitch and roll - the whole reason this context exists. In a car the stick is
@@ -2236,10 +2646,12 @@ void ApplyAnalog(VCSInputContext context) {
 			// Positive Y is away from the camera, i.e. the nub pushed forward, which pitches the
 			// NOSE DOWN and flies forward - so the up arrow is +1, matching "press up to go
 			// forward" rather than an aeroplane yoke.
-			if (IsHostKeyDownLocked(NKCODE_DPAD_RIGHT) || IsHostKeyDownLocked(NKCODE_D)) x += 1.0f;
-			if (IsHostKeyDownLocked(NKCODE_DPAD_LEFT) || IsHostKeyDownLocked(NKCODE_A)) x -= 1.0f;
-			if (IsHostKeyDownLocked(NKCODE_DPAD_UP)) y += 1.0f;
-			if (IsHostKeyDownLocked(NKCODE_DPAD_DOWN)) y -= 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_DPAD_RIGHT)) ||
+					IsHostKeyDownLocked(BoundKey(context, NKCODE_D))) x += 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_DPAD_LEFT)) ||
+					IsHostKeyDownLocked(BoundKey(context, NKCODE_A))) x -= 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_DPAD_UP))) y += 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_DPAD_DOWN))) y -= 1.0f;
 			break;
 		default:
 			break;
@@ -2439,6 +2851,24 @@ bool DriveByAimActive(VCSInputContext context) {
 	return camMode && weaponMode && *camMode == 11 && *weaponMode == 11;
 }
 
+bool DriveByCameraAimActive(VCSInputContext context) {
+	return CameraSettings().driveByCameraAim && DriveByAimActive(context);
+}
+
+bool DriveByStickAimActive(VCSInputContext context) {
+	return !CameraSettings().driveByCameraAim && DriveByAimActive(context);
+}
+
+static std::atomic<bool> g_driveByCrosshair{false};
+
+void PublishDriveByCrosshair(VCSInputContext context) {
+	g_driveByCrosshair.store(DriveByCameraAimActive(context), std::memory_order_relaxed);
+}
+
+bool DriveByCrosshairVisible() {
+	return IsActive() && g_driveByCrosshair.load(std::memory_order_relaxed);
+}
+
 // The fire truck, whose water cannon a mission asks the stick to aim. Read live from the occupied
 // vehicle: model 194, the same field VehicleClassForModel uses to tell a helicopter from a car.
 static const u32 kVCSCannonVehicleModel = 194;
@@ -2454,6 +2884,18 @@ bool CannonAimActive(VCSInputContext context) {
 	// a spray signal and turned out to be a 15-second timer.
 	const std::optional<u32> model = GetState().vehicleModel;
 	return model && *model == kVCSCannonVehicleModel;
+}
+
+// The Rhino, whose cannon the same fire control shoots. Read out of the game's own model-name
+// table (ModelInfo, see docs/VCS_ADDRESSES.md), where 194 is "firetruk" and 246 "rhino".
+static const u32 kVCSRhinoModel = 246;
+
+bool MountedGunVehicle(VCSInputContext context) {
+	if (context != VCSInputContext::InVehicle) {
+		return false;
+	}
+	const std::optional<u32> model = GetState().vehicleModel;
+	return model && (*model == kVCSCannonVehicleModel || *model == kVCSRhinoModel);
 }
 
 // Whether the mouse should steer the CAMERA rather than the stick.
@@ -2533,6 +2975,9 @@ const char *AimPathStatus(VCSInputContext context) {
 	// The drive-by comes first because it is the one aim path that is not in the Aiming context,
 	// so the blanket "not aiming" below would otherwise be a lie about it - and this line existing
 	// is how the next person sees the mouse is on the nub without reproducing the seat.
+	if (DriveByCameraAimActive(context)) {
+		return "drive-by - mouse turns the view, shots go down its middle (passenger seat, cam mode 11)";
+	}
 	if (DriveByAimActive(context)) {
 		return "drive-by - mouse drives the nub (passenger seat, cam mode 11)";
 	}
@@ -2622,16 +3067,21 @@ VCSInputContext GetCurrentContext() {
 }
 
 bool JumpHeld() {
-	return IsHostKeyDown(kVCSJumpKey) || IsPadButtonDown(kVCSPadJumpButton);
+	return IsHostKeyDown(BoundKey(kFoot, kVCSJumpKey)) || IsPadButtonDown(kVCSPadJumpButton);
 }
 
 bool RecruitHeld() {
-	return IsHostKeyDown(kVCSSubMissionKey) || IsPadButtonDown(kVCSPadSubMissionButton);
+	return IsHostKeyDown(BoundKey(kFoot, kVCSSubMissionKey)) || IsPadButtonDown(kVCSPadSubMissionButton);
 }
 
 bool CameraDrivenAimHeld() {
 	// The mouse, unchanged and unconditional: it has no lock-on mode of its own to be in.
-	if (IsHostKeyDown(kVCSAimKey)) {
+	if (IsHostKeyDown(BoundKey(kFoot, kVCSAimKey))) {
+		return true;
+	}
+	// The passenger drive-by, aimed with the view - see driveByCameraAim. There is no aim control to
+	// hold there: the seat IS the aim. Only ever asked from the fire hook, on the emu thread.
+	if (DriveByCameraAimActive(GetCurrentContext())) {
 		return true;
 	}
 	// The pad, only where it is not in lock-on - which is the scoped weapons, and exactly the
@@ -2654,7 +3104,7 @@ bool LockOnModeActive() {
 	//
 	// The mouse's aim key wins when both are somehow held. Free aim is what a mouse is for, and
 	// reaching for it is the more deliberate of the two acts.
-	if (!IsPadButtonDown(kVCSPadAimButton) || IsHostKeyDown(kVCSAimKey)) {
+	if (!IsPadButtonDown(kVCSPadAimButton) || IsHostKeyDown(BoundKey(kFoot, kVCSAimKey))) {
 		return false;
 	}
 
@@ -2770,6 +3220,7 @@ void PublishTouchState(VCSInputContext context) {
 	snap.mapPage = context == VCSInputContext::Menu && GameMenuPage() == FrontEndSettings().mapPage;
 	snap.ledgeAhead = VaultDebugState().armed;
 	snap.driveBy = DriveByAimActive(context);
+	snap.mountedGun = MountedGunVehicle(context);
 	// On foot only. The only line that names these controls in a vehicle is the radio's help
 	// (H_IV_01), which is advice rather than a menu, and the pedals are not something to take
 	// away on a guess. The race picker names them too and may well be met in a car - not seen yet.

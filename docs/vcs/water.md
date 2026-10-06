@@ -407,6 +407,97 @@ it; the learned set only ever needed to carry that knowledge to frames where wha
 the blob did not reach the capture. Suppressing immediately and learning in parallel: measured over
 a session, **28461 blobs hidden by position against 10621 by learned texture**.
 
+#### The sea knows how deep it is now, and that was most of what was wrong with it
+
+Asked for with tuxalin's water-shader as the reference. Of what that shader does, the parts that
+fit a pass over the PSP's opaque, untessellated sea are depth-based colour, shore foam and a real
+ripple map; its Gerstner displacement needs geometry this sea does not have.
+
+**The murk was the deep colour, applied regardless of depth.** Standing on Ocean Beach at noon the
+old pass painted the shallows grey-green: `deepMix * (1 - fres)` is largest exactly where you look
+DOWN into the water, which near the shore is where the game's own turquoise - and the sand it shows
+through - should win. With the pass off the game's sea is visibly lighter along the waterline; the
+pass was erasing that.
+
+**The FLOOR PASS** is how the depth is known. The solids are drawn into `s_floorFbo`, writing their
+world height (16 bits across R and G, B = something was drawn), and that buffer's depth is copied
+into the surface's - so the solids are still drawn once, and the water's pre-pass follows over the
+copy. Under a water pixel the nearest solid along the view ray is the sea bed; the game DOES draw
+it, checked with debug view 5 (red at the waterline, white past four units, cyan at the horizon
+where nothing is under the sea and it counts as deep). Depth along the view ray drives a per-channel
+extinction (red first, then green, then blue over `extinctionDepth`), so a shelving beach goes
+turquoise before it goes blue.
+
+**Shore foam** forms where the depth runs out, broken up by a noise channel at two scales and
+breathing with a slow sine - and it sits over the hard line where the game's water polygons meet
+its sand, which was the ugliest thing on the coast.
+
+**The ripples are a generated map.** `BuildNormalMap` sums 56 sines with whole-number periods across
+a 256 tile (so it tiles by construction), amplitudes falling as |k|^-1.6 about one wind, and builds
+the mips itself by averaging - which is the anti-aliasing, since averaged slopes flatten with
+distance as a real sea does. Sampled twice at different scales and angles in WORLD space; the old
+chop sines stay at half weight under it with the swell.
+
+**Three texture slots, not four.** thin3d's `MAX_TEXTURE_SLOTS` is 3 and raising it changes every
+descriptor layout upstream has; the first build asserted on `BindTextures`. The middle slot carries
+the road mask in the wet-road pass and the floor in the sea's, and each pass binds its own.
+
+#### Puddles are pools on a road that is not one
+
+Reported as "improve the rain puddles", and the honest reading of the old pass is that there were
+none: one mask with a wetness-cubed floor, so in real rain the whole road became one mirror, and
+droplet rings were stamped over all of it like printed circles. Three states now:
+
+- **damp** - the whole surface as soon as it is wet: darker, a faint smeared sheen. Dries first.
+- **pool** - world-anchored shapes from the puddle noise plus a finer octave for the edge, growing
+  with wetness and retreating to the drain side as it falls (the old `band`). See below for how it
+  reflects.
+- **rim** - a darker ring round each pool.
+
+The pool threshold was set off the CPU over the same formula: 38% of the road in full rain, 12% half
+dry, 3% nearly dry. Droplet rings land only in pools, and fade by 28 units instead of 45.
+
+The sea gets the same rings while it rains, and twice its ripple.
+
+#### Puddles reflected the shadows, and the road pass now takes them back out
+
+The water pass runs after the shadow composite on purpose (the sea is shaded from a frame that
+already has its shadows), and a road's reflection is that frame mirrored about the horizon. So every
+puddle showed the shadows upside down, which was "shadows project strangely onto the puddle
+reflections". The answer was VCSShadow's `hideInRain`, which put the shadows out whenever it rained.
+
+Now the road pass binds the shadow mask in slot 2. `VCSShadow::CompositedMask` hands it over with the
+tint and strength it was composited with, and is null whenever the composite did not run. The shader
+divides the composite factor, `mix(1, mix(tint, 1, lit), strength)` with `lit` the mask's red at the
+reflected point, back out of both reflection samples. The road under the puddle keeps its own
+shadow, because that is the frame it is blended over. Ambient occlusion is not undone; it is faint
+in a reflection.
+
+Slot 2 was the ripple map, and three is the most thin3d binds. On the roads its only use was the
+puddles' wind wobble, which is value noise now (`vnoise` gradients). The sea pass rebinds the ripple
+map before it draws. `hideInRain` is off by default.
+
+#### Puddles looked like mirrors, and three things made them so
+
+Reported in play: "rain puddles look like a mirror". The first version of the pools gave them:
+
+- **the sharp centre tap** (75% of it), on the theory that still water reflects sharply. A single
+  tap is a sheet of glass, the same finding the sea's reflection had already made;
+- **up to 92% of the pixel**: a Fresnel floor of 0.12 and a gain of 1.8 on a Fresnel capped at
+  0.62, so any pool more than a few metres off was a clean copy of the buildings;
+- **the sea's sun glint**, a lobe deliberately wide for the glitter path (power 55, strength 1.1).
+  On a flat pool facing the sun it was a white patch the size of the pool.
+
+Now a pool takes the five-tap average with only a quarter of the sharp tap, at most half the pixel
+(`(fres * 1.1 + 0.06) * gain`, ceiling 0.5), dimmed to 78% because road water is dirty and shallow.
+Its sun highlight has 8× the exponent at half the strength. And its surface moves: the sea's ripple
+map at about five times the sea's scale, slow and world-anchored, at 0.07, enough that the
+reflection wobbles like a puddle in wind instead of standing still. Checked on the Ocean Beach pools
+(`VCS_WATER_RAIN=1`, 420, −1000): a soft sky, smeared and dimmer buildings, rings on top.
+
+Pools still form wherever the road mask reaches, and the mask is the traffic graph widened by 4 m,
+so a verge or a stretch of beach a path crosses gets them too. That isn't fixed.
+
 #### What is NOT verified
 
 - **Bridges and flyovers.** Where two roads cross at different heights the mask keeps the height of

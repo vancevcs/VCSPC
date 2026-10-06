@@ -138,6 +138,11 @@ struct Option {
 	int maxInt;
 	int stepInt;
 
+	// How many blocks the strip draws, for an Int whose steps are not ten. Zero means ten, which
+	// is every row but one. Brightness is the one: the game's own slider has eight notches, and
+	// eight steps on a ten-block strip would light one block on some presses and two on others.
+	int blocks;
+
 	// How the value reads on screen. For a Float, null means "show a 0-100 position within the
 	// range", which is what you want for something like 0.00128 radians per mouse count: a number
 	// that means a great deal to the aim solver and nothing at all to a player. Set it for the

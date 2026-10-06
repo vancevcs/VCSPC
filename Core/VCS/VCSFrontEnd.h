@@ -381,6 +381,11 @@ struct VCSFrontEndSettings {
 	// notice - and a sequence with no way out would sit there pressing nothing forever with the
 	// player's pad still taken away.
 	int dialogTimeoutFrames = 900;
+
+	// The save icon at a safe house opens this fork's SAVE GAME page instead of the firmware's own
+	// slot list, and the choice is walked through that list behind a curtain. Off hands the icon
+	// back to the firmware dialog as it always was.
+	bool ownSaveMenu = true;
 };
 
 VCSFrontEndSettings &FrontEndSettings();
@@ -512,6 +517,13 @@ CurtainKind AutoCurtain();
 // the world stops can never come down again - not even by its own vblank ceiling.
 void DropCurtain();
 
+// Raise and release from outside the sequences. The boot's curtain goes up at the end of the
+// credits movie, before there is any sequence to take it down; at the seam the auto-load takes it
+// over, and when there is nothing to load this lets it settle and come down instead of waiting for
+// its ceiling. Both safe from any thread.
+void RaiseCurtain(CurtainKind kind);
+void ReleaseBootCurtain();
+
 // Whether the Back that just asked to close the game's menu wants THIS fork's menu afterwards.
 //
 // Escape does not - it means "put this away and let me play", which is one press and one level.
@@ -543,6 +555,12 @@ void LatestMissionKey(char *out, size_t size);
 // game that came back. See PrepareScriptForSave in the .cpp and the note over
 // kVCSGlobalLoadedGame in VCSAddresses.h.
 void RequestSaveMenu();
+
+// The save icon's two halves - see g_iconSaveAsk in the .cpp. True once when the firmware's save
+// list has come up by itself, which is the UI thread's cue to open the SAVE GAME page; and that
+// page's answer, a slot 0..7 or -1 for "never mind". Both safe from the UI thread.
+bool TakeIconSave();
+void AnswerIconSave(int slot);
 
 // Whether the bridge is currently driving the pad - pressing Start, or walking to a page. While
 // this is true the player's own bindings stand down, exactly as they do for a cheat combination.

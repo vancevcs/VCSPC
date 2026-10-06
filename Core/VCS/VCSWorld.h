@@ -121,7 +121,9 @@ void WorldQueryDispatch(const char *host);
 //
 // One at a time, and the world query wins a tie - it has a player waiting on it mid-vault, and
 // this is for things that can be a frame late. Returns false when a call is already queued.
-bool EnqueueGameCall(u32 func, u32 arg);
+//
+// Two arguments, in $a0 and $a1; a one-argument function simply ignores the second.
+bool EnqueueGameCall(u32 func, u32 arg, u32 arg2 = 0);
 
 // Ask for up to kMaxGroundSamples heights. Returns false if the query layer isn't ready, if a
 // previous request is still outstanding, or if the arguments could not be written.

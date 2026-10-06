@@ -71,6 +71,7 @@ GPU/Common/
   VCSShadow.h/cpp   dynamic sun shadows: caster capture, cascade, screen mask, composite;
                     and ambient occlusion, read off the mask's depth
   VCSWater.h/cpp    the sea, and rain on the roads: capture, depth, shading, composite
+  VCSSmaa.h/cpp     SMAA over the finished world, before the HUD
 UI/ImDebugger/
   ImVCS.h/cpp       the "VCS" debugger window (lives here so Core stays ImGui-free)
 UI/
@@ -148,6 +149,8 @@ Sections cross-reference each other by title: `grep -rn "<title>" docs/vcs`.
 | [vaulting.md](docs/vcs/vaulting.md) | ledge detection, calling game code for collision, the climb animation | touching `VCSVault` / `VCSWorld` |
 | [shadows.md](docs/vcs/shadows.md) | dynamic sun shadows: cascades, mask, caster capture, people/props/vehicles; ambient occlusion | touching `VCSShadow` or its capture hooks |
 | [water.md](docs/vcs/water.md) | the sea, wet roads, droplets, the weather source, the `VCS_WATER_*` dev env vars | touching `VCSWater` |
+| [anti-aliasing.md](docs/vcs/anti-aliasing.md) | SMAA: where it runs, when it fires, the split-screen debug view | touching `VCSSmaa` |
+| [frame-rate.md](docs/vcs/frame-rate.md) | 30/60: the cap, CTimer, why 60 looked like slow motion, the CPU clock, forced frameskip | touching the frame limiter or game timing |
 | [draw-distance.md](docs/vcs/draw-distance.md) | why the view is what it is: which levers were measured and are inert | trying to change how far the city draws |
 | [streaming-stutter.md](docs/vcs/streaming-stutter.md) | driving/streaming hitches, `CacheFullIsoInRam`, instant texture loading | chasing hitches or texture loading |
 | [phone.md](docs/vcs/phone.md) | the Android build, touch controls, HUD taps, the radar corner, widescreen, arranging the controls, the phone menu, the iOS build | touching `VCSTouchControls`, the Android flavor, the iOS build, or the Widescreen row |

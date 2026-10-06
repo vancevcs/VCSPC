@@ -82,6 +82,8 @@ set(GPU_SOURCES
 	Common/DepthRaster.h
 	Common/VCSShadow.cpp
 	Common/VCSShadow.h
+	Common/VCSSmaa.cpp
+	Common/VCSSmaa.h
 	Common/VCSWater.cpp
 	Common/VCSWater.h
 	Common/TextureShaderCommon.cpp

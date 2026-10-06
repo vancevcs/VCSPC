@@ -228,6 +228,8 @@ struct VCSTouchState {
 	bool lockedOn = false;               // the game has a target
 	bool ledgeAhead = false;             // the vault probe has something to climb
 	bool driveBy = false;                // riding shotgun with a weapon out
+	bool mountedGun = false;             // driving something with a gun of its own: the fire
+	                                     // truck's water cannon, the Rhino's
 	// One of the menus the game runs in the world is open on foot - the wardrobe, the Empire
 	// site's business picker, a shop, a "Pay $X?" prompt - asking for its confirm and its way
 	// out, and with `pickerCycle` something to step through as well. See ReadHelpLineControls.
@@ -465,6 +467,63 @@ std::vector<VCSListingRow> KeyListing(VCSKeyList list);
 // "MWheelD" are not what a player calls those.
 std::string KeyDisplayName(InputKeyCode key);
 
+// --- Rebinding the keyboard -------------------------------------------------------------------
+//
+// An ACTION is what the player rebinds: one line of the controls card, on one page. It owns the
+// (context, key) pairs that line is made of - Jump is Space on foot, Aim is the right button on
+// foot AND while aiming - and binding it to another key moves all of its pairs together.
+//
+// The mapping table and the code that asks about keys go on naming the SHIPPED keys, and every
+// question about one goes through BoundKey first. That is the whole mechanism, and it is why a
+// rebind needs no second table to keep in step with the first: the default key is the action's
+// name, and the binding is only what a player presses for it.
+//
+// Per page rather than global, because that is how the card is laid out and how GTA's own PC
+// menus do it: Change camera on foot and Change camera in a car are two lines and two bindings.
+//
+// The PAD is not rebindable here. Its scheme is the layout, not a list of keys, and PPSSPP's own
+// mapper already sits underneath it for anybody who wants the PSP's buttons moved.
+struct VCSKeyBindPair {
+	VCSInputContext context;
+	InputKeyCode key;  // the shipped key, as the mapping table names it
+};
+
+struct VCSKeyAction {
+	// The vcs.ini key under [KeyBindings]. Renaming one resets that binding for everybody.
+	const char *id;
+	// The card row it edits, matched by name, and the page or pages that row is on.
+	const char *name;
+	VCSKeyList list;
+	// Set when several actions share one card row - MOVE is four, STEER is two - and the row asks
+	// for them one after another. Says which part this one is.
+	const char *step;
+	VCSKeyBindPair pairs[4];  // unused slots have key 0
+};
+
+extern const VCSKeyAction kVCSKeyActions[];
+extern const size_t kVCSKeyActionCount;
+
+// The key the player presses for a shipped key in a context: the shipped key itself unless the
+// action owning that pair has been rebound. Cheap, and safe from any thread.
+InputKeyCode BoundKey(VCSInputContext context, InputKeyCode key);
+
+// An action's binding, or 0 while it is still the shipped one.
+InputKeyCode ActionKey(size_t action);
+// What the card shows for an action: its bound key, or the shipped ones joined with " / ".
+std::string ActionKeyText(size_t action);
+
+// Bind an action to a key. A key already used by another action in a context this one shares is
+// SWAPPED rather than doubled: that action takes this one's old key. Returns false for a key that
+// cannot be bound - Escape, which is the pause key.
+bool SetActionKey(size_t action, InputKeyCode key);
+// The raw write, for loading. No conflict handling - the file is the player's own word.
+void SetActionKeyRaw(size_t action, InputKeyCode key);
+void ResetActionKeys();
+
+// The actions behind one card row, in the order a capture asks for them. Empty for a row nothing
+// can rebind - LOOK is the mouse, MENU is Escape.
+std::vector<size_t> ActionsForRow(VCSKeyList list, const char *name);
+
 
 // Decides which context the player is in, from the decoded state. Returns Unknown whenever the
 // state doesn't give us enough to be sure, which is the safe answer - callers treat Unknown as
@@ -483,6 +542,11 @@ VCSInputContext ResolveContext(const VCSState &state);
 //
 // Safe to call from the input thread.
 bool HandleHostKey(const KeyInput &key);
+
+// The named button a pad key stands for: a PlayStation pad read by PPSSPP's Windows HID driver
+// reports its buttons by number (Options is NKCODE_BUTTON_10), and every table here is written in
+// the names (NKCODE_BUTTON_START). Any other key comes back as it was.
+InputKeyCode NamedPadButton(const KeyInput &key);
 
 // Lower-level host key state, used by HandleHostKey and by the debugger window's key simulator.
 // Keys not in the mapping table for the current context are recorded but have no effect.
@@ -581,6 +645,12 @@ bool ReticleActive(VCSInputContext context);
 //
 // Emu thread only - it reads game memory.
 bool DriveByAimActive(VCSInputContext context);
+// Which of the two ways the drive-by is aimed - see driveByCameraAim.
+bool DriveByCameraAimActive(VCSInputContext context);
+bool DriveByStickAimActive(VCSInputContext context);
+// Whether the drive-by crosshair should be drawn. Published by the tick, read by the UI.
+bool DriveByCrosshairVisible();
+void PublishDriveByCrosshair(VCSInputContext context);
 
 // Whether the player is in the vehicle whose mounted cannon the stick aims - the fire truck.
 //
@@ -593,6 +663,10 @@ bool DriveByAimActive(VCSInputContext context);
 //
 // Emu thread only - it reads the decoded state.
 bool CannonAimActive(VCSInputContext context);
+
+// Driving a vehicle with a weapon of its own on the ground - the fire truck and the Rhino, both
+// fired with the vehicle fire control ("Hold ~VEWEP~ to use the fire engine's water cannon").
+bool MountedGunVehicle(VCSInputContext context);
 
 // Whether the stick applied on the most recent tick came from the mouse (the reticle) rather
 // than from WASD. Purely for the debugger, which otherwise can't tell the two apart.

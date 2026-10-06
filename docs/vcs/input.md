@@ -237,6 +237,21 @@ from the camera, so `HandleHostAxis` negates nothing. That is specific to XInput
 non-XInput pad is the case to suspect. The look stick is negated exactly once, in `ApplyPadLook`,
 because a mouse's positive dy is down the screen and everything downstream expects a mouse.
 
+**A PlayStation pad on Windows reports its buttons by number, and the table speaks names.** PPSSPP's
+own HID driver (`Windows/Hid`, which DirectInput steps aside for) sends a DualShock 4 or a DualSense
+as `NKCODE_BUTTON_1..10`: Circle 1, Cross 2, Triangle 3, Square 4, L1 7, R1 8, Create/Share 9,
+Options 10. XInput, SDL and Android send `NKCODE_BUTTON_A`/`START`. So on Windows a PS pad went
+straight past this layer to PPSSPP's generic pad defaults, which turn Options into the PSP's Start
+(the GAME's pause screen, not this fork's menu) and also swap Circle and Triangle.
+
+Reported from a PS5 pad as "the menu does not open correctly with Start, Escape works". Now
+`TranslatePlayStationHidButton` turns those numbers into names at the door of `HandleHostKey`. It
+is keyed on the names the driver registers (`DS4 v.1`, `DS4 v.2`, `DualSense`, `DualSense Edge`,
+`PS Classic`), because the same numbers mean other buttons on a DirectInput pad or on the driver's
+Switch Pro. The menu asks the same question through `VCS::NamedPadButton`, so a PS pad's Circle is
+Back there and its Triangle (which PPSSPP still calls Circle) is swallowed instead of closing the
+menu. Not tested on hardware: the HID driver is Windows-only, and this was read off its button table.
+
 ### The items you look THROUGH: binoculars and the photo camera
 
 Two weapons in VCS are not weapons at all in the way the aim model cares about. Hold aim and the

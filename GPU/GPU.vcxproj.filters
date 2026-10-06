@@ -264,6 +264,9 @@
     <ClInclude Include="Common\VCSShadow.h">
       <Filter>Common</Filter>
     </ClInclude>
+    <ClInclude Include="Common\VCSSmaa.h">
+      <Filter>Common</Filter>
+    </ClInclude>
     <ClInclude Include="Common\VCSWater.h">
       <Filter>Common</Filter>
     </ClInclude>
@@ -534,6 +537,9 @@
       <Filter>Common</Filter>
     </ClCompile>
     <ClCompile Include="Common\VCSShadow.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\VCSSmaa.cpp">
       <Filter>Common</Filter>
     </ClCompile>
     <ClCompile Include="Common\VCSWater.cpp">

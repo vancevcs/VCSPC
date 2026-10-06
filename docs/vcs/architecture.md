@@ -125,6 +125,8 @@ The entire integration is five small edits. Keep it that way.
 | Shadow frame reset | `BeginHostFrame()` in [GPU/Vulkan/GPU_Vulkan.cpp](../../GPU/Vulkan/GPU_Vulkan.cpp) | Publishes last frame's counts; renders nothing |
 | Water capture | `Flush()` in [GPU/Vulkan/DrawEngineVulkan.cpp](../../GPU/Vulkan/DrawEngineVulkan.cpp) | Beside the shadow capture on both transform paths, and its own `OnFlush` *after* the shadow one - see the comment there for why the order matters |
 | Water frame reset | `BeginHostFrame()` in [GPU/Vulkan/GPU_Vulkan.cpp](../../GPU/Vulkan/GPU_Vulkan.cpp) | Also where the road mask is rasterised and uploaded, because it is the one point in the frame with no render pass open |
+| SMAA | `Flush()` in [GPU/Vulkan/DrawEngineVulkan.cpp](../../GPU/Vulkan/DrawEngineVulkan.cpp), and `BeginHostFrame()` | Its `OnFlush` after the water one, so it smooths the finished world; see [anti-aliasing.md](anti-aliasing.md) |
+| Frameskip at 60 | `UseAutoFrameSkip()` / `FrameSkipSetting()` in [Core/HLE/sceDisplay.cpp](../../Core/HLE/sceDisplay.cpp) | OR in `VCS::ForceAutoFrameSkip()` without touching the player's config; see [frame-rate.md](frame-rate.md) |
 | Pause menu | the three `GamePauseScreen` sites in [UI/EmuScreen.cpp](../../UI/EmuScreen.cpp) | All three now call `CreatePauseScreen()`, which returns PPSSPP's own screen unless `VCS::IsActive()` |
 
 **Mouse input requires "Use Mouse Control" to be on** (Settings → Controls, `UseMouse` in

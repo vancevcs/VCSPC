@@ -36,6 +36,7 @@
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSSmaa.h"
 #include "GPU/Common/VCSWater.h"
 #include "GPU/Vulkan/GPU_Vulkan.h"
 #include "GPU/Vulkan/FramebufferManagerVulkan.h"
@@ -254,6 +255,7 @@ void GPU_Vulkan::BeginHostFrame(const DisplayLayoutConfig &config) {
 	// HUD, so that the mask is the camera's own view rather than the previous one's.
 	VCSShadow::BeginFrame(draw_);
 	VCSWater::BeginFrame(draw_);
+	VCSSmaa::BeginFrame();
 
 	gstate_c.Dirty(DIRTY_ALL);
 

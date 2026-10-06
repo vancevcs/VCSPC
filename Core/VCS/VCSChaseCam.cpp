@@ -278,6 +278,8 @@ int g_hits = 0;
 float g_blend = 1.0f;
 bool g_wasGlancing = false;
 bool g_glancing = false;
+// This frame's vehicle view is the passenger drive-by, aimed with it - see driveByCameraAim.
+bool g_driveByView = false;
 
 // What the finish hook last wrote, which a blend out starts from.
 CamVec g_outSource;
@@ -439,8 +441,8 @@ CamVec KeepOutOfSubject(CamKind kind, CamVec p) {
 }
 
 bool GlanceHeld(bool left) {
-	return left ? (IsHostKeyDown(NKCODE_Q) || IsPadButtonDown(NKCODE_BUTTON_L1))
-	            : (IsHostKeyDown(NKCODE_E) || IsPadButtonDown(NKCODE_BUTTON_R1));
+	return left ? (IsHostKeyDown(BoundKey(VCSInputContext::InVehicle, NKCODE_Q)) || IsPadButtonDown(NKCODE_BUTTON_L1))
+	            : (IsHostKeyDown(BoundKey(VCSInputContext::InVehicle, NKCODE_E)) || IsPadButtonDown(NKCODE_BUTTON_R1));
 }
 
 void Unhook() {
@@ -655,6 +657,25 @@ bool ChaseCamTakesLook(VCSInputContext context) {
 	return ReadAddrU32(VCSAddr::PedAttachedTo).value_or(0) == 0;
 }
 
+bool ChaseCamDriveByAim(float *yaw, float *pitch) {
+	if (!g_owned || !g_driveByView) {
+		return false;
+	}
+	*yaw = g_yaw;
+	*pitch = g_pitch;
+	return true;
+}
+
+bool ChaseCamDriveByBasis(float source[3], float front[3], float up[3]) {
+	if (!g_owned || !g_driveByView) {
+		return false;
+	}
+	source[0] = g_outSource.x; source[1] = g_outSource.y; source[2] = g_outSource.z;
+	front[0] = g_outFront.x; front[1] = g_outFront.y; front[2] = g_outFront.z;
+	up[0] = g_outUp.x; up[1] = g_outUp.y; up[2] = g_outUp.z;
+	return true;
+}
+
 void ChaseCamAddLook(float yawRadians, float pitchRadians) {
 	if (yawRadians == 0.0f && pitchRadians == 0.0f) {
 		return;
@@ -701,6 +722,10 @@ int Hook_vcs_camera_prepare() {
 	const VCSInputContext context = GetCurrentContext();
 
 	CamKind kind = CamKind::None;
+	// The passenger drive-by aimed with the view: the vehicle view, held where the mouse puts it.
+	// The game's own drive-by camera (mode 11) is derived from its aim point every frame - a write to
+	// CameraYaw there was overwritten within the frame - so the view is built here instead.
+	g_driveByView = false;
 	if (s.enabled && ReadAddrU32(VCSAddr::PedAttachedTo).value_or(0) == 0) {
 		if (context == VCSInputContext::OnFoot && g_mode == kVCSCamModeFollowPed) {
 			kind = CamKind::OnFoot;
@@ -708,6 +733,9 @@ int Hook_vcs_camera_prepare() {
 		           (g_mode == kVCSCamModeOnAString || g_mode == kVCSCamModeBehindBoat) &&
 		           !DriveByAimActive(context)) {
 			kind = CamKind::Vehicle;
+		} else if (DriveByCameraAimActive(context)) {
+			kind = CamKind::Vehicle;
+			g_driveByView = true;
 		}
 	}
 	g_kind = kind;
@@ -758,6 +786,12 @@ int Hook_vcs_camera_prepare() {
 		g_vehUp = *upRow;
 		// World up, never the vehicle's: a helicopter tipped forward must not tip the pivot with it.
 		pivot = CamVec{pos->x, pos->y, pos->z + box.top * s.vehiclePivotScale};
+		// Aiming a drive-by, the middle of the screen is where the shot goes - and looking at the
+		// car's own pivot put the crosshair on the car's roof. Lifted, the car sits low in the frame
+		// with the street around the crosshair, the way free aim's crosshair sits above the player.
+		if (g_driveByView) {
+			pivot.z += s.driveByPivotLift;
+		}
 		vehicleHeading = std::atan2(forward->y, forward->x);
 		if (vehicle == g_vehicle && g_haveVehiclePos && g_dt > 0.0f) {
 			g_speed = Length(Sub(*pos, g_vehiclePos)) / g_dt;
@@ -825,7 +859,7 @@ int Hook_vcs_camera_prepare() {
 		const float zoom = ReadFloat(kVCSCCamera + kVCSCCameraCarZoomOffset).value_or(2.0f);
 		const float zoomScale = zoom < 1.5f ? s.vehicleZoomNear : (zoom > 2.5f ? s.vehicleZoomFar : 1.0f);
 		g_wantDistance = (s.vehicleDistanceBase + s.vehicleDistancePerLength * g_vehicleLength) *
-			zoomScale * s.vehicleDistanceScale;
+			zoomScale * s.vehicleDistanceScale * (g_driveByView ? s.driveByDistanceScale : 1.0f);
 	} else {
 		g_wantDistance = s.footDistance;
 	}
@@ -837,7 +871,9 @@ int Hook_vcs_camera_prepare() {
 	float pitch = g_pitch;
 	g_glancing = false;
 	if (kind == CamKind::Vehicle) {
-		const bool canGlance = s.glances && context == VCSInputContext::InVehicle;
+		// No glances and no recentring while aiming a drive-by: the view IS the aim, and it stays
+		// exactly where the mouse left it.
+		const bool canGlance = s.glances && context == VCSInputContext::InVehicle && !g_driveByView;
 		const bool left = canGlance && GlanceHeld(true);
 		const bool right = canGlance && GlanceHeld(false);
 		if (left || right) {
@@ -849,7 +885,8 @@ int Hook_vcs_camera_prepare() {
 				// Letting go of a glance is asking for the default view back.
 				g_yaw = vehicleHeading;
 				g_pitch = s.vehicleRestPitch;
-			} else if (s.vehicleRecentre && g_sinceLook > s.recentreDelay && g_speed > s.recentreMinSpeed) {
+			} else if (!g_driveByView && s.vehicleRecentre && g_sinceLook > s.recentreDelay &&
+			           g_speed > s.recentreMinSpeed) {
 				const float urgency = Clamp(g_speed / (s.recentreMinSpeed * 4.0f), 0.25f, 1.0f);
 				const float k = EaseFactor(s.recentreRate * urgency, g_dt);
 				g_yaw = WrapPi(g_yaw + WrapPi(vehicleHeading - g_yaw) * k);

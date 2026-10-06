@@ -43,6 +43,7 @@
 #include "Core/VCS/VCSWorld.h"
 
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSSmaa.h"
 #include "GPU/Common/VCSWater.h"
 
 static const ImVec4 kUnsetColor = ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
@@ -2275,7 +2276,7 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::SetTooltip("The sharp half of the split, around the camera. Zero turns the "
 			"split off and halves the shadow atlas back to one tile.");
 	}
-	ImGui::SliderFloat("Centre ahead", &set.centreDistance, 0.0f, 100.0f, "%.0f units");
+	ImGui::SliderFloat("Most lead along travel", &set.centreDistance, 0.0f, 100.0f, "%.0f units");
 	ImGui::SliderFloat("Caster reach up-sun", &set.casterReach, 50.0f, 600.0f, "%.0f units");
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("How far towards the sun the depth pass still accepts casters. A shadow travels along the light, so a building well behind you throws into the road in front of you - and was being clipped out of the map. Costs depth range, not resolution.");
@@ -2305,6 +2306,10 @@ void ImVCSWindow::DrawShadows() {
 		ImGui::SetTooltip("If the row above is on and the acne got WORSE, the map is holding the near side of everything and this is the fix.");
 	}
 	ImGui::SliderFloat("Moon strength", &set.moonStrength, 0.0f, 1.0f, "%.2f");
+	ImGui::SliderFloat("Low sun fade (elevation)", &set.lowSunFade, 0.05f, 0.6f, "%.2f");
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Below this sun height (z of its direction) shadows fade, to nothing at the moon swap. A low sun's shadows cover nearly everything - that was the dark band at dusk.");
+	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("After dark the game's own light is below the horizon and casts nothing, so it is mirrored back above it. Zero turns night shadows off.");
 	}
@@ -2481,6 +2486,13 @@ void ImVCSWindow::DrawShadows() {
 	ImGui::TextDisabled("Walk around, get in a car, then open a menu. Casters should track the geometry\non screen, skinned casters should follow the pedestrians, and the 2D count\nshould jump the moment the menu opens.");
 }
 
+// The menu's Anti-aliasing row is the setting; this is only for looking at what it does.
+static void DrawSmaaTab() {
+	ImGui::Text("%s", VCSSmaa::IsActive() ? "running" : "off");
+	static const char *kViews[] = { "off", "split (left SMAA, right as drawn)", "blend weights" };
+	ImGui::Combo("Debug view", &VCSSmaa::DebugView(), kViews, 3);
+}
+
 void ImVCSWindow::DrawWater() {
 	if (!VCSWater::IsAvailable()) {
 		ImGui::TextColored(kUnsetColor, "inactive - VCSWaterQuality is not set for this disc");
@@ -2537,6 +2549,11 @@ void ImVCSWindow::DrawWater() {
 	}
 	ImGui::SliderFloat("Sun glint", &set.specularStrength, 0.0f, 2.0f);
 	ImGui::SliderFloat("Glint tightness", &set.specularPower, 8.0f, 400.0f);
+	ImGui::SliderFloat("Depth to deep colour", &set.extinctionDepth, 0.5f, 30.0f);
+	ImGui::SliderFloat("Shore foam", &set.shoreFoam, 0.0f, 1.5f);
+	ImGui::SliderFloat("Foam depth", &set.foamDepth, 0.05f, 3.0f);
+	ImGui::SliderFloat("Ripple map scale", &set.normalMapScale, 0.01f, 0.4f);
+	ImGui::SliderFloat("Ripple map strength", &set.normalMapStrength, 0.0f, 1.0f);
 	if (s.sunValid) {
 		ImGui::Text("sun %.2f %.2f %.2f, luminance %.2f", s.sunDir[0], s.sunDir[1], s.sunDir[2],
 			s.sunLuminance);
@@ -2612,8 +2629,9 @@ void ImVCSWindow::DrawWater() {
 	ImGui::SliderFloat("Buffer scale", &set.surfaceScale, 0.25f, 1.0f);
 	static const char *kViews[] = {
 		"off", "wetness (r=wet, g=road, b=up)", "normals", "reflection source", "water mask",
+		"water depth (r=floor found, g=depth/4, b=path/20)",
 	};
-	ImGui::Combo("Debug view", &set.debugView, kViews, 5);
+	ImGui::Combo("Debug view", &set.debugView, kViews, 6);
 
 	int rejectedTotal = 0;
 	for (int i = 1; i < (int)VCSWater::Reject::Count; i++) {
@@ -2691,6 +2709,10 @@ void ImVCSWindow::Draw(ImConfig &cfg) {
 
 		if (ImGui::BeginTabItem("Water")) {
 			DrawWater();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("SMAA")) {
+			DrawSmaaTab();
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();

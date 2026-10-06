@@ -241,6 +241,23 @@ struct VCSCameraSettings {
 	// in its table, with its own alpha and rate, since it was first measured.
 	bool driveByMouseAim = true;
 
+	// ...and aim it the way free aim works, which is the default: the mouse turns the VIEW, the
+	// chase camera's drive-by view, at free aim's sensitivity; the fire hook sends the shot down
+	// the middle of it; and a crosshair marks the middle. The game's own drive-by aim is left alone.
+	//
+	// Off, the mouse drives the nub instead (driveBySensitivity below). That is how the drive-by was
+	// aimed until Jive Drive was played on a mouse: the nub there is not a free aim but the game's
+	// target selection - it nudges an aim point that snaps towards targets (0x0894fddc copies an
+	// entity's position into CPed+0xcf0) - and no mapping of the mouse onto it got past "one slight
+	// movement is a very rough movement". Inverted, then too slow, then too fast, then like a stick:
+	// four builds of tuning a channel that cannot be precise.
+	bool driveByCameraAim = true;
+	// How hard the passenger's gun is steered towards the view: stick deflection per radian between
+	// them. Pitch needs more because the mission's 03E9 leaves the vertical at a fifth of the
+	// horizontal's axis scale (0.5 against 2.5).
+	float driveByFollowYaw = 8.0f;
+	float driveByFollowPitch = 20.0f;
+
 	// Deflection per count of mouse movement in a drive-by. Proportional, NOT through the response
 	// model, and that is a correction rather than a shortcut.
 	//
@@ -258,7 +275,10 @@ struct VCSCameraSettings {
 	//
 	// Proportional has no such term. The per-axis scale is still divided out below, so a
 	// horizontal sweep and a vertical one cover the same distance per count.
-	float driveBySensitivity = 0.045f;
+	//
+	// Only for driveByCameraAim off. 0.045 until Jive Drive was played on a mouse and reported "very
+	// insensitive"; 0.14 is about free aim's 0.0013 rad a count, measured on the gun.
+	float driveBySensitivity = 0.14f;
 
 	// Divide the game's own aim axis scale back out, so the two axes match.
 	//

@@ -171,6 +171,99 @@ inline constexpr u32 kVCSPedClimbSplashOp = 0x0E2817E0;  // jal 0x08a05f80
 // could refuse to climb a moving vehicle.
 inline constexpr u32 kVCSProcessVerticalLine = 0x08891DD4;
 
+// --- The game's language ---
+//
+// The USA disc carries all five of the PAL release's GXTs - ENGLISH, FRENCH, GERMAN, ITALIAN,
+// SPANISH - and the text loader (0x089f656c) still picks one by an index: 0 English, then 1..4 in
+// that order. What the USA build lacks is anything that sets the index. It sits in a two-word
+// struct at gp+0x1eb8 behind a lazy-init flag, and every one of its fourteen readers does the same
+// thing first: if the flag is clear, set it and ZERO the struct (0x089c6318). Nothing else writes
+// it - no store, absolute or gp-relative, and the one sceUtilityGetSystemParamInt(LANGUAGE) call
+// in the game (0x08ab6304) only fills in the save dialog's parameters. So the USA build is English
+// by construction, whatever the console is set to.
+//
+// Which also says how to change it without touching code: set the flag ourselves and put the index
+// beside it, before the game runs, and every reader takes ours instead of zeroing it. See
+// PatchLanguage.
+// --- Custom soundtracks ---
+//
+// The PSP release could play the player's own music in place of the radio, ripped to the memory
+// stick by Rockstar's "Custom Tracks" PC tool, and the USA build still has every part of it:
+//
+//   - 0x088b62a4 lists `MS0:PSP/SAVEDATA/ULUS10160CUSTOMTRACKS/` and keeps every file ending in
+//     `.gta` above a minimum size, named on screen after the file (0x088b6698, falling back to
+//     FEA_UT "Unknown Track").
+//   - 0x08aab35c, the radio's stream opener, plays station 0x6f from the current one of those:
+//     sceIoOpen, read 0x1000 bytes, and hand them to sceAtracSetHalfwayBufferAndGetID exactly as
+//     it hands over the disc's AT3s. So a .gta is a RIFF ATRAC file, nothing more - the disc's
+//     stations are ATRAC3plus at 96 kbps, and one of them copied in as a .gta plays.
+//   - 0x0888828c, the music manager's play-a-station, turns EVERY station into 0x6f while the
+//     manager's playing bit is set. That is the PSP design: on means your music in every radio.
+//
+// What the fork adds is only a way to reach the switch, and it reaches it by calling the game's
+// own setter: (prefs, value). 1 also sets the preferred station to 9, the custom one, which
+// retunes the audio manager; 0 puts the station back. A field write would do neither.
+inline constexpr u32 kVCSSetCustomTracks = 0x089C70D0;
+inline constexpr u32 kVCSSetCustomTracksOp = 0x27BDFFF0;  // addiu sp, sp, -0x10
+inline constexpr u32 kVCSCustomTracksOff = 0;
+inline constexpr u32 kVCSCustomTracksOn = 1;
+inline constexpr u32 kVCSCustomTracksNone = 2;
+
+// THE FRAME LIMITER, and why lifting it does not on its own make the game slow motion.
+//
+// The main loop waits at 0x08A070A8 until the vblank handler (0x08A079C8, sub-interrupt 15) has
+// counted two vblanks since the last frame - `lw $a0, -0x2264($gp); sltiu $a0, $a0, 2` - and
+// calls sceDisplayWaitVblankStart until it has. One instruction is the whole 30 fps cap: with
+// `sltiu $a0, $a0, 1` the loop runs at 60.
+//
+// The game does not then run at double speed, or half: CTimer::Update (0x08A11214) takes each
+// frame's length from sceKernelGetSystemTime - microseconds, capped at 0.1 s - so the timestep
+// follows the clock. Measured live, cap at 1: 59.9 game frames a second, timestep 0.834 against
+// 1.668 at 30, which is 50 units a second either way. What DID measure as slow motion was the
+// emulator, not the game: 6x resolution with every pass on could not draw 60 frames a second on
+// the Mac, PPSSPP slowed emulated time to match (78%), and so did everything in the game. See
+// VCS::ForceAutoFrameSkip for the answer to that.
+inline constexpr u32 kVCSFrameLimit = 0x08A070B4;
+inline constexpr u32 kVCSFrameLimitOp = 0x2C840002;    // sltiu $a0, $a0, 2
+inline constexpr u32 kVCSFrameLimit60Op = 0x2C840001;  // sltiu $a0, $a0, 1
+
+// THE MILLISECOND CARRY. CTimer keeps the game's millisecond clock as an integer and adds each
+// frame's length to it TRUNCATED: 33.37 ms becomes 33 at 30 fps, 1.1% slow, which is the game as
+// it shipped; 16.68 becomes 16 at 60, 4% slow - measured, 959 game ms per wall second against 988.
+// Everything that counts time in whole milliseconds inherits it: the clock of the day, script
+// timers, mission countdowns.
+//
+// The game already has the cure, on a path it only takes when the byte at gp-0x1ba8 is set (read
+// by some 300 sites, so not one to borrow): the frame's ticks plus a carried remainder, rounded
+// down to a multiple of 16 ms, the rest carried to the next frame. These four words take that path
+// always, at a multiple of ONE millisecond (294912 ticks - the same constant the function divides
+// by a few lines later to count whole ms), so every frame is a whole number of milliseconds and
+// nothing downstream truncates anything. Measured: 1002 game ms per wall second, and a timestep of
+// 0.80 and 0.85 alternating - 16 and 17 ms - where it was a steady 0.834.
+//
+// $t1 is free across the whole function. Applied only at 60, so 30 stays the game as it shipped.
+struct VCSCodeWord {
+	u32 address;
+	u32 stock;
+	u32 patched;
+};
+inline constexpr VCSCodeWord kVCSTimerCarry[] = {
+	{ 0x08A112A0, 0x9387E458, 0x3C090004 },  // lbu $a3, -0x1ba8($gp)  ->  lui $t1, 0x0004
+	{ 0x08A112A4, 0x10E00009, 0x35298000 },  // beqz $a3, +9           ->  ori $t1, $t1, 0x8000
+	{ 0x08A112B4, 0x3C070048, 0x00000000 },  // lui $a3, 0x0048        ->  nop
+	{ 0x08A112B8, 0x0087001B, 0x0089001B },  // divu $a0, $a3          ->  divu $a0, $t1
+};
+inline constexpr u32 kVCSTimerRemainder = 0x08BAFDA0;    // gp-0x1fc0, read and written only there
+// The emulated CPU at 60. The game runs at 222 MHz here - it never asks for more, and that is what
+// 30 hands back - and at 222 it is CPU-bound often enough to miss 60: 48 to 57 frames a second
+// standing on an Ocean Beach street. At 666 it held 59.9 in every spot measured. Costs the host
+// nothing while the game waits, because the wait is a blocking syscall.
+inline constexpr int kVCSFrameRate60ClockHz = 666000000;
+
+inline constexpr u32 kVCSGameLanguage = 0x08BB3C1C;      // gp+0x1ebc, u32 index
+inline constexpr u32 kVCSGameLanguageInit = 0x08BB3C20;  // gp+0x1ec0, nonzero once initialised
+inline constexpr int kVCSLanguageCount = 5;
+
 // How much world fits in memory, which on this game is the only thing that decides how far
 // you can see.
 //
@@ -674,6 +767,16 @@ inline constexpr u32 kVCSBlipInUseBit = 0x04;
 // not 0..128.
 inline constexpr int kVCSVolumeMax = 127;
 
+// The game's own BRIGHTNESS slider: eight notches of 32 between these two, which is where its own
+// Display page stops pressing left and right. Below the floor the picture keeps going darker -
+// 0 is a black screen - which is exactly why the row stops where the game's does.
+inline constexpr int kVCSBrightnessMin = 128;
+inline constexpr int kVCSBrightnessMax = 384;
+inline constexpr int kVCSBrightnessStep = 32;
+// What the game resets it to - 288, five notches of eight, read out of its own defaults function
+// at 0x089c6d00 (`ori a1, zero, 0x120; sw a1, 0xc(a0)`). Not the PS2 games' 256.
+inline constexpr int kVCSBrightnessDefault = 288;
+
 inline constexpr u32 kVCSHudCutscene = 0x0c;
 
 inline constexpr u32 kVCSHudDrawFlag = 0x2436;
@@ -983,6 +1086,7 @@ enum class VCSAddr {
 	DisplayPrefs,      // Pointer to the preferences object. A heap object, so the ones below are based on it.
 	ShowSubtitles,     // u8. 1 = dialogue subtitles on.
 	HudMode,           // u8. 1 = the health/money/weapon panel is drawn. NOT the radar.
+	Brightness,        // u32. The Display page's BRIGHTNESS, kVCSBrightnessMin..Max.
 
 	// The two volumes off the game's own Audio page, and each is TWO values - see the note over
 	// the rows. The *Pref pair is what that page shows and a save keeps; the pair without the
@@ -992,6 +1096,15 @@ enum class VCSAddr {
 	RadioVolumePref,
 	SfxVolume,
 	RadioVolume,
+
+	// The Audio page's CUSTOM SOUNDTRACKS: 0 off, 1 on, 2 when there is nothing to play.
+	CustomTracksPref,
+	// The object that lists and plays the player's own tracks, and its flag byte: bit 0 is "the
+	// custom station is playing", which the music manager turns every radio into while it is set.
+	CustomTracksManager,
+	CustomTracksFlags,
+	CustomTracksBegin,   // the list of tracks the scan found, 12 bytes each
+	CustomTracksEnd,
 
 
 	// --- The player, in the game's own world space ---
@@ -1363,6 +1476,14 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	{ VCSAddr::ShowSubtitles,     "ShowSubtitles",     VCSAddrType::U8,  0x08,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x08. The Display page's SUBTITLES. 1 = on" },
 	{ VCSAddr::HudMode,           "HudMode",           VCSAddrType::U8,  0x18,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x18. The Display page's HUD MODE. 1 = on; the radar is separate" },
 
+	// BRIGHTNESS, the first row of the same page, and unlike the volumes below it is ONE value.
+	// Watching the object while the game's own slider moved found it at once - 288 at five blocks
+	// of eight, 32 per press, stopping at 128 and 384. Then the test that the volumes failed:
+	// written to 0, the frame went black on the next vblank and stayed black, and nothing put the
+	// old value back. So the preference is also what the renderer reads, and there is no live
+	// copy to keep in step with it.
+	{ VCSAddr::Brightness,        "Brightness",        VCSAddrType::U32, 0x0c,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x0c. The Display page's BRIGHTNESS, 128..384 in steps of 32" },
+
 	// SFX VOLUME and MUSIC VOLUME, off the game's own Audio page, and the reason there are four
 	// entries for two settings.
 	//
@@ -1390,6 +1511,24 @@ inline constexpr VCSAddrEntry kVCSAddresses[] = {
 	{ VCSAddr::RadioVolumePref,   "RadioVolumePref",   VCSAddrType::U32, 0x20,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x20. The Audio page's MUSIC VOLUME, 0..127" },
 	{ VCSAddr::SfxVolume,         "SfxVolume",         VCSAddrType::U8,  0x08bb3b74, kNoBase,        "gp+0x1e14. The live SFX level the mixer reads, 0..127" },
 	{ VCSAddr::RadioVolume,       "RadioVolume",       VCSAddrType::U8,  0x08bb3b75, kNoBase,        "gp+0x1e15. The live music/radio level the mixer reads, 0..127" },
+
+	// CUSTOM SOUNDTRACKS, the PSP release's own "play my music instead of the radio". Found by
+	// toggling the game's Audio page row and diffing the object: +0x24 moved 0 -> 2 with no tracks
+	// on the memory stick (the row read UNAVAILABLE) and 0 -> 1 with one (ON). READ, never written:
+	// turning it on also retunes every radio to the custom station, which is the setter's work and
+	// not a field's - see kVCSSetCustomTracks.
+	{ VCSAddr::CustomTracksPref,  "CustomTracksPref",  VCSAddrType::U32, 0x24,       VCSAddr::DisplayPrefs, "DisplayPrefs+0x24. CUSTOM SOUNDTRACKS: 0 off, 1 on, 2 none found" },
+	// The game's own restore-from-save (0x08ab6a10) sets the preference through its setter and
+	// then this bit through 0x088b5bcc, which is nothing but `flags = flags & ~1 | on`. The setter
+	// alone left the bit set after OFF, and with it set the music manager still turns every radio
+	// into the custom station - so both halves, as the game does them.
+	{ VCSAddr::CustomTracksManager, "CustomTracksManager", VCSAddrType::U32, 0x08bb3468, kNoBase,  "gp+0x1708. The custom soundtrack manager" },
+	{ VCSAddr::CustomTracksFlags, "CustomTracksFlags", VCSAddrType::U8,  0x08,       VCSAddr::CustomTracksManager, "Manager+0x08. Bit 0 playing, bit 1 memory stick in, bit 3 supported" },
+	// The scan's result, a vector of 12-byte entries whose +4 is the file's full path. The game's
+	// own menu asks whether this is empty before it will turn custom soundtracks on, and the setter
+	// does not - so the fork asks too.
+	{ VCSAddr::CustomTracksBegin, "CustomTracksBegin", VCSAddrType::U32, 0x0c,       VCSAddr::CustomTracksManager, "Manager+0x0c. First track entry (12 bytes each)" },
+	{ VCSAddr::CustomTracksEnd,   "CustomTracksEnd",   VCSAddrType::U32, 0x10,       VCSAddr::CustomTracksManager, "Manager+0x10. One past the last track entry" },
 	{ VCSAddr::PlayerPosX, "PlayerPosX", VCSAddrType::Float, 0x30, VCSAddr::PlayerBase, "Entity transform + 0x30. World X" },
 	{ VCSAddr::PlayerPosY, "PlayerPosY", VCSAddrType::Float, 0x34, VCSAddr::PlayerBase, "Entity transform + 0x34. World Y" },
 	{ VCSAddr::PlayerPosZ, "PlayerPosZ", VCSAddrType::Float, 0x38, VCSAddr::PlayerBase, "Entity transform + 0x38. World Z" },

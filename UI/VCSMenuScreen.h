@@ -71,6 +71,9 @@ enum class VCSMenuPage {
 	Game,
 	LoadGame,
 	DeleteGame,
+	// Opened by the save icon at a safe house, over the firmware's own slot list - see
+	// VCS::TakeIconSave. Not reachable from the root: saving is something you do in the world.
+	SaveGame,
 
 	// "Are you sure?", in this menu's own face rather than in PPSSPP's. One page serves all three
 	// questions - deleting a save, starting a new game, quitting - because a confirmation is a
@@ -189,13 +192,19 @@ private:
 // is on the keyboard, on an Xbox pad and on a PlayStation one - and a bar across the row when it
 // is selected.
 //
-// A ClickableItem purely for the highlight. There is nothing to click - bindings are not
-// editable here - but a row that does not light up under the mouse or the arrow keys reads as
-// dead, and the game's own Controls screen highlights the same way.
+// Clicking one rebinds its KEYBOARD cell, when there is an action behind it - see VCS::KeyAction.
+// The pad columns stay a reference card: the pad's scheme is a layout, not a list of keys.
 class VCSBindingRow : public UI::ClickableItem {
 public:
 	explicit VCSBindingRow(const VCS::VCSListingRow &row,
 		UI::LayoutParams *layoutParams = nullptr);
+
+	// The rebindable actions behind this line, in the order a capture asks for them.
+	void SetActions(std::vector<size_t> actions) { actions_ = std::move(actions); }
+	const std::vector<size_t> &actions() const { return actions_; }
+	const std::string &name() const { return name_; }
+	// While non-empty, the keyboard cell reads this instead of the keys - "PRESS A KEY".
+	void SetPrompt(std::string prompt) { prompt_ = std::move(prompt); }
 
 	void Draw(UIContext &dc) override;
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
@@ -211,6 +220,8 @@ private:
 	// the input layer for one constant - the listing it is built from decides how many there
 	// are, and an empty cell is an action that device cannot do.
 	std::vector<std::string> cells_;
+	std::vector<size_t> actions_;
+	std::string prompt_;
 };
 
 class VCSMenuScreen : public UIBaseDialogScreen {
@@ -220,7 +231,14 @@ public:
 
 	const char *tag() const override { return "VCSMenu"; }
 
+	// Open on the SAVE GAME page for the save icon, where Back means "do not save" and the menu
+	// closes rather than walking up to a root the player never came through.
+	void OpenForIconSave();
+
 	bool key(const KeyInput &key) override;
+	// Swallowed while a key is being captured, so the click that binds the left mouse button does
+	// not also land on whatever row is under the pointer.
+	bool touch(const TouchInput &touch) override;
 
 	// The title art is a GPU object, and screens are deleted long after the graphics device is
 	// destroyed - NativeShutdownGraphics calls deviceLost() and tears Vulkan down, and
@@ -247,6 +265,10 @@ private:
 
 	void AddOptionRows(UI::ViewGroup *parent, VCSMenuPage page);
 	void AddBindingRows(UI::ViewGroup *parent, VCSMenuPage page);
+	// Start asking for the keys behind a card line, one action at a time, and take the next key
+	// pressed for each - see key().
+	void BeginKeyCapture(VCSBindingRow *row);
+	void EndKeyCapture();
 	// One row per cheat in this page's group. Clicking one queues it and closes the menu, because
 	// nothing can be typed into a paused game - see Core/VCS/VCSCheats.h.
 	void AddCheatRows(UI::ViewGroup *parent, VCSMenuPage page);
@@ -279,6 +301,10 @@ private:
 	// and that is the point: a player choosing what to delete is reading the same shelf they load
 	// from.
 	void AddSaveRows(UI::ViewGroup *parent, bool deleting);
+	// The SAVE GAME page's eight slots, empty ones included - an empty slot is somewhere to save.
+	void AddSaveSlotRows(UI::ViewGroup *parent);
+	// Hand the save icon's question back unanswered: the firmware's dialog is cancelled.
+	void CancelIconSave();
 	// True for the leaf pages that are a list of settings rather than a list of pages.
 	static bool IsOptionPage(VCSMenuPage page);
 	static VCS::OptionPage ToOptionPage(VCSMenuPage page);
@@ -331,8 +357,24 @@ private:
 	int pendingDelete_ = -1;
 	bool pendingExit_ = false;
 	bool pendingQuitApp_ = false;
+	bool pendingResetKeys_ = false;
+	// The save icon: whether this menu was opened by it, whether it has been answered - every way
+	// out that did not pick a slot answers "cancel" - and the slot picked, acted on in update().
+	bool iconSave_ = false;
+	bool iconSaveAnswered_ = false;
+	int pendingSaveSlot_ = -1;
+
+	// The card's lines, borrowed like rows_; the one being rebound and which of its actions is
+	// being asked for; and the line to put focus back on once the card has been rebuilt with the
+	// new key in it.
+	std::vector<VCSBindingRow *> bindingRows_;
+	VCSBindingRow *captureRow_ = nullptr;
+	size_t captureStep_ = 0;
+	std::string refocusBinding_;
 
 	VCSMenuPage page_ = VCSMenuPage::Root;
+	// Which row CreateViews focuses, once - see VCSMenuTestDue. Negative means the first.
+	int testFocusRow_ = -1;
 
 	// How many binding rows the current page drew, and how tall each one came out, so
 	// DrawBackground can size the panel behind them. Zero rows on every page that is not a
@@ -350,6 +392,17 @@ private:
 	// know about Draw::Texture.
 	std::unique_ptr<struct VCSMenuArt> art_;
 };
+
+// A developer's way in: true once, when VCS_MENU_TEST is set and the world has been up for a few
+// seconds, so EmuScreen raises the menu on its own. See the definition for the spec it reads.
+bool VCSMenuTestDue();
+
+// A developer's keyboard: with VCS_KEY_PIPE=<file> set, key events written to that file are fed
+// through NativeKey as if typed. Called once a frame from NativeFrame. See the definition.
+void VCSDevKeyPipeTick();
+
+// The menu over the firmware's save list, when the save icon opened it. See VCS::TakeIconSave.
+UIScreen *CreateIconSaveScreen(const Path &gamePath, bool bootPending);
 
 // Returns the VCS pause menu for VCS, and PPSSPP's ordinary one for everything else. The three
 // places EmuScreen opens a pause screen go through here, which is the whole integration.
