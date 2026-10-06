@@ -1464,6 +1464,85 @@ money, weapon and clock panel only; the radar has its own `RADAR MODE` setting a
 leaves the panel, which is the exact complement. The Gameplay row drives HUD MODE alone and says so
 in its help line, because a radar still on screen otherwise reads as a setting that half worked.
 
+### BRIGHTNESS - **FOUND: `[0x08bb3454] + 0x0c`, and it is ONE value**
+
+The last of the Display page's settings the fork had no row for, and the cheapest of the lot:
+`DisplayPrefs` was already known, so dumping its first 0x60 bytes in play and looking for a number
+that could be a GTA brightness was enough. `+0x0c` read 288 (0x120).
+
+- **Written to 0, the frame went black on the next vblank and stayed black.** Nothing put the old
+  value back, so unlike the volumes there is no live copy: the preference is what the renderer reads.
+- **The range is the game's own slider**, stepped from its Display page: 32 per press, stopping at
+  **128** and **384** - eight notches, drawn as eight blocks. Below 128 the picture keeps darkening
+  (0 is black), which is why the fork's row stops where the game's does.
+- **The default is 288, not the PS2 games' 256.** Read out of the function that resets the whole
+  object, at `0x089c6d00`, which is worth knowing for itself - it sets every field of it:
+
+| field | default | |
+|---|---|---|
+| `+0x08` u8 | 0 | subtitles (on is the save's value, not the reset's) |
+| `+0x0c` u32 | 0x120 | brightness |
+| `+0x10..0x13` u8 | 1, 0, 0, 0 | |
+| `+0x14` u32 | -1 | |
+| `+0x18..0x1b` u8 | 1, 1, 0, 0 | HUD mode, then radar mode's neighbours |
+| `+0x1c` u32 | 0x60 | SFX volume |
+| `+0x20` u32 | 0x70 | music volume |
+
+**The memory dump needs `replacements: false`.** `memory.read` hands back the JIT's block markers
+(`0x68xxxxxx`) over the first instruction of every compiled block unless asked not to - the first
+dump of this function showed half its instructions as `?`, and a Ghidra import of that dump would
+have analysed the markers as code.
+
+### CUSTOM SOUNDTRACKS - **the PSP feature is all there, and a `.gta` is a RIFF ATRAC file**
+
+The USA build carries the whole of the PSP release's "play my own music" feature, which needed a PC
+tool (Rockstar's Custom Tracks) to put the music on the memory stick and so was never in reach of an
+emulator player. Found by grepping the RAM for strings: `CUSTOMTRACKS`, `.gta`, `fatms0:`,
+`HOOK_USE_CUSTOM_TRACKS`, and in the GXT `FEA_CSS` "CUSTOM SOUNDTRACKS:", `NOTRAK` "No custom
+soundtracks present", `FEA_UT` "Unknown Track". The game's own Audio page has the row, and with
+nothing on the memory stick it reads UNAVAILABLE.
+
+| what | where | |
+|---|---|---|
+| the scan | `0x088b62a4` | lists `MS0:PSP/SAVEDATA/ULUS10160CUSTOMTRACKS/`, keeps every `*.gta` above a minimum size |
+| the name on screen | `0x088b6698` | the file name minus `.gta`; `FEA_UT` if that is empty |
+| the manager | `[gp+0x1708]` = `0x08bb3468` | `+0x08` flags (bit 0 playing, bit 1 stick in, bit 3 supported), `+0x0c`/`+0x10` the track vector (12 bytes, `+4` the path) |
+| the stream opener | `0x08aab35c` | station `0x6f` opens the current track, reads 0x1000 bytes, hands them to `sceAtracSetHalfwayBufferAndGetID` |
+| the music manager | `0x0888828c` | while the playing bit is set, EVERY station request becomes `0x6f` |
+| the preference | `DisplayPrefs+0x24` | 0 off, 1 on, 2 nothing to play |
+| its setter | `0x089c70d0(prefs, v)` | 1 also sets the preferred station (`+0x1b`) to 9 through `0x089c6f68`, which retunes the audio manager |
+| the playing bit | `0x088b5bcc(mgr, v)` | `flags = flags & ~1 | v`, nothing else |
+
+**The format is decided by the stream opener, not by guessing at the PC tool.** The bytes go straight
+into sceAtrac, exactly as the disc's stations do, with no decryption on the way - so a `.gta` is a
+RIFF ATRAC file. The disc's own `THEME.AT3`, ATRAC3plus at 96 kbps, copied into the folder as
+`Vice City Stories Theme.gta`, was found by the scan, listed by name on the game's Audio page and
+streamed as station `0x6f`.
+
+**Turning it on is TWO calls, and the setter alone is the half that looks finished.** The game's own
+restore-from-save (`0x08ab6a10`) does `setter(prefs, v)` then `0x088b5bcc(mgr, v)`. With only the
+setter, OFF left the playing bit set - and with it set, the music manager still turns every radio
+into the custom station. The fork calls the setter through `EnqueueGameCall` and writes the bit
+itself, once, at the same moment; it does not re-assert the bit, because the game clears it on its
+own when a radio is retuned away from the custom station.
+
+**And the setter does not ask whether there is anything to play** - the game's menu does, before it
+offers ON. Calling it with an empty folder turned custom soundtracks on with no tracks. The fork
+checks the track vector first, as the menu does.
+
+### FRAME LIMITER and CTIMER - **the cap is one immediate, and the timestep follows the clock**
+
+- `0x08A070B4` `sltiu $a0, $a0, 2`: the main loop waits for 2 vblanks (counted by the vblank
+  handler at `0x08A079C8` into `gp-0x2264`). 1 is 60 fps.
+- `0x08A11214` `CTimer::Update`; its clock is `0x0897F9B0`, `sceKernelGetSystemTime`. 294912 ticks
+  per ms. Timestep `gp+0x1dfc` = ms/20, clamped 0.5-3.33. Integer ms clock `gp+0x1dec`, truncated
+  per frame.
+- `gp-0x1ba8` (u8): read at ~300 sites. When it's set, the frame delta is carried in `gp-0x1fc0` and
+  quantized to 16 ms.
+- The game's clock is 222 MHz.
+
+All measured, and what the fork does with them, in [frame-rate.md](vcs/frame-rate.md).
+
 ### SFX and radio volume - **FOUND, and each is two values**
 
 The Audio page carried one row for a long time, with a note saying SFX and radio "need addresses we

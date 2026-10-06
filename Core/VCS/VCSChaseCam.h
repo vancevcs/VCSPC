@@ -100,6 +100,11 @@ struct VCSChaseCamSettings {
 
 	// Pivot height as a fraction of the collision box's top. 0.95 is where mode 18 looks on a bike.
 	float vehiclePivotScale = 0.95f;
+	// The passenger drive-by aimed with the view (driveByCameraAim): how far above the car the view
+	// looks, so the crosshair in the middle of the screen is not on the car's roof, and how much
+	// closer than the driving view it sits.
+	float driveByPivotLift = 1.3f;
+	float driveByDistanceScale = 0.85f;
 	// How far back: (base + perLength * box length) at the middle zoom level, scaled by the near and
 	// far factors at the other two, then by the overall scale. Fitted so the motorbike fixture - a box
 	// 1.98 long - gets the 6.26 its own camera measured at zoom 2.
@@ -190,6 +195,16 @@ bool ChaseCamTakesLook(VCSInputContext context);
 
 // Turn the view, in radians. Yaw is the direction the camera looks, counter-clockwise; pitch is up.
 void ChaseCamAddLook(float yawRadians, float pitchRadians);
+
+// The drive-by view's own yaw and pitch, in the camera's convention (yaw from atan2 of the front,
+// pitch up-positive), while the chase camera is building the passenger drive-by view - see
+// driveByCameraAim. False otherwise.
+bool ChaseCamDriveByAim(float *yaw, float *pitch);
+
+// The drive-by view exactly as it was handed to the game this frame - the camera's position, the
+// direction through the middle of the screen and its up - for the fire hook to shoot down. False
+// unless the chase camera is building the drive-by view.
+bool ChaseCamDriveByBasis(float source[3], float front[3], float up[3]);
 
 // The two replacement entries in ReplaceTables.cpp.
 int Hook_vcs_camera_prepare();

@@ -161,8 +161,15 @@ void __DisplayVblankEndCallback(SceUID threadID, SceUID prevCallbackId);
 void __DisplayFlip(int cyclesLate);
 static void __DisplaySetFramerate(void);
 
+// Fork-specific: VCS at 60 fps forces auto frameskip on, so a host that cannot draw every frame
+// drops frames rather than slowing the game down - see VCS::ForceAutoFrameSkip. Without changing
+// the player's own setting, which is why these two stand in for the config reads below.
 static bool UseAutoFrameSkip() {
-	return g_Config.bAutoFrameSkip && !g_Config.bSkipBufferEffects;
+	return (g_Config.bAutoFrameSkip || VCS::ForceAutoFrameSkip()) && !g_Config.bSkipBufferEffects;
+}
+
+static int FrameSkipSetting() {
+	return VCS::ForceAutoFrameSkip() ? std::max(g_Config.iFrameSkip, 1) : g_Config.iFrameSkip;
 }
 
 static bool UseLagSync() {
@@ -415,7 +422,7 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, 
 
 	// Check if the frameskipping code should be enabled. If neither throttling or frameskipping is on,
 	// we have nothing to do here.
-	bool doFrameSkip = g_Config.iFrameSkip != 0;
+	bool doFrameSkip = FrameSkipSetting() != 0;
 	if (!throttle && !doFrameSkip)
 		return;
 
@@ -442,7 +449,7 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, 
 			*skipFrame = true;
 		}
 	} else {
-		const int frameSkipNum = g_Config.iFrameSkip;
+		const int frameSkipNum = FrameSkipSetting();
 		if (frameSkipNum >= 1) {
 			// fixed frameskip
 			if (numSkippedFrames >= frameSkipNum)
@@ -611,7 +618,7 @@ void __DisplayFlip(int cyclesLate) {
 	// Also let's always flip for animated shaders.
 	bool postEffectRequiresFlip = false;
 
-	bool duplicateFrames = g_Config.bRenderDuplicateFrames && g_Config.iFrameSkip == 0;
+	bool duplicateFrames = g_Config.bRenderDuplicateFrames && FrameSkipSetting() == 0;
 
 	if (!g_Config.bSkipBufferEffects) {
 		postEffectRequiresFlip = duplicateFrames || g_Config.bShaderChainRequires60FPS;
@@ -696,7 +703,7 @@ void __DisplayFlip(int cyclesLate) {
 	DoFrameTiming(throttle, &skipFrame, scaledTimestep, nextFrame);
 
 	int maxFrameskip = 8;
-	const int frameSkipNum = g_Config.iFrameSkip;
+	const int frameSkipNum = FrameSkipSetting();
 	if (throttle) {
 		// 4 here means 1 drawn, 4 skipped - so 12 fps minimum.
 		maxFrameskip = frameSkipNum;

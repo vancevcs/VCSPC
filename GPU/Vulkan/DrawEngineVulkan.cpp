@@ -37,6 +37,7 @@
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/ShaderUniforms.h"
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSSmaa.h"
 #include "GPU/Common/VCSWater.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
 #include "GPU/Vulkan/TextureCacheVulkan.h"
@@ -55,6 +56,7 @@ DrawEngineVulkan::DrawEngineVulkan(Draw::DrawContext *draw)
 	decOptions_.expand8BitNormalsToFloat = false;
 	VCSShadow::Init();
 	VCSWater::Init();
+	VCSSmaa::Init();
 }
 
 void DrawEngineVulkan::InitDeviceObjects() {
@@ -100,6 +102,7 @@ DrawEngineVulkan::~DrawEngineVulkan() {
 	DestroyDeviceObjects();
 	VCSShadow::Shutdown();
 	VCSWater::Shutdown();
+	VCSSmaa::Shutdown();
 }
 
 void DrawEngineVulkan::DestroyDeviceObjects() {
@@ -144,6 +147,7 @@ void DrawEngineVulkan::DeviceLost() {
 	// after it had deleted the context, into a delete queue that was already freed - the crash on quit.
 	VCSShadow::DeviceLost();
 	VCSWater::DeviceLost();
+	VCSSmaa::DeviceLost();
 	draw_ = nullptr;
 }
 
@@ -232,6 +236,16 @@ void DrawEngineVulkan::Flush() {
 		if (VCSWater::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr,
 				vfb ? vfb->bufferWidth : 0, vfb ? vfb->bufferHeight : 0)) {
 			framebufferManager_->RebindFramebuffer("vcs_water_done");
+		}
+	}
+
+	// ...and anti-aliasing last of the three, over the finished world - shadows and sea included -
+	// and still before the HUD, so the text is not smoothed.
+	if (VCSSmaa::IsActive()) {
+		VirtualFramebuffer *vfb = framebufferManager_->GetCurrentRenderVFB();
+		if (VCSSmaa::OnFlush(draw_, gstate.isModeThrough(), vfb ? vfb->fbo : nullptr,
+				vfb ? vfb->bufferWidth : 0, vfb ? vfb->bufferHeight : 0)) {
+			framebufferManager_->RebindFramebuffer("vcs_smaa_done");
 		}
 	}
 

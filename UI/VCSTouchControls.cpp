@@ -137,6 +137,7 @@ enum Cond : uint32_t {
 	CondPlane = 1 << 9,            // flying a plane rather than a helicopter
 	CondPicker = 1 << 10,          // a menu the game runs in the world wants a confirm and a way out
 	CondPickerCycle = 1 << 11,     // ... and has something to step through
+	CondMountedGun = 1 << 12,      // driving the fire truck or the Rhino
 	CondWeapon = CondArmed | CondMelee,
 };
 
@@ -350,6 +351,15 @@ const ControlSpec kControls[] = {
 	{ "car.driveby_forward",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
 		"driveby_forward", nullptr, "SHOOT", kLeftB + 94.0f, kGlanceY, kMid, Anchor::Edge, kVehicle, CondBike, 0 },
+	// The fire truck's water cannon and the Rhino's, both on the vehicle fire control - "Hold
+	// ~VEWEP~ to use the fire engine's water cannon". Reported missing from a phone: a fire truck
+	// mission had no way to spray. Aiming needs nothing new - the steering already yaws the
+	// cannon, and a vertical drag on the screen raises and lowers it, because a touch drag goes
+	// into the same delta the mouse does and the truck spends that delta's Y on the cannon (see
+	// CannonAimActive). In the column's free top slot, in reach of the thumb on the accelerator.
+	{ "car.gun",
+		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
+		"gun", nullptr, "FIRE",         kColB, kRow3, kMid,  Anchor::Edge, kVehicle,          CondMountedGun, 0 },
 	{ "car.arrow_left",
 		 NKCODE_UNKNOWN,       NKCODE_UNKNOWN,       Kind::SteerLeft,
 		"arrow_left", nullptr, "<",     kLeftA, kWheelY, kBig, Anchor::Edge, kVehicle,        CondAlways, 0 },
@@ -1421,6 +1431,7 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.cond & CondScopeZooms) && state.scopeZooms) ||
 			((spec.cond & CondCameraUp) && state.cameraUp) ||
 			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike) ||
+			((spec.cond & CondMountedGun) && state.mountedGun) ||
 			((spec.cond & CondMapPage) && state.mapPage) ||
 			((spec.cond & CondPicker) && state.picker) ||
 			((spec.cond & CondPickerCycle) && state.pickerCycle) ||
@@ -1501,6 +1512,8 @@ void VCSTouchLayout::Update() {
 		// Something that shoots in hand, so the armed-only controls are there to be moved - and
 		// their melee counterparts are not, which is the same screen the player will see.
 		pretend.armed = true;
+		// And driving something with a gun of its own, so the FIRE button is there to be placed.
+		pretend.mountedGun = true;
 		pretend.picker = editPicker_;
 		pretend.pickerCycle = editPicker_;
 		for (VCSTouchButton *button : buttons_) {

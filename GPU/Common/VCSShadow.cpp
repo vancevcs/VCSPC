@@ -64,11 +64,12 @@ static Settings s_settings = {
 	// Designated by position, so the ORDER HERE MUST MATCH THE STRUCT. It did not, once, and the
 	// symptom was not a compile error: cacheHoldSeconds took a bool and the cache expired every
 	// frame while every count in the panel looked healthy.
-	70.0f,    // cascadeRadius, world units. GTA is roughly one unit to the metre, so this is a
+	85.0f,    // cascadeRadius, world units. GTA is roughly one unit to the metre, so this is a
 	          // couple of blocks around the player. It was 50, which is fine on foot and too
-	          // close in a car: shadows arrived a second before you reached them.
-	40.0f,    // centreDistance ahead of the camera - the faster you travel, the further ahead
-	          // the shadows have to already exist
+	          // close in a car: shadows arrived a second before you reached them. 70 while the box
+	          // sat 40 units ahead of the view; 85 now it is centred on the camera at rest - see
+	          // CascadeLead - so a street seen from standing still keeps most of its reach.
+	40.0f,    // centreDistance - the most the box may lead the camera along its TRAVEL
 	18.0f,    // nearCascadeRadius - the sharp half, about 0.9cm a texel at 4096. 0 disables
 	          // the split and halves the atlas back to one tile
 	300.0f,   // casterReach - how far up-sun a caster can be and still reach the cascade
@@ -94,7 +95,9 @@ static Settings s_settings = {
 	true,     // castBackFacesOnly
 	false,    // flipCasterWinding
 	0.35f,    // moonStrength
-	true,     // hideInRain
+	0.26f,    // lowSunFade - about 15 degrees
+	false,    // hideInRain - the puddles mirroring the shadows, which is what it hid, is fixed in
+	          // VCSWater (the road pass divides the composite back out of its reflection)
 	2.0f,     // rainFadeSeconds
 	0.30f,    // rainShadowsReturnWetness - was effectively 0.1, and read as "only once every puddle is gone"
 	true,     // hideBlobShadows
@@ -714,6 +717,53 @@ static float EaseShadowStrength(float target) {
 
 // Recomputes where the shadow projection is looking, from the view matrix and sun direction the
 // frame has left behind by the time it turns to 2D.
+// Where the cascades sit relative to the camera: ahead of where it is GOING, never of where it is
+// LOOKING.
+//
+// They used to sit `centreDistance` along the view direction, so that a car would not outrun its
+// shadows - and that made every turn of the camera swing the whole box 80 units, which on ULTRA
+// is buildings' shadows coming and going: the casters at the box's edge enter and leave the map,
+// and the remembered cells' replay test is measured from the same centre. Reported as ULTRA
+// flickering with camera movement while HIGH did not - HIGH's casters are people, cars and props a
+// few units from the player, always inside the box wherever it points.
+//
+// The lead the box was for is a lead along the TRAVEL, so that is what it follows now: the
+// camera's horizontal velocity, smoothed over half a second and taken 1.2 seconds ahead, clamped
+// to centreDistance. Standing and turning, it is zero and nothing about the shadow map changes. A
+// jump of more than fifteen units in a frame is a rebase of the GE space or a teleport, not travel,
+// and carries the velocity over rather than spiking it.
+static float s_leadVelocity[2];
+static float s_leadLastPos[2];
+static double s_leadLastTime;
+static bool s_leadHave;
+
+static void CascadeLead(const float *cameraPos, float maxLead, float out[3]) {
+	const double now = time_now_d();
+	if (s_leadHave) {
+		const double dt = now - s_leadLastTime;
+		const float dx = cameraPos[0] - s_leadLastPos[0];
+		const float dy = cameraPos[1] - s_leadLastPos[1];
+		if (dt > 0.0005 && dt < 0.5 && dx * dx + dy * dy < 15.0f * 15.0f) {
+			const float k = 1.0f - expf(-(float)dt / 0.5f);
+			s_leadVelocity[0] += (dx / (float)dt - s_leadVelocity[0]) * k;
+			s_leadVelocity[1] += (dy / (float)dt - s_leadVelocity[1]) * k;
+		}
+	}
+	s_leadLastPos[0] = cameraPos[0];
+	s_leadLastPos[1] = cameraPos[1];
+	s_leadLastTime = now;
+	s_leadHave = true;
+
+	out[0] = s_leadVelocity[0] * 1.2f;
+	out[1] = s_leadVelocity[1] * 1.2f;
+	out[2] = 0.0f;
+	const float len = sqrtf(out[0] * out[0] + out[1] * out[1]);
+	if (len > maxLead && len > 0.0f) {
+		out[0] *= maxLead / len;
+		out[1] *= maxLead / len;
+	}
+}
+
 static void ComputeShadowView(FrameStats stats) {
 	s_view.valid = false;
 	if (!s_haveViewMatrix) {
@@ -775,10 +825,12 @@ static void ComputeShadowView(FrameStats stats) {
 		? s_settings.casterReach : s_view.radius;
 	s_view.texelWorldSize = (2.0f * s_view.radius) / (float)s_settings.mapSize;
 
+	float lead[3];
+	CascadeLead(s_view.cameraPos, s_settings.centreDistance, lead);
 	float centre[3] = {
-		s_view.cameraPos[0] + s_view.cameraForward[0] * s_settings.centreDistance,
-		s_view.cameraPos[1] + s_view.cameraForward[1] * s_settings.centreDistance,
-		s_view.cameraPos[2] + s_view.cameraForward[2] * s_settings.centreDistance,
+		s_view.cameraPos[0] + lead[0],
+		s_view.cameraPos[1] + lead[1],
+		s_view.cameraPos[2] + lead[2],
 	};
 
 	// Snap the centre to whole shadow-map texels along the light's own axes. Without this the
@@ -804,10 +856,14 @@ static void ComputeShadowView(FrameStats stats) {
 	s_view.nearRadius = s_settings.nearCascadeRadius > 1.0f ? s_settings.nearCascadeRadius : 0.0f;
 	if (s_view.nearRadius > 0.0f && s_view.nearRadius < s_view.radius) {
 		s_view.nearTexelWorldSize = (2.0f * s_view.nearRadius) / (float)s_settings.mapSize;
+		// The same lead, scaled to a third of this box's own radius at most - and for the same
+		// reason: led by the view, turning moved things between the sharp cascade and the soft one.
+		const float nearLead = s_settings.centreDistance > 0.0f
+			? s_view.nearRadius * 0.35f / s_settings.centreDistance : 0.0f;
 		float nearCentre[3] = {
-			s_view.cameraPos[0] + s_view.cameraForward[0] * s_view.nearRadius * 0.35f,
-			s_view.cameraPos[1] + s_view.cameraForward[1] * s_view.nearRadius * 0.35f,
-			s_view.cameraPos[2] + s_view.cameraForward[2] * s_view.nearRadius * 0.35f,
+			s_view.cameraPos[0] + lead[0] * nearLead,
+			s_view.cameraPos[1] + lead[1] * nearLead,
+			s_view.cameraPos[2],
 		};
 		const float nearTexel = s_view.nearTexelWorldSize;
 		if (nearTexel > 0.0f) {
@@ -3189,9 +3245,15 @@ static bool EnsureMaskResources(Draw::DrawContext *draw, int width, int height) 
 		writer.C("  }\n");
 		writer.C("  float lit = sum / max(weightSum, 0.0001);\n");
 		// The cascade has an edge, and without this it is a straight line ruled across the road.
+		//
+		// The FAR cascade's edge only. The near one's is where the far takes over, and fading there
+		// thinned every shadow to about half just inside the 0.92 handover before the far cascade
+		// put it back at full - a lit ring a couple of pixels wide, cut through every shadow at the
+		// near box's radius and following the player: reported as "a 2px cut in the otherwise full
+		// shadow that follows the player in distance, like an end of a radius".
 		writer.C("  vec2 edge = abs(shadowUV * 2.0 - 1.0);\n");
 		writer.C("  float edgeDist = max(edge.x, edge.y);\n");
-		writer.C("  float fade = clamp((1.0 - edgeDist) / max(u_shadowParams2.z, 0.001), 0.0, 1.0);\n");
+		writer.C("  float fade = tile > 0.5 ? clamp((1.0 - edgeDist) / max(u_shadowParams2.z, 0.001), 0.0, 1.0) : 1.0;\n");
 		writer.C("  lit = mix(1.0, lit, fade);\n");
 		writer.C("  if (shadowUV.x < 0.0 || shadowUV.x > 1.0 || shadowUV.y < 0.0 || shadowUV.y > 1.0 ||\n");
 		writer.C("      refZ < 0.0 || refZ > 1.0) {\n");
@@ -4142,6 +4204,34 @@ static bool EnsureCompositeResources(Draw::DrawContext *draw) {
 	return true;
 }
 
+// The frame's FIRST capture, as it stood when a restart threw it away - what a second capture has to
+// measure up to before the passes run on it again. See OnFlush.
+static bool s_recaptureThisFrame = false;
+// Early seams: a 2D draw the game makes in the MIDDLE of its world, which the passes took for the seam
+// between the world and the HUD. See OnFlush.
+static bool s_recaptureRan = false;      // this frame's passes ran a second time, on a real second capture
+static u32 s_firstSeamTex = 0;           // the texture of the 2D draw this frame's passes FIRST ran at
+static u32 s_secondSeamTex = 0;          // ... and the one they ran at again, after the restart
+static constexpr int kEarlySeamTextures = 4;
+static u32 s_earlySeamTex[kEarlySeamTextures];  // learned: draws with these are not the end of the world
+static int s_earlySeamIdleFrames = 0;    // frames since one of them was last passed over
+static bool s_passedEarlySeam = false;
+static int s_seamsDeferred = 0;
+static int s_firstCasterIndices = 0;
+static int s_recapturesSkipped = 0;
+
+// What the last composite multiplied the frame by - see CompositedMask.
+static bool s_maskComposited = false;
+static float s_compositedTint[4];
+
+Draw::Framebuffer *CompositedMask(float tintStrength[4]) {
+	if (!s_maskComposited || !s_maskFbo) {
+		return nullptr;
+	}
+	memcpy(tintStrength, s_compositedTint, sizeof(s_compositedTint));
+	return s_maskFbo;
+}
+
 static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, int width, int height) {
 	s_capture.composited = false;
 	if (!s_capture.maskRendered || !s_maskFbo || !target) {
@@ -4192,11 +4282,23 @@ static void RenderComposite(Draw::DrawContext *draw, Draw::Framebuffer *target, 
 		// shadows visible; moonStrength is what keeps them from looking like noon.
 		const bool moon = live ? s_current.sunIsMoon
 			: (s_haveHeldSun ? s_heldSunIsMoon : s_published.sunIsMoon);
+		// A low sun fades its shadows out before it sets - see lowSunFade - so the swap to the moon
+		// starts from nothing and the moon's shadows ease in from there.
+		float lowSun = 1.0f;
+		if (!moon) {
+			const float *dir = live ? s_current.sunDir
+				: (s_haveHeldSun ? s_heldSunDir : s_published.sunDir);
+			const float top = std::max(s_settings.lowSunFade, kMinSunElevation + 0.01f);
+			float k = std::clamp((dir[2] - kMinSunElevation) / (top - kMinSunElevation), 0.0f, 1.0f);
+			lowSun = k * k * (3.0f - 2.0f * k);
+		}
 		ub.tint[3] = EaseShadowStrength(moon ? s_settings.strength * s_settings.moonStrength
-			: s_settings.strength * luminance);
+			: s_settings.strength * luminance * lowSun);
 		// And the weather's share - see hideInRain. Zero never gets this far; OnFlush skips it.
 		ub.tint[3] *= s_weatherFade;
 	}
+	s_maskComposited = !(s_settings.showMask || showAO);
+	memcpy(s_compositedTint, ub.tint, sizeof(s_compositedTint));
 	ub.params[0] = s_settings.showMask ? 1.0f : 0.0f;
 	// The depth map is almost all near-white at these ranges, so it is stretched to be legible.
 	ub.params[1] = s_settings.debugView == 4 ? 1.0f : 0.0f;
@@ -4267,6 +4369,57 @@ bool OnFlush(Draw::DrawContext *draw, bool through, Draw::Framebuffer *target,
 	// would darken whatever the game is about to sample as a texture.
 	if (gstate_c.curRTWidth < 480 || gstate_c.curRTHeight < 272) {
 		return false;
+	}
+	// A restart that is NOT a second frame. The re-capture exists for the game drawing its whole
+	// scene again after the HUD - measured with draw, caster and receiver counts within a few of
+	// the first. In the rain something 3D arrives after the HUD on every frame, and the passes ran
+	// a second time on a capture of little but that, compositing a second set of shadows, out of
+	// place, over the frame's own: reported as shadows in the rain "very weirdly misplaced", and
+	// what hideInRain was hiding. Logged as 1000 restarts in 40 seconds of rain. A second capture
+	// with under a quarter of the first's casters keeps the first composite and runs nothing.
+	if (s_recaptureThisFrame &&
+			s_capture.casterIndices < std::max(300, s_firstCasterIndices / 4)) {
+		s_frameComposited = true;
+		s_recapturesSkipped++;
+		if (s_recapturesSkipped <= 3 || s_recapturesSkipped % 1000 == 0) {
+			NOTICE_LOG(Log::G3D, "VCS shadows: a re-capture of %d caster indices against the frame's %d "
+				"is not a second frame - keeping the first composite (%d so far)",
+				s_capture.casterIndices, s_firstCasterIndices, s_recapturesSkipped);
+		}
+		return false;
+	}
+	// A SEAM TOO EARLY. In the rain the game makes a blended, textured 2D draw a quarter of the way
+	// through its world - measured: the passes fired with 10446 of a frame's 42258 caster indices in,
+	// on the same texture every frame - and the rest of the world arrived after it. So the passes
+	// ran on a quarter of the city, the restart above caught the rest and ran them again: two
+	// composites a frame, each from part of the world. That, not the puddles, is what "shadows act
+	// strange in the rain" was, and what hideInRain hid.
+	//
+	// So the texture of the draw the passes FIRST ran at, in a frame where they then had to run again,
+	// is learned (see BeginFrame), and from then on a 2D draw with it is passed over: the capture
+	// carries on and the passes run once, at the seam after the world. Not a share of the casters -
+	// that was tried, and an early seam in the rain arrives with anywhere from a quarter to over half
+	// of them, so no threshold separated it from the real one; the shadows blinked out on frames
+	// that missed both. A frame with no such draw - every frame in clear weather - never learns one.
+	const u32 seamTex = gstate.isTextureMapEnabled() ? gstate.getTextureAddress(0) : 0;
+	if (seamTex != 0 && !s_recaptureThisFrame) {
+		for (u32 t : s_earlySeamTex) {
+			if (t == seamTex) {
+				s_passedEarlySeam = true;
+				s_seamsDeferred++;
+				if (s_seamsDeferred <= 3 || s_seamsDeferred % 1000 == 0) {
+					NOTICE_LOG(Log::G3D, "VCS shadows: passed over the early 2D draw (%08x) with %d caster "
+						"indices in (%d so far)", seamTex, s_capture.casterIndices, s_seamsDeferred);
+				}
+				return false;
+			}
+		}
+	}
+	if (s_recaptureThisFrame) {
+		s_recaptureRan = true;
+		s_secondSeamTex = seamTex;
+	} else if (s_firstSeamTex == 0) {
+		s_firstSeamTex = seamTex;
 	}
 	// Faded all the way out for the rain, so skip all three passes rather than composite a mask at
 	// zero strength. The capture carries on, which keeps the caster cache warm for when it dries.
@@ -4466,6 +4619,42 @@ void DeviceLost() {
 }
 
 void BeginFrame(Draw::DrawContext *draw) {
+	// The frame just ended, judged before any of it is reset: did it have a seam too early? Either
+	// the passes ran twice on comparable captures, or one was passed over and the passes ran later.
+	{
+		// The passes had to run twice, at two DIFFERENT draws: the first was too early, so learn its
+		// texture. At the same draw twice it was a real second frame - the whole scene again, which
+		// happens a few times a session in clear weather - and learning that texture, the HUD's,
+		// would pass over the only seam there is and draw no shadows at all.
+		if (s_recaptureRan && s_firstSeamTex != 0 && s_firstSeamTex != s_secondSeamTex) {
+			bool known = false;
+			for (u32 t : s_earlySeamTex) {
+				known = known || t == s_firstSeamTex;
+			}
+			if (!known) {
+				for (int i = kEarlySeamTextures - 1; i > 0; i--) {
+					s_earlySeamTex[i] = s_earlySeamTex[i - 1];
+				}
+				s_earlySeamTex[0] = s_firstSeamTex;
+				NOTICE_LOG(Log::G3D, "VCS shadows: a 2D draw with texture %08x comes before the world is "
+					"finished - waiting past it from now on", s_firstSeamTex);
+			}
+		}
+		// And forget them once they stop turning up - the rain has stopped, or the texture moved.
+		if (s_passedEarlySeam) {
+			s_earlySeamIdleFrames = 0;
+		} else if (++s_earlySeamIdleFrames > 600) {
+			memset(s_earlySeamTex, 0, sizeof(s_earlySeamTex));
+			s_earlySeamIdleFrames = 0;
+		}
+		s_recaptureRan = false;
+		s_passedEarlySeam = false;
+		s_firstSeamTex = 0;
+		s_secondSeamTex = 0;
+	}
+	// Before the gate: with the shadows off, last frame's mask must not be handed out as this one's.
+	s_maskComposited = false;
+	s_recaptureThisFrame = false;
 	if (!g_active) {
 		return;
 	}
@@ -5086,6 +5275,10 @@ static void NoteBlend(int vertexCount) {
 static int s_captureRestarts;
 
 static void RestartCapture() {
+	if (!s_recaptureThisFrame) {
+		s_recaptureThisFrame = true;
+		s_firstCasterIndices = s_capture.casterIndices;
+	}
 	memset(&s_capture, 0, sizeof(s_capture));
 	s_positions.clear();
 	s_casterIndices.clear();

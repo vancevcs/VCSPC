@@ -21,6 +21,7 @@
 #include "Core/MIPS/MIPS.h"
 #include "Core/MemMap.h"
 #include "Core/VCS/VCSAddresses.h"
+#include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSGame.h"
 #include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSMemory.h"
@@ -127,7 +128,7 @@ static bool PlayerPosition(Vec3 *out) {
 //
 // Nothing here is reconstructed from an angle, which is the point - see the long note in the
 // header for why the reconstruction was 4.42 degrees out and why that error moved.
-static bool CrosshairRay(Vec3 front, Vec3 up, float *fovOut, Vec3 *dir) {
+static bool CrosshairRay(Vec3 front, Vec3 up, float *fovOut, Vec3 *dir, bool centre = false) {
 	// A stale or half-written basis is a real possibility during a camera transition, and the
 	// cheapest way to reject one is that it is no longer a unit vector.
 	if (!Normalise(&front) || !Normalise(&up))
@@ -139,8 +140,10 @@ static bool CrosshairRay(Vec3 front, Vec3 up, float *fovOut, Vec3 *dir) {
 	const float tanHalf = tanf(fov * 0.5f * kPi / 180.0f);
 
 	// Screen offsets in the same units re3 uses: -1 at the left/bottom edge, +1 at the right/top.
-	const float ox = (s.crosshairX - 0.5f) * 2.0f;
-	const float oy = (0.5f - s.crosshairY) * 2.0f;
+	// The drive-by aimed with the view shoots down the middle of it, where its crosshair is drawn -
+	// the game's own free-aim crosshair sits off centre and is not on screen in that seat.
+	const float ox = centre ? 0.0f : (s.crosshairX - 0.5f) * 2.0f;
+	const float oy = centre ? 0.0f : (0.5f - s.crosshairY) * 2.0f;
 
 	// front x up is screen-right in this coordinate system: with front (0,1,0) and up (0,0,1) it
 	// gives (1,0,0), i.e. +X to the right of a camera facing +Y. Verified against the live basis,
@@ -165,16 +168,26 @@ static bool CrosshairRay(Vec3 front, Vec3 up, float *fovOut, Vec3 *dir) {
 	return true;
 }
 
-static bool CameraRay(Vec3 *source, Vec3 *dir, VCSFireHookTrace *trace) {
+static bool CameraRay(Vec3 *source, Vec3 *dir, VCSFireHookTrace *trace, bool centre = false) {
 	Vec3 front, up, camPos;
-	if (!ReadVec3(kVCSCam0 + kVCSCamFrontOffset, &front) ||
+	// The drive-by aimed with the view takes the view the chase camera actually rendered. CCam's
+	// stored basis below is the GAME's camera for that mode - the chase camera writes the camera
+	// update's working vectors (see kVCSCamPreShake), never these - so shooting down it put every
+	// drive-by shot on the game's line instead of the crosshair's: "shots land in some kind of
+	// offset, definitely not directly where the crosshair is".
+	float bs[3], bf[3], bu[3];
+	if (centre && ChaseCamDriveByBasis(bs, bf, bu)) {
+		camPos = Vec3{bs[0], bs[1], bs[2]};
+		front = Vec3{bf[0], bf[1], bf[2]};
+		up = Vec3{bu[0], bu[1], bu[2]};
+	} else if (!ReadVec3(kVCSCam0 + kVCSCamFrontOffset, &front) ||
 	    !ReadVec3(kVCSCam0 + kVCSCamUpOffset, &up) ||
 	    !ReadVec3(kVCSCam0 + kVCSCamSourceOffset, &camPos)) {
 		return false;
 	}
 	float fov = 0.0f;
 	Vec3 d;
-	if (!CrosshairRay(front, up, &fov, &d))
+	if (!CrosshairRay(front, up, &fov, &d, centre))
 		return false;
 
 	*source = camPos;
@@ -346,7 +359,8 @@ int Hook_vcs_weapon_raycast() {
 	// resolve the shot its own way is a better one than firing along a guess.
 	Vec3 camPos;
 	Vec3 dir;
-	if (!CameraRay(&camPos, &dir, &trace))
+	const bool driveBy = DriveByCameraAimActive(GetCurrentContext());
+	if (!CameraRay(&camPos, &dir, &trace, driveBy))
 		return 0;
 
 	Vec3 origin = source;
@@ -384,6 +398,13 @@ int Hook_vcs_weapon_raycast() {
 		g_redirected++;
 		trace.valid = true;
 		g_trace = trace;
+		// Said once a session: the drive-by's shots reaching here at all is what aiming it with the
+		// view rests on, and it is the first thing to check if a drive-by ever shoots wide.
+		static bool s_announcedDriveBy = false;
+		if (driveBy && !s_announcedDriveBy) {
+			s_announcedDriveBy = true;
+			NOTICE_LOG(Log::HLE, "VCS: a drive-by shot went down the view's centre (range %.0f)", range);
+		}
 	}
 
 	// HOOKENTER: the original instruction runs after us, so the raycast proceeds - now with our
@@ -392,13 +413,30 @@ int Hook_vcs_weapon_raycast() {
 }
 
 void InstallFireHook() {
-	if (g_installed || !IsActive())
+	if (!IsActive())
 		return;
 
 	const int index = GetReplacementFuncIndexByName("vcs_weapon_raycast");
 	if (index < 0) {
 		WARN_LOG(Log::HLE, "VCS: no replacement entry named vcs_weapon_raycast");
 		return;
+	}
+
+	// Installed - but still? A savestate replaces PSP memory wholesale, and the state holds the
+	// game's own instruction here, so loading one took the hook out and this function, having
+	// installed once, never looked again: free aim stopped redirecting a single shot for the rest
+	// of the session. Found testing the drive-by from a savestate - a breakpoint on this address
+	// stopped on the plain jal. Checked every tick through Read_Instruction, which sees through a
+	// JIT block marker to the op it covers, the way the chase camera checks its own hooks.
+	if (g_installed) {
+		const u32 replaceOp = MIPS_EMUHACK_CALL_REPLACEMENT | (u32)index;
+		if (Memory::Read_Instruction(kVCSWeaponRaycastCall, false).encoding == replaceOp) {
+			return;
+		}
+		g_installed = false;
+		g_doneInstalled = false;
+		g_restorePending = false;
+		NOTICE_LOG(Log::HLE, "VCS: the fire hook was lost (a savestate?) - reinstalling");
 	}
 
 	// Verify the game's own instruction is there before touching it.
@@ -409,10 +447,13 @@ void InstallFireHook() {
 	// module loader. That is exactly what happened on the first attempt: the install reported
 	// success and the hook never fired once. Installing from Tick fixes the timing, and this check
 	// makes sure we only ever patch the instruction we measured.
-	auto op = ReadU32(kVCSWeaponRaycastCall);
-	if (!op || *op != kVCSWeaponRaycastOp) {
+	// Through Read_Instruction too: after a savestate the code has run, so the raw word can be a
+	// JIT block marker rather than the game's instruction.
+	if (!Memory::IsValid4AlignedAddress(kVCSWeaponRaycastCall) ||
+			Memory::Read_Instruction(kVCSWeaponRaycastCall, false).encoding != kVCSWeaponRaycastOp) {
 		return;  // Not loaded yet, or not this build. Try again next tick.
 	}
+	currentMIPS->InvalidateICache(kVCSWeaponRaycastCall, 4);
 
 	// Installed by ADDRESS rather than by the usual function-hash match. The PSP has no ASLR and
 	// this is a single known build (ULUS10160), so the address is stable; and the hash path would
@@ -434,8 +475,10 @@ void InstallFireHook() {
 	// with it - but useCameraOrigin has to stand down, since the borrowed origin would then never
 	// be given back and every shot would draw its flash on the camera axis.
 	const int doneIndex = GetReplacementFuncIndexByName("vcs_weapon_raycast_done");
-	auto doneOp = ReadU32(kVCSWeaponRaycastDone);
-	if (doneIndex >= 0 && doneOp && *doneOp == kVCSWeaponRaycastDoneOp) {
+	const bool doneStock = Memory::IsValid4AlignedAddress(kVCSWeaponRaycastDone) &&
+		Memory::Read_Instruction(kVCSWeaponRaycastDone, false).encoding == kVCSWeaponRaycastDoneOp;
+	if (doneIndex >= 0 && doneStock) {
+		currentMIPS->InvalidateICache(kVCSWeaponRaycastDone, 4);
 		if (WriteReplaceInstructionAt(kVCSWeaponRaycastDone, doneIndex)) {
 			currentMIPS->InvalidateICache(kVCSWeaponRaycastDone, 4);
 			g_doneInstalled = true;

@@ -306,6 +306,31 @@ bool g_newGameBoot = false;
 // dialog.
 int g_wantSlot = -1;
 
+// --- The save icon ------------------------------------------------------------------------------
+//
+// Walking into the save icon at a safe house runs the game's own save routine, which opens the
+// firmware's savedata dialog - PPSSPP's slot list, in PPSSPP's own look, the one screen in normal
+// play that still looked like an emulator. So when that list comes up and nothing of ours asked for
+// it, this fork's menu goes up over it on a SAVE GAME page of its own, and the player's choice is
+// then walked through the dialog exactly as the auto-save walks it - steered to the slot, the
+// overwrite prompt answered, the acknowledgement dismissed - behind a curtain. Choosing nothing
+// cancels the dialog with its own Back, which is what the player would have pressed.
+//
+// The script has already done what a save needs before it opened the dialog - see
+// PrepareScriptForSave, which exists to do it for the saves that do not come from the icon - so
+// none of that is repeated here.
+//
+// Asked across threads: the tick sees the list and sets `ask`; the UI thread takes it and opens
+// the page; the page's answer comes back in `answer` - a slot, kIconSaveCancel, or nothing yet.
+std::atomic<bool> g_iconSaveAsk{false};
+std::atomic<int> g_iconSaveAnswer{-2};
+bool g_iconSaveOpen = false;
+constexpr int kIconSaveNone = -2;
+// The slot a save the player chose is going to; -1 means the auto-save's own.
+int g_saveSlot = -1;
+// The dialog phase presses Back at whatever is up until the dialog has gone.
+bool g_dialogCancel = false;
+
 // Retries of the Start press, for the auto-load only. The boot seam lands in the opening scene,
 // where the first Start may be spent skipping something rather than opening the menu.
 int g_startAttempts = 0;
@@ -322,6 +347,9 @@ std::atomic<bool> g_curtainFresh{false};
 // read and belongs to the emu thread, so the tick publishes the answer here instead.
 std::atomic<bool> g_gameMenuUpCached{false};
 bool g_curtainSawSequence = false;
+// Set from the UI thread when the boot's curtain - raised at the end of the movie, before any
+// sequence exists to take it down - turns out to have no load behind it. See ReleaseBootCurtain.
+std::atomic<bool> g_curtainRelease{false};
 int g_curtainSettle = 0;
 int g_curtainVblanks = 0;
 
@@ -364,7 +392,7 @@ bool GameFrameAdvancedForCurtain() {
 // Callable from ANY thread, which is why it sets two atomics and nothing else: the counters
 // belong to the emu thread and are initialised by the tick when it sees the raise. Menu rows ask
 // for this from the UI thread.
-void RaiseCurtain(CurtainKind kind) {
+void RaiseCurtainNow(CurtainKind kind) {
 	g_curtainKind.store((int)kind, std::memory_order_relaxed);
 	g_curtainFresh.store(true, std::memory_order_relaxed);
 }
@@ -384,6 +412,9 @@ void CurtainTick() {
 		g_curtainSettle = kind == (int)CurtainKind::Menu ? 0 : kCurtainSettleFrames;
 		g_curtainVblanks = 0;
 		g_haveCurtainFrame = false;
+	}
+	if (g_curtainRelease.exchange(false, std::memory_order_relaxed)) {
+		g_curtainSawSequence = true;
 	}
 	if (++g_curtainVblanks >= kCurtainMaxVblanks) {
 		DropCurtain();
@@ -703,6 +734,8 @@ void GoIdle(const char *why) {
 	}
 	g_saveWasAutomatic = false;
 	g_saveReachedDone = false;
+	g_saveSlot = -1;
+	g_dialogCancel = false;
 	g_bridgeOwnsMenu = false;
 	ShowPagesAgain();
 	g_phase = Phase::Idle;
@@ -770,7 +803,7 @@ void DialogTick() {
 			// returns to the page it was asked from - closing it is the difference between
 			// "saved" and "saved, and now you are in a menu".
 			const bool menuUp = GameMenuActive();
-			GoIdle(g_target == FrontEndTarget::Load ? "loaded" : "saved");
+			GoIdle(g_dialogCancel ? "save cancelled" : g_target == FrontEndTarget::Load ? "loaded" : "saved");
 			if (menuUp) {
 				g_request.store((int)FrontEndTarget::Close, std::memory_order_relaxed);
 			}
@@ -805,6 +838,12 @@ void DialogTick() {
 	const u32 ok = peek.okButton ? peek.okButton : (u32)CTRL_CROSS;
 	const u32 back = peek.cancelButton ? peek.cancelButton : (u32)CTRL_CIRCLE;
 
+	// The player backed out of this fork's SAVE GAME page: Back at every screen until it is gone.
+	if (g_dialogCancel) {
+		Press(back, Phase::Dialog, hold, gap, true);
+		return;
+	}
+
 	if (peek.list) {
 		// Which entry to take. A save always walks to its dedicated slot; a load takes the one
 		// the game asked the firmware to focus - the LATEST, which is the whole definition of
@@ -816,7 +855,9 @@ void DialogTick() {
 		// stops the walk instead of running off the end of it.
 		const bool steer = peek.save || g_wantSlot >= 0;
 		if (steer && peek.selected >= 0 && peek.count > 0) {
-			int want = peek.save ? s.autoSaveSlot : g_wantSlot;
+			// A save goes to the slot the player picked off this fork's SAVE GAME page if there
+			// is one, and to the auto-save's own slot if not.
+			int want = peek.save ? (g_saveSlot >= 0 ? g_saveSlot : s.autoSaveSlot) : g_wantSlot;
 			if (want < 0) want = 0;
 			if (want >= peek.count) want = peek.count - 1;
 			if (peek.selected != want) {
@@ -1175,7 +1216,7 @@ void RequestGameMenu(FrontEndTarget target) {
 	case FrontEndTarget::Game:
 	case FrontEndTarget::Stats:
 	case FrontEndTarget::Menu:
-		RaiseCurtain(CurtainKind::Menu);
+		RaiseCurtainNow(CurtainKind::Menu);
 		break;
 	default:
 		break;
@@ -1197,7 +1238,7 @@ void RequestCloseGameMenu() {
 	// unconditionally would put a backdrop over the world for a frame or two every time somebody
 	// pressed RESUME.
 	if (g_gameMenuUpCached.load(std::memory_order_relaxed)) {
-		RaiseCurtain(CurtainKind::Menu);
+		RaiseCurtainNow(CurtainKind::Menu);
 	}
 }
 
@@ -1226,7 +1267,7 @@ bool RequestAutoLoad() {
 	}
 	// -1: take the entry the firmware's list arrives on, which VCS asks to be the latest save.
 	g_wantSlot = -1;
-	RaiseCurtain(CurtainKind::Loading);
+	RaiseCurtainNow(CurtainKind::Loading);
 	RequestGameMenu(FrontEndTarget::Load);
 	return true;
 }
@@ -1237,7 +1278,7 @@ void RequestLoadSlot(int slot) {
 	// read it in between - FrontEndTick takes the request on the emu thread, and it is the only
 	// thing that reads either.
 	g_wantSlot = slot;
-	RaiseCurtain(CurtainKind::Loading);
+	RaiseCurtainNow(CurtainKind::Loading);
 	RequestGameMenu(FrontEndTarget::Load);
 }
 
@@ -1249,8 +1290,27 @@ void RequestNewGame() {
 	// Behind the curtain either way, and the curtain is doing more work here than anywhere else:
 	// what it hides is the game's own menu being walked AND the world being torn down and rebuilt
 	// behind it.
-	RaiseCurtain(CurtainKind::Loading);
+	RaiseCurtainNow(CurtainKind::Loading);
 	RequestGameMenu(FrontEndTarget::NewGame);
+}
+
+void RaiseCurtain(CurtainKind kind) {
+	RaiseCurtainNow(kind);
+}
+
+void ReleaseBootCurtain() {
+	g_curtainRelease.store(true, std::memory_order_relaxed);
+}
+
+bool TakeIconSave() {
+	return g_iconSaveAsk.exchange(false, std::memory_order_relaxed);
+}
+
+void AnswerIconSave(int slot) {
+	// The curtain goes up with the answer, from the UI thread, so the frame between this fork's
+	// menu closing and the walk starting does not show the firmware's list.
+	RaiseCurtainNow(slot >= 0 ? CurtainKind::Saving : CurtainKind::Menu);
+	g_iconSaveAnswer.store(slot >= 0 ? slot : -1, std::memory_order_relaxed);
 }
 
 bool TakeNewGameBoot() {
@@ -2006,7 +2066,7 @@ void FrontEndTick() {
 			// be on screen is the game's save menu opening by itself and a firmware dialog being
 			// walked through. RequestSaveMenu deliberately does not do this - a player who asked
 			// for the save menu went looking for it.
-			RaiseCurtain(CurtainKind::Saving);
+			RaiseCurtainNow(CurtainKind::Saving);
 			g_request.store((int)FrontEndTarget::Save, std::memory_order_relaxed);
 			g_OSD.Show(OSDType::MESSAGE_INFO, "Auto-saving", 2.0f, "vcs_frontend");
 		} else if (++g_autoSaveWaited >= kAutoSavePatience) {
@@ -2020,6 +2080,47 @@ void FrontEndTick() {
 	if (g_phase == Phase::Done && !GameMenuActive()) {
 		// Hand-over ends when the player closes the menu.
 		GoIdle("idle");
+	}
+
+	// The save icon. Only from Idle: every sequence of ours that opens this dialog is in a phase
+	// of its own by then, so a save list that arrives while nothing is running can only be the
+	// game's own - the icon. See g_iconSaveAsk.
+	if (g_phase == Phase::Idle && FrontEndSettings().ownSaveMenu) {
+		if (!g_iconSaveOpen) {
+			SaveDialogPeek peek;
+			if (PeekSaveDialog(&peek) && peek.save && peek.list && !peek.busy) {
+				g_iconSaveOpen = true;
+				g_iconSaveAnswer.store(kIconSaveNone, std::memory_order_relaxed);
+				g_iconSaveAsk.store(true, std::memory_order_relaxed);
+				g_status = "save icon - asking";
+			}
+		} else {
+			const int answer = g_iconSaveAnswer.exchange(kIconSaveNone, std::memory_order_relaxed);
+			if (answer != kIconSaveNone) {
+				g_iconSaveOpen = false;
+				g_iconSaveAsk.store(false, std::memory_order_relaxed);
+				g_target = FrontEndTarget::Save;
+				g_saveWasAutomatic = false;
+				g_saveSlot = answer >= 0 ? answer : -1;
+				g_dialogCancel = answer < 0;
+				g_seqPresses = 0;
+				g_dialogWaited = 0;
+				g_sawDialog = false;
+				g_curtainSawSequence = true;
+				g_phase = Phase::Dialog;
+				g_mask = 0;
+				g_status = answer >= 0 ? "saving to the chosen slot" : "cancelling the save";
+				return;
+			}
+			// Still asking: the page is up, or about to be. If the dialog went away by itself in
+			// the meantime there is nothing left to answer.
+			SaveDialogPeek peek;
+			if (!PeekSaveDialog(&peek)) {
+				g_iconSaveOpen = false;
+				g_iconSaveAsk.store(false, std::memory_order_relaxed);
+			}
+			return;
+		}
 	}
 
 	// A request is taken in Idle and in Done, and taking it in Done is not a refinement - it is
@@ -2557,6 +2658,11 @@ void FrontEndReset() {
 	g_saveReachedDone = false;
 	g_missionSettle = 0;
 	g_wantSlot = -1;
+	g_iconSaveOpen = false;
+	g_iconSaveAsk.store(false, std::memory_order_relaxed);
+	g_iconSaveAnswer.store(kIconSaveNone, std::memory_order_relaxed);
+	g_saveSlot = -1;
+	g_dialogCancel = false;
 	g_request.store(-1, std::memory_order_relaxed);
 	// Dropped rather than restored: the game these belonged to is going away, and the write
 	// would land in whatever replaces it.

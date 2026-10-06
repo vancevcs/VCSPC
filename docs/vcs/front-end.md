@@ -91,6 +91,14 @@ and each page's RESTORE DEFAULTS resets only its own rows. Its heading is
 `assets/vcs/title_advanced.png`, rendered on the Mac with `.venv/bin/python Tools/vcsmenuart.py
 advanced` (the system python has no Pillow).
 
+Since the frame limiter arrived the two pages split the way the PC ports split DISPLAY SETUP from
+their advanced options. DISPLAY SETUP is the picture: Brightness, Resolution, Fullscreen,
+Widescreen, Frame limiter, Show FPS. ADVANCED is quality and its cost: Texture quality, Shadow quality,
+Ambient occlusion, Water quality, Anti-aliasing (OFF / SMAA, on by default on a desktop, off on a
+phone - see [anti-aliasing.md](anti-aliasing.md)), Anisotropic filtering, World memory.
+Desktop pages are centred and don't scroll, so about eleven rows is the most a page can hold on a
+16:10 screen before BACK goes under the help bar.
+
 ### The Gameplay page has a second kind of row now: the game's own settings
 
 `SUBTITLES` and `HUD` are not this port's inventions, and that makes them the first rows on that
@@ -144,6 +152,84 @@ where the write path clamps to 127 exactly as the game's own slider does at its 
 game's ladder of 16 is eight notches against a ten-block strip, which would move one block on some
 presses and two on others. Both produce values the game accepts; this one matches the control the
 player is looking at.
+
+### BRIGHTNESS, the game's own, and a strip of eight blocks
+
+The first row of DISPLAY SETUP, where the PC ports put it, and the third of the game's own Display
+page settings to get a row. Reached the way SUBTITLES and HUD MODE are - a mirror in
+`VCSGameSettings`, pushed by `ApplyGamePrefs` only on a disagreement - and simpler than the
+volumes: one value, no live copy. See "BRIGHTNESS" in docs/VCS_ADDRESSES.md.
+
+**Eight blocks, not ten, and `Option::blocks` is how a row says so.** The game's slider has eight
+notches of 32, and this menu's rule is one press moves one block; eight steps on a ten-block strip
+would light one block on some presses and two on others - the same trap the volume step of 13
+avoids from the other side. Every other row leaves `blocks` at 0 and draws ten.
+
+### LANGUAGE, and the USA build that never chooses one
+
+**Status: working, measured.** Booted with FRANCAIS selected, the beeper, the help box and the
+game's own front end are French, accents included, and the boot's auto-load still walks that front
+end to the save list - the French layout's tab grid differs, and the walk does not care, because it
+watches the page index rather than counting presses.
+
+The USA disc carries all five GXTs the PAL release has, and the text loader at `0x089f656c` still
+switches on a language index to pick one - so the languages were always there, and the only thing
+missing is anything that sets the index. See "The game's language" in `VCSAddresses.h`: the index
+sits behind a lazy-init flag whose initialiser zeroes it, nothing else writes it, and the game's one
+`sceUtilityGetSystemParamInt(LANGUAGE)` call feeds the save dialog only. **Setting PPSSPP's system
+language to French was tried first and changed nothing**, which is what sent this to the code.
+
+**Data, not code.** `PatchLanguage` writes the init flag and the index before the module starts, so
+every reader finds the struct already initialised and takes our value. Nothing is patched, and
+English - the game's own answer - is left entirely alone. The row is on GAMEPLAY and says it takes
+effect next time the game starts, as RADAR CORNER does: the GXT and the front end's per-language
+layouts (`FR_MASTER.PSP` and the rest) are loaded once, at boot.
+
+**What it does not do yet: name keyboard keys in the other four.** `ENGLISH.GXT` is the only one
+`Tools/vcsgxtkeys.py` rewrites, so a French tutorial line still says "appuyez sur X". The tokens are
+the same in every GXT; what is missing is a key-name vocabulary and the article rules per language,
+and four rows in `kVCSDiscPatches`.
+
+### `VCS_MENU_TEST`, for looking at a page with nothing to type with
+
+`VCS_MENU_TEST=<page>[:<row>]` raises the pause menu once the world has settled, on the page whose
+`PageTitle` key is `<page>` (`displaysetup`, `keybindings`), with row `<row>` focused. It exists
+because the Mac this fork is measured on has no way to send a key into the window without
+accessibility permission, and a page is otherwise unreachable from the WebSocket debugger - which
+presses PSP buttons, below the layer that opens this menu.
+
+### CUSTOM SOUNDTRACKS, the PSP's own, reached by calling its setter
+
+**Status: working against the running game, with a disc AT3 standing in for a ripped track.** The
+row is on AUDIO SETUP; ON with a `.gta` in `PSP/SAVEDATA/ULUS10160CUSTOMTRACKS/` puts the game in
+exactly the state its own Audio page does (preference 1, station 9, playing bit set), OFF puts it
+back, and an empty folder reads NONE FOUND. The fork makes the folder at boot, because nothing else
+ever will - the PSP had Rockstar's PC tool do it. See "CUSTOM SOUNDTRACKS" in docs/VCS_ADDRESSES.md.
+
+**A call, not a write**, and it is the first menu row that needs one: the setter retunes the audio
+manager, and a field written behind its back would be a preference the radio never heard about.
+`EnqueueGameCall` takes two arguments now for it.
+
+**Two faults in the call path, both found by this row.** The thread the game runs its main loop on
+was only recorded once the vault's query block existed, so with vaulting off no call could ever be
+made; and the ledge probe asks every frame while the player moves, so "the probe wins a tie" was a
+queued call that never went at all. The thread is recorded regardless now, and a waiting call goes
+after it has given way twice.
+
+**What is not done: making a `.gta`.** It is ATRAC3 or ATRAC3plus in a RIFF, and nothing on this Mac
+can encode either - ffmpeg only decodes ATRAC.
+
+### Discord and GitHub, two icons in a corner
+
+The root page carries the project's links as two icons in the bottom-left corner, above the help
+bar, which is empty on that page because its rows have no help line. `VCSMenuLink` opens the
+browser through `System_LaunchUrl`. They're deliberately not rows, since they're not what the menu
+is for, and not focusable, like the phone's back icon, so the arrow keys never wander into them.
+
+The art is `assets/vcs/link_discord.png` and `link_github.png`: the logos the project supplied,
+cropped square to 128 px, white with coverage in alpha only. The menu tints them, so they take the
+rows' cyan and light cream on hover. They're drawn with the same 2 px drop shadow as the rows' text.
+An empty URL hides its icon (`kVCSDiscordUrl`, `kVCSGitHubUrl` in `VCSMenuScreen.cpp`).
 
 ### The menu's own sounds, taken from the game rather than invented
 
@@ -372,6 +458,46 @@ Three rules hold it together, and all three are the kind of thing a tidy-up undo
 row count, clamped between 28 and 40dp. Nothing on this page scrolls and there is no second page,
 so a card taller than the window is a card with bindings nobody can read. On Foot is the tallest
 and the one a player reads first.
+
+### The keyboard column is editable: actions, and one lookup
+
+**Status: working, tried in the running game.** Click a line of a card - or Enter on it - and the
+keyboard cell asks for a key; MOVE and STEER ask for theirs one direction at a time. Escape cancels,
+RESET KEYS on the KEY BINDINGS page puts everything back, and `vcs.ini` keeps only what moved, under
+`[KeyBindings]`, by action id.
+
+**An action is a line of the card on one page**, and it owns the (context, shipped key) pairs that
+line is made of - `kVCSKeyActions` in `VCSInput.cpp`. Several own pairs the card never shows, and
+those are the ones that matter: AIM also holds aim while aiming, MOVE BACK also enters free aim, the
+move keys also strafe under lock-on. Per page, as San Andreas does it: CHANGE CAMERA on foot and in a
+car are two bindings, which is what lets one key go on meaning different things in different places.
+
+**Everything still names the shipped key, and asks `BoundKey(context, key)` first.** The mapping
+table, `ApplyAnalog`, the glances, `JumpHeld` and the rest were not rewritten into a second table;
+the shipped key is the action's name and the binding is what the player presses for it. A rebind
+changes one atomic per action, read from the input thread and the emu thread alike.
+
+Three rules that a tidy-up would undo:
+
+- **A key the player moved an action off stays claimed.** Space is the PSP's Start in PPSSPP's own
+  defaults; release it and the old jump key opens a menu - the inverse Escape trap, one more time.
+- **A row no action owns stands down for a key an action has taken** (`RowKey`). The debug spawner's
+  arrow rows would otherwise press L and cycle a weapon every time a player who moved to the arrows
+  walked left.
+- **A clash swaps, it does not unbind.** Binding JUMP to F hands ENTER VEHICLE the old Space, in each
+  context the two share. An action with no key is a thing the game can no longer do, and the player
+  asked for a key, not for that.
+
+Escape cannot be bound - it is the pause key and the capture's cancel. The pad is not rebindable
+here: its scheme is a layout, and PPSSPP's own mapper is underneath it for anyone who wants that.
+The tutorial lines still name the SHIPPED keys, because `Tools/vcsgxtkeys.py` bakes them into the GXT.
+
+### `VCS_KEY_PIPE`, a keyboard for the shell
+
+`VCS_KEY_PIPE=<file>` makes every frame read that file, delete it, and feed what it says through
+`NativeKey`: `press F`, `down Space`, `up Space`, `wait 30`, `press MOUSE1`. Built for the same reason
+as `VCS_MENU_TEST` - nothing on the Mac this is measured on can send keys to the window - and it goes
+through the real door, so a rebind tested this way is tested end to end.
 
 ### The cheat menu types the combination, and that is the whole design
 

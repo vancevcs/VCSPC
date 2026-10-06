@@ -9,7 +9,8 @@ game's tutorial messages name your keys instead of PSP buttons.
 It runs on **Windows**, **macOS**, **Android** and **iOS**. Bring your own copy of the game: no
 game files are included.
 
-**[Download the latest release](https://github.com/vancevcs/VCSPC/releases)**
+**[Download the latest release](https://github.com/vancevcs/VCSPC/releases)** ·
+**[Join the Discord](https://discord.gg/SCcnMRaggm)**
 
 ---
 

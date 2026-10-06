@@ -271,6 +271,26 @@ struct Settings {
 	float specularPower;
 	float specularStrength;
 
+	// --- depth, the shore and the fine detail ---
+	//
+	// The sea's depth under each pixel comes from the floor pass - the height of whatever solid
+	// geometry the view ray meets beneath the surface - and it is what lets the shallows keep the
+	// game's own turquoise and the sand show through, while open water still goes deep.
+	//
+	// How deep the water has to be before its colour is all deep colour, in world units along the
+	// view ray. Red goes first and blue last, as it does in real water: the channels use 0.35, 0.7
+	// and 1.0 of this.
+	float extinctionDepth;
+	// The foam where the water runs out onto the sand, and how deep the water may be for it to
+	// form - the band is wider on a gently shelving beach and thinner against a sea wall.
+	float shoreFoam;
+	float foamDepth;
+	// The fine ripples: a generated, tiling normal map sampled twice at different scales and
+	// directions, in place of the regular sines that read as a pattern at range. Repeats per world
+	// unit, and how far it tilts the surface.
+	float normalMapScale;
+	float normalMapStrength;
+
 	// --- rain on the roads ---
 	bool wetRoads;
 
@@ -333,7 +353,7 @@ struct Settings {
 
 	// --- shared ---
 	float surfaceScale;       // the shading buffer's size relative to the frame
-	int debugView;            // 0 off, 1 wetness, 2 normals, 3 reflection source, 4 water mask
+	int debugView;            // 0 off, 1 wetness, 2 normals, 3 reflection source, 4 water mask, 5 depth
 };
 
 const FrameStats &LastFrameStats();

@@ -16,6 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <vector>
 
@@ -42,9 +43,11 @@ void CFRelease(const void *cf);
 #include "Common/TimeUtil.h"
 #include "Common/System/Display.h"
 #include "Core/Config.h"
+#include "Core/CoreTiming.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/MemMap.h"
+#include "Core/MIPS/MIPS.h"
 #include "Core/System.h"
 #include "Core/Util/PathUtil.h"
 #include "Core/VCS/VCSCamera.h"
@@ -107,6 +110,9 @@ void RequestIntroSkip() {
 	}
 }
 
+// Whether this boot's loading curtain has gone up yet - see kVCSLegalScreenOffset.
+static bool g_bootCurtainRaised = false;
+
 static void UpdateBootPhase() {
 	if (g_bootPhase != BootPhase::Intro) {
 		return;
@@ -154,13 +160,17 @@ static void ApplyPref(VCSAddr id, int want) {
 	}
 }
 
-// The game's own settings the menu owns: two switches off its Display page and two volumes off
-// its Audio page.
+static void ApplyCustomTracks(bool want);
+
+// The game's own settings the menu owns: three rows off its Display page, and two volumes and the
+// custom soundtracks off its Audio page.
 static void ApplyGamePrefs() {
 	const VCSGameSettings &settings = GameSettings();
 
 	ApplyPref(VCSAddr::ShowSubtitles, settings.subtitles ? 1 : 0);
 	ApplyPref(VCSAddr::HudMode, settings.hud ? 1 : 0);
+	// One write, unlike the volumes: the preference is what the renderer reads. See the entry.
+	ApplyPref(VCSAddr::Brightness, settings.brightness);
 
 	// Two writes each, and both are what the game's own slider does. The live level is what you
 	// hear; the preference is what its Audio page reads back and what goes into a save. Setting
@@ -183,6 +193,171 @@ static void ApplyGamePrefs() {
 	ApplyPref(VCSAddr::SfxVolumePref, settings.sfxVolume);
 	ApplyPref(VCSAddr::RadioVolume, settings.radioVolume);
 	ApplyPref(VCSAddr::RadioVolumePref, settings.radioVolume);
+
+	ApplyCustomTracks(settings.customTracks);
+}
+
+// Custom soundtracks, driven through the game's own setter - see kVCSSetCustomTracks. Like
+// ApplyPref, only on a disagreement; unlike it, through a queued call that lands a frame or two
+// later, so a request waits that long before it may be repeated rather than piling up behind
+// itself. A game that says it has nothing to play (2) is left alone: there is nothing to turn on.
+static std::atomic<int> g_customTracksState{-1};
+static int g_customTracksWait = 0;
+
+int CustomTracksState() {
+	return g_customTracksState.load(std::memory_order_relaxed);
+}
+
+Path CustomTracksFolder() {
+	return GetSysDirectory(DIRECTORY_SAVEDATA) / (std::string(kVCSDiscIDUSA) + "CUSTOMTRACKS");
+}
+
+static void ApplyCustomTracks(bool want) {
+	const std::optional<u32> state = ReadAddrAsU32(VCSAddr::CustomTracksPref);
+	const std::optional<u32> begin = ReadAddrAsU32(VCSAddr::CustomTracksBegin);
+	const std::optional<u32> end = ReadAddrAsU32(VCSAddr::CustomTracksEnd);
+	if (!state || !begin || !end) {
+		g_customTracksState.store(-1, std::memory_order_relaxed);
+		return;
+	}
+	// Nothing found is NONE to the menu whatever the preference says - a save made with tracks
+	// present still says ON after they are gone, and the game's own row would say UNAVAILABLE.
+	const bool haveTracks = *end > *begin;
+	g_customTracksState.store(haveTracks ? (int)*state : (int)kVCSCustomTracksNone,
+		std::memory_order_relaxed);
+	if (g_customTracksWait > 0) {
+		g_customTracksWait--;
+		return;
+	}
+	// Only ON when there is something to play, which the game's own menu checks before it will
+	// offer ON and its setter does not. And a save left ON with nothing to play is turned off,
+	// which is what the game's own restore does in the same situation.
+	if (!haveTracks) {
+		want = false;
+	}
+	if (*state == kVCSCustomTracksNone || (*state == kVCSCustomTracksOn) == want) {
+		return;
+	}
+	const std::optional<u32> prefs = ReadAddrU32(VCSAddr::DisplayPrefs);
+	// Through Read_Instruction, not a raw read: the setter has run by now, so the JIT has a block
+	// over it and the word in memory is the block's marker rather than the game's instruction.
+	if (!prefs || *prefs == 0 || FrontEndDriving() || GameMenuActive() ||
+			Memory::Read_Instruction(kVCSSetCustomTracks, true).encoding != kVCSSetCustomTracksOp) {
+		return;
+	}
+	if (EnqueueGameCall(kVCSSetCustomTracks, *prefs, want ? kVCSCustomTracksOn : kVCSCustomTracksOff)) {
+		g_customTracksWait = 30;
+		// And the playing bit, once, here - the second half of what the game's own restore does.
+		// Not re-asserted afterwards: the game clears it itself when a radio is retuned away from
+		// the custom station, and a bit put back every tick would undo that.
+		const std::optional<u32> flags = ResolveAddr(VCSAddr::CustomTracksFlags);
+		const std::optional<u8> old = flags ? ReadU8(*flags) : std::nullopt;
+		if (old) {
+			WriteU8(*flags, (u8)((*old & ~1u) | (want ? 1u : 0u)));
+		}
+	}
+}
+
+// The frame limiter row - see kVCSFrameLimit. At 60 three things go on together and at 30 they all
+// come off: the cap, the millisecond carry and a faster emulated CPU. A fourth, dropping frames
+// rather than speed, is read by sceDisplay through ForceAutoFrameSkip.
+//
+// Patched LIVE, from the pause menu, unlike the radar - so the JIT's block markers are handled the
+// way the move gate handles them: invalidate first, which puts the game's own word back over any
+// marker, then read the raw word, write, and invalidate again. Checked every tick through
+// Read_Instruction, which sees through a marker, because a savestate replaces PSP memory wholesale
+// and what is installed is whatever the words say, not what this file remembers.
+static bool g_frameRate60 = false;
+// The clock the game ran at before 60 raised it, so 30 can give it back. 0 while not raised.
+static int g_gameClockHz = 0;
+
+// One word into the state asked for. False if it holds neither the game's op nor ours - another
+// build, or code not loaded yet - and then it is left alone.
+static bool SetCodeWord(u32 address, u32 stock, u32 patched, bool want) {
+	if (!Memory::IsValid4AlignedAddress(address)) {
+		return false;
+	}
+	const u32 target = want ? patched : stock;
+	// The cheap answer first: invalidating every tick would throw away a hot block 60 times a second.
+	if (Memory::Read_Instruction(address, true).encoding == target) {
+		return true;
+	}
+	currentMIPS->InvalidateICache(address, 4);
+	const u32 raw = Memory::ReadUnchecked_U32(address);
+	if (raw != stock && raw != patched) {
+		return false;
+	}
+	if (raw != target) {
+		Memory::WriteUnchecked_U32(target, address);
+		currentMIPS->InvalidateICache(address, 4);
+	}
+	return true;
+}
+
+static void ApplyFrameRate() {
+	if (!currentMIPS) {
+		return;
+	}
+	const bool want = GameSettings().frameRate == kVCSFrameRate60;
+
+	// Before the EBOOT is loaded this reads as neither op and nothing is written; it simply takes
+	// on the first tick the code is there.
+	const bool capped = SetCodeWord(kVCSFrameLimit, kVCSFrameLimitOp, kVCSFrameLimit60Op, want);
+
+	// The carry: all four words or none, so every one is checked before any is written.
+	bool carryKnown = true;
+	bool carryChanges = false;
+	for (const VCSCodeWord &word : kVCSTimerCarry) {
+		const u32 current = Memory::IsValid4AlignedAddress(word.address)
+			? Memory::Read_Instruction(word.address, true).encoding : 0;
+		if (current != word.stock && current != word.patched) {
+			carryKnown = false;
+		}
+		if (current != (want ? word.patched : word.stock)) {
+			carryChanges = true;
+		}
+	}
+	if (carryKnown && carryChanges) {
+		for (const VCSCodeWord &word : kVCSTimerCarry) {
+			SetCodeWord(word.address, word.stock, word.patched, want);
+		}
+		// Whatever the 16 ms path last left in its remainder would otherwise land on one frame.
+		if (want && Memory::IsValid4AlignedAddress(kVCSTimerRemainder)) {
+			Memory::WriteUnchecked_U32(0, kVCSTimerRemainder);
+		}
+	}
+
+	const bool on = want && capped;
+
+	// The clock, unless the player has locked one of their own - PPSSPP's setting, which scePower
+	// already honours over the game - or the compat database says this game must not be clocked.
+	const bool mayClock = g_Config.iLockedCPUSpeed == 0 &&
+		!PSP_CoreParameter().compat.flags().RequireDefaultCPUClock;
+	const int clock = CoreTiming::GetClockFrequencyHz();
+	if (on && mayClock) {
+		if (clock != kVCSFrameRate60ClockHz) {
+			// Taken again whenever it is not ours, so a game that sets its own clock meanwhile is
+			// followed rather than overruled with a stale number when 30 comes back.
+			g_gameClockHz = clock;
+			CoreTiming::SetClockFrequencyHz(kVCSFrameRate60ClockHz);
+		}
+	} else if (g_gameClockHz != 0) {
+		if (clock == kVCSFrameRate60ClockHz) {
+			CoreTiming::SetClockFrequencyHz(g_gameClockHz);
+		}
+		g_gameClockHz = 0;
+	}
+
+	if (on != g_frameRate60) {
+		NOTICE_LOG(Log::System, "VCS: frame limiter at %d (millisecond carry %s, CPU %d MHz)",
+			on ? 60 : 30, carryKnown ? (want ? "on" : "off") : "not found",
+			CoreTiming::GetClockFrequencyHz() / 1000000);
+	}
+	g_frameRate60 = on;
+}
+
+bool ForceAutoFrameSkip() {
+	return g_active && g_frameRate60;
 }
 
 // The radar's corner, patched before the game runs for the reason the pool reserve is: these are
@@ -249,12 +424,36 @@ static void PatchHelpBox() {
 	}
 }
 
+// The language, as data rather than code: the flag that tells the game's lazy initialiser it has
+// already run, and the index beside it. Every reader then takes ours instead of zeroing it - see
+// kVCSGameLanguage. English is the game's own answer, so it is left entirely alone.
+//
+// Checked first, like the code patches: both words must still be the zeroes the loader leaves,
+// which is what they are on this disc before its first frame. Anything else is a build whose
+// layout differs, and that is left as it is rather than written into.
+static void PatchLanguage() {
+	const int language = GameSettings().language;
+	if (language <= 0 || language >= kVCSLanguageCount) {
+		return;
+	}
+	if (!Memory::IsValid4AlignedAddress(kVCSGameLanguage) ||
+			Memory::ReadUnchecked_U32(kVCSGameLanguage) != 0 ||
+			Memory::ReadUnchecked_U32(kVCSGameLanguageInit) != 0) {
+		WARN_LOG(Log::System, "VCS: the language index is not where it should be on this build - "
+			"leaving the game in English");
+		return;
+	}
+	Memory::WriteUnchecked_U32(1, kVCSGameLanguageInit);
+	Memory::WriteUnchecked_U32((u32)language, kVCSGameLanguage);
+}
+
 void PatchLoadedModule() {
 	if (!IsActive()) {
 		return;
 	}
 	PatchRadarCorner();
 	PatchHelpBox();
+	PatchLanguage();
 	const float wanted = GameSettings().worldMemory;
 	if (!(wanted > 1.0f) || !Memory::IsValid4AlignedAddress(kVCSMainPoolReserve)) {
 		return;
@@ -296,6 +495,9 @@ void Init() {
 	g_tickCount = 0;
 	g_bootPhase = BootPhase::Intro;
 	g_introSkipFrames = 0;
+	g_bootCurtainRaised = false;
+	g_frameRate60 = false;
+	g_gameClockHz = 0;
 
 	// Per boot: a different image, or a replacement file that appeared or was deleted between
 	// runs, has to be looked at again rather than remembered.
@@ -329,6 +531,14 @@ void Init() {
 	// Only now, once we know this is actually VCS. The settings apply to nothing otherwise, and
 	// reading the file for every game booted would be work done for no one.
 	LoadSettings();
+
+	// The custom soundtrack folder, so a player looking for where their music goes finds it - the
+	// PSP release had the Rockstar tool make it, and nothing else ever will. Harmless to the save
+	// list: every save lives in a slot folder of its own name, and the game reads this one only for
+	// .gta files.
+	g_customTracksState.store(-1, std::memory_order_relaxed);
+	g_customTracksWait = 0;
+	File::CreateFullPath(CustomTracksFolder());
 
 	int known = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(kVCSAddresses); i++) {
@@ -366,6 +576,10 @@ void Shutdown() {
 	g_widescreenSquashesHud = false;
 	g_widescreenSquashedDraw = false;
 	g_widescreenEdgeFill = false;
+	// Read by sceDisplay for every game, so it must not outlive this one. The clock needs nothing:
+	// CoreTiming is set up again for whatever boots next.
+	g_frameRate60 = false;
+	g_gameClockHz = 0;
 
 	g_active = false;
 	g_discID.clear();
@@ -400,6 +614,7 @@ void Tick() {
 	// The game's own settings the menu owns. Nothing else this tick depends on them, so the
 	// position is only about keeping it away from the input ordering below, which does.
 	ApplyGamePrefs();
+	ApplyFrameRate();
 
 	// Free aim at the fire site. Installed HERE rather than in Init, because Init runs at
 	// __KernelInit - before the EBOOT is loaded - so anything written there is overwritten by the
@@ -431,6 +646,7 @@ void Tick() {
 	// Decode first, then map - the context depends on what we just read.
 	UpdateSharedState();
 	const VCSInputContext context = ResolveContext(GetState());
+	PublishDriveByCrosshair(context);
 
 	// Collect any answer the game left us, then let vaulting ask its next question and drive
 	// whatever climb is running.
@@ -636,6 +852,21 @@ struct VCSDiscPatch {
 	size_t magicLen;
 };
 
+// THE BOOT'S LOADING SCREENS, hidden behind this fork's own. After the credits the game shows a
+// title-and-legal card, then the firmware's "Loading from Memory Stick" over MEMCARD.XTX while it
+// autoloads, then its own loading screen while the world streams in - three screens that are the
+// PSP's machinery rather than the game, and then the seam, where the fork's own auto-load raises
+// its curtain anyway. So the curtain goes up at the END OF THE MOVIE instead, and the seam takes it
+// over.
+//
+// The end of the movie, measured by logging every disc read of a boot by file: LOGO.PMF, TITLES.PMF
+// (the credits), then SCEALE.XTX - the title card - the moment the movie ends or is skipped, and
+// nowhere else in the boot; MEMCARD.XTX follows a second later, the LOADSC screens two after that.
+// The game reads its disc by sector, so this is a position, checked against the file's header.
+static constexpr u64 kVCSLegalScreenOffset = 26960ull * 2048ull;
+static const u8 kVCSLegalScreenHeader[16] = {
+	0x78, 0x65, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0xbc, 0x04, 0x04, 0x00, 0xa0, 0x04, 0x04, 0x00,
+};
 static const VCSDiscPatch kVCSDiscPatches[] = {
 	// The game's text. Tutorial messages name their controls through it - see Tools/vcsgxtkeys.py.
 	{ "ENGLISH.GXT", 0x04330000ull, 572710, "TABL", 4 },
@@ -682,6 +913,18 @@ void PatchDiscRead(u64 positionOnIso, u8 *data, size_t bytes) {
 	// The cheap gate first, and it is the one that guarantees no effect on any other game.
 	if (!g_active || bytes == 0) {
 		return;
+	}
+	// The end of the credits movie, which is when the boot's loading curtain goes up - see
+	// kVCSLegalScreenOffset. Checked against the file's own header rather than trusted by position,
+	// for the reason every disc patch here checks: a curtain raised over the movie by a different
+	// disc layout would be worse than none.
+	if (g_bootPhase == BootPhase::Intro && !g_bootCurtainRaised &&
+			positionOnIso <= kVCSLegalScreenOffset &&
+			positionOnIso + bytes >= kVCSLegalScreenOffset + sizeof(kVCSLegalScreenHeader) &&
+			memcmp(data + (kVCSLegalScreenOffset - positionOnIso), kVCSLegalScreenHeader,
+				sizeof(kVCSLegalScreenHeader)) == 0) {
+		g_bootCurtainRaised = true;
+		RaiseCurtain(CurtainKind::Loading);
 	}
 
 	for (size_t i = 0; i < ARRAY_SIZE(kVCSDiscPatches); i++) {

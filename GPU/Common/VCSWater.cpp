@@ -34,6 +34,7 @@
 #include "Core/VCS/VCSState.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/VCSWater.h"
+#include "GPU/Common/VCSShadow.h"
 
 namespace VCSWater {
 
@@ -74,6 +75,12 @@ static Settings s_settings = {
 	// it only existed when the sun happened to be dead ahead.
 	55.0f,     // specularPower
 	1.10f,     // specularStrength
+
+	6.0f,      // extinctionDepth - units along the view ray to fully deep colour
+	0.85f,     // shoreFoam
+	0.55f,     // foamDepth - units of water under the foam band
+	0.085f,    // normalMapScale - repeats per world unit, so one tile is about twelve units
+	0.30f,     // normalMapStrength
 
 	true,      // wetRoads
 	4.0f,      // roadHalfWidth
@@ -1248,6 +1255,9 @@ struct WaterUB {
 	float wet3[4];              // 208  kerb feather, wetness, ripple rain, puddle scale
 	float wet4[4];              // 224  drain patch size, reflection blur, max reflection, ripple light
 	float misc[4];              // 240  debugView, isWaterPass, GE-to-world offset xy
+	float sea[4];               // 256  floor uv scale xy, foam depth, shore foam
+	float sea2[4];              // 272  normal map repeats per unit, its strength, extinction depth, -
+	float shadowUndo[4];        // 288  the shadow composite's tint rgb and strength - see the road pass
 };
 
 static const UniformBufferDesc s_ubDesc{ sizeof(WaterUB), {
@@ -1264,6 +1274,9 @@ static const UniformBufferDesc s_ubDesc{ sizeof(WaterUB), {
 	{ "u_wet3", 10, 9, UniformType::FLOAT4, 208 },
 	{ "u_wet4", 11, 10, UniformType::FLOAT4, 224 },
 	{ "u_misc", 12, 11, UniformType::FLOAT4, 240 },
+	{ "u_sea", 13, 12, UniformType::FLOAT4, 256 },
+	{ "u_sea2", 14, 13, UniformType::FLOAT4, 272 },
+	{ "u_shadowUndo", 15, 14, UniformType::FLOAT4, 288 },
 } };
 
 struct CompositeUB {
@@ -1275,12 +1288,24 @@ static const UniformBufferDesc s_compositeUBDesc{ sizeof(CompositeUB), {
 
 static Draw::Framebuffer *s_sceneFbo;      // a copy of the frame, so the shading can read it
 static Draw::Framebuffer *s_surfaceFbo;    // what this module has decided to paint on top
+// The solid scene's world height at each pixel, which is the floor under the water there - see the
+// floor pass in RenderSurface. Its depth buffer is copied into the surface's, so the solids are
+// drawn once for both.
+static Draw::Framebuffer *s_floorFbo;
+static Draw::Pipeline *s_floorPipeline;
+// The fine ripples and the foam's noise, generated once - see BuildNormalMap.
+static Draw::Texture *s_normalTex;
+static Draw::SamplerState *s_pointSampler;   // the floor heights are encoded, and must not blend
+static Draw::SamplerState *s_wrapSampler;    // the normal map tiles
 static Draw::Pipeline *s_depthPipeline;
 static Draw::Pipeline *s_shadePipeline;
 static Draw::Pipeline *s_compositePipeline;
 static Draw::SamplerState *s_sampler;
 static int s_surfaceWidth;
 static int s_surfaceHeight;
+// The viewport the floor and the surface are drawn into, which FillUniforms needs for the uv scale.
+static int s_floorViewW;
+static int s_floorViewH;
 static bool s_setupFailed;
 static bool s_frameShaded;
 static bool s_shadeRendered;
@@ -1293,6 +1318,10 @@ static void ReleaseSizedResources() {
 	if (s_surfaceFbo) {
 		s_surfaceFbo->Release();
 		s_surfaceFbo = nullptr;
+	}
+	if (s_floorFbo) {
+		s_floorFbo->Release();
+		s_floorFbo = nullptr;
 	}
 	s_surfaceWidth = 0;
 	s_surfaceHeight = 0;
@@ -1315,14 +1344,163 @@ static void ReleasePipelines() {
 		s_sampler->Release();
 		s_sampler = nullptr;
 	}
+	if (s_floorPipeline) {
+		s_floorPipeline->Release();
+		s_floorPipeline = nullptr;
+	}
+	if (s_pointSampler) {
+		s_pointSampler->Release();
+		s_pointSampler = nullptr;
+	}
+	if (s_wrapSampler) {
+		s_wrapSampler->Release();
+		s_wrapSampler = nullptr;
+	}
+	if (s_normalTex) {
+		s_normalTex->Release();
+		s_normalTex = nullptr;
+	}
+}
+
+// The ripple texture: a tiling height field of small wind waves, stored as its normal, with a tiling
+// noise beside it for the foam. Generated rather than shipped, because a texture file is one more
+// asset that has to be deployed on four platforms, and this is forty lines of arithmetic.
+//
+// TILING BY CONSTRUCTION: every component is a sine with a whole number of periods across the tile,
+// so the left edge meets the right exactly and the texture can repeat across a sea 2048 units wide
+// without a seam. The amplitudes fall off as |k|^-1.6 - most of the energy in the long waves, as in
+// a real sea - and the directions are spread about one wind so the ripples read as running
+// somewhere rather than as a carpet. Sampled twice in the shader, at different scales and angles,
+// which is what keeps the repeat from showing.
+//
+// The mips are built here, by averaging, and that is the anti-aliasing: averaged slopes flatten with
+// distance, which is exactly what a sea does when its ripples get smaller than a pixel.
+static Draw::Texture *BuildNormalMap(Draw::DrawContext *draw) {
+	const int kSize = 256;
+	const int kLevels = 9;
+	struct Wave { float kx, ky, amp, phase; };
+	std::vector<Wave> waves;
+	uint32_t seed = 0x9e3779b9u;
+	auto rnd = [&seed]() {
+		seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+		return (float)(seed & 0xffffff) / (float)0x1000000;
+	};
+	while (waves.size() < 56) {
+		const float angle = 0.6f + (rnd() - 0.5f) * 2.4f;   // about one wind, spread both ways
+		const float k = 2.0f + rnd() * rnd() * 30.0f;        // cycles per tile, long waves favoured
+		const int kx = (int)std::round(std::cos(angle) * k);
+		const int ky = (int)std::round(std::sin(angle) * k);
+		if (kx == 0 && ky == 0) {
+			continue;
+		}
+		const float len = std::sqrt((float)(kx * kx + ky * ky));
+		waves.push_back({ (float)kx, (float)ky, std::pow(len, -1.6f) * (0.5f + rnd()), rnd() * 6.2831853f });
+	}
+
+	// Tiling value noise for the foam, on a lattice that divides the tile.
+	auto lattice = [](int x, int y, int cells, uint32_t salt) {
+		x = ((x % cells) + cells) % cells;
+		y = ((y % cells) + cells) % cells;
+		uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u + salt;
+		h = (h ^ (h >> 13)) * 1274126177u;
+		return (float)((h ^ (h >> 16)) & 0xffff) / 65535.0f;
+	};
+	auto valueNoise = [&lattice](float u, float v, int cells, uint32_t salt) {
+		const float x = u * cells, y = v * cells;
+		const int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
+		float fx = x - x0, fy = y - y0;
+		fx = fx * fx * (3.0f - 2.0f * fx);
+		fy = fy * fy * (3.0f - 2.0f * fy);
+		const float a = lattice(x0, y0, cells, salt), b = lattice(x0 + 1, y0, cells, salt);
+		const float c = lattice(x0, y0 + 1, cells, salt), d = lattice(x0 + 1, y0 + 1, cells, salt);
+		return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
+	};
+
+	std::vector<float> slope((size_t)kSize * kSize * 2);
+	std::vector<float> foam((size_t)kSize * kSize);
+	float maxSlope = 0.0001f;
+	for (int y = 0; y < kSize; y++) {
+		for (int x = 0; x < kSize; x++) {
+			float dx = 0.0f, dy = 0.0f;
+			for (const Wave &w : waves) {
+				const float arg = 6.2831853f * (w.kx * x + w.ky * y) / kSize + w.phase;
+				const float c = std::cos(arg) * w.amp * 6.2831853f / kSize;
+				dx += c * w.kx;
+				dy += c * w.ky;
+			}
+			slope[((size_t)y * kSize + x) * 2 + 0] = dx;
+			slope[((size_t)y * kSize + x) * 2 + 1] = dy;
+			maxSlope = std::max(maxSlope, std::max(std::fabs(dx), std::fabs(dy)));
+			const float u = (float)x / kSize, v = (float)y / kSize;
+			foam[(size_t)y * kSize + x] = valueNoise(u, v, 16, 11u) * 0.55f +
+				valueNoise(u, v, 32, 23u) * 0.30f + valueNoise(u, v, 64, 37u) * 0.15f;
+		}
+	}
+
+	std::vector<std::vector<uint8_t>> levels(kLevels);
+	std::vector<float> curSlope = slope, curFoam = foam;
+	int size = kSize;
+	for (int level = 0; level < kLevels; level++) {
+		std::vector<uint8_t> &px = levels[level];
+		px.resize((size_t)size * size * 4);
+		for (int i = 0; i < size * size; i++) {
+			// Normalised by the largest slope, so the map spans its full range and the strength
+			// setting means the same thing whatever the waves happen to sum to.
+			const float sx = curSlope[i * 2 + 0] / maxSlope, sy = curSlope[i * 2 + 1] / maxSlope;
+			px[i * 4 + 0] = (uint8_t)std::clamp((int)std::lround((sx * 0.5f + 0.5f) * 255.0f), 0, 255);
+			px[i * 4 + 1] = (uint8_t)std::clamp((int)std::lround((sy * 0.5f + 0.5f) * 255.0f), 0, 255);
+			px[i * 4 + 2] = (uint8_t)std::clamp((int)std::lround(curFoam[i] * 255.0f), 0, 255);
+			px[i * 4 + 3] = 255;
+		}
+		if (size == 1) {
+			levels.resize(level + 1);
+			break;
+		}
+		const int half = size / 2;
+		std::vector<float> nextSlope((size_t)half * half * 2), nextFoam((size_t)half * half);
+		for (int y = 0; y < half; y++) {
+			for (int x = 0; x < half; x++) {
+				for (int c = 0; c < 2; c++) {
+					nextSlope[((size_t)y * half + x) * 2 + c] = 0.25f * (
+						curSlope[((size_t)(2 * y) * size + 2 * x) * 2 + c] + curSlope[((size_t)(2 * y) * size + 2 * x + 1) * 2 + c] +
+						curSlope[((size_t)(2 * y + 1) * size + 2 * x) * 2 + c] + curSlope[((size_t)(2 * y + 1) * size + 2 * x + 1) * 2 + c]);
+				}
+				nextFoam[(size_t)y * half + x] = 0.25f * (
+					curFoam[(size_t)(2 * y) * size + 2 * x] + curFoam[(size_t)(2 * y) * size + 2 * x + 1] +
+					curFoam[(size_t)(2 * y + 1) * size + 2 * x] + curFoam[(size_t)(2 * y + 1) * size + 2 * x + 1]);
+			}
+		}
+		curSlope.swap(nextSlope);
+		curFoam.swap(nextFoam);
+		size = half;
+	}
+
+	Draw::TextureDesc desc{};
+	desc.type = Draw::TextureType::LINEAR2D;
+	desc.format = Draw::DataFormat::R8G8B8A8_UNORM;
+	desc.width = kSize;
+	desc.height = kSize;
+	desc.depth = 1;
+	desc.mipLevels = (int)levels.size();
+	desc.generateMips = false;
+	desc.tag = "vcs_water_ripples";
+	for (const std::vector<uint8_t> &level : levels) {
+		desc.initData.push_back(level.data());
+	}
+	return draw->CreateTexture(desc);
 }
 
 // The two samplers every shading fragment shader declares, whether or not it reads both. On
 // Vulkan the descriptor layout is part of the pipeline, so a shader that declares a subset is a
 // different layout, and there is nothing to gain from two of them.
+//
+// THREE, because thin3d has three texture slots (MAX_TEXTURE_SLOTS) and raising it would change every
+// descriptor layout upstream has. The middle one is shared: the road mask for the wet-road pass, the
+// floor heights for the sea's - each pass reads only its own, and binds it before it draws.
 static const SamplerDef kShadeSamplers[] = {
 	{ 0, "sceneTex", SamplerFlags(0) },
-	{ 1, "roadTex", SamplerFlags(0) },
+	{ 1, "auxTex", SamplerFlags(0) },
+	{ 2, "normalTex", SamplerFlags(0) },
 };
 
 static const UniformDef kUniforms[] = {
@@ -1339,6 +1517,9 @@ static const UniformDef kUniforms[] = {
 	{ "vec4", "u_wet3", 10 },
 	{ "vec4", "u_wet4", 11 },
 	{ "vec4", "u_misc", 12 },
+	{ "vec4", "u_sea", 13 },
+	{ "vec4", "u_sea2", 14 },
+	{ "vec4", "u_shadowUndo", 15 },
 };
 
 static const VaryingDef kVaryings[] = {
@@ -1440,8 +1621,32 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	writer.C("  chop += 0.28 * vec2(cos((wp.x + wp.y) * 4.10 + t * 2.30),\n");
 	writer.C("                      cos((wp.x - wp.y) * 3.90 - t * 2.10));\n");
 	writer.C("  float detail = clamp(1.0 - dist * u_screen.w, 0.10, 1.0);\n");
-	writer.C("  vec2 g = (swell * 0.9 + chop * detail) * u_waveA.y;\n");
+	// The sines are now only the swell and a little chop; the fine surface is the ripple map, two
+	// samples of it at different scales, angles and speeds - the tuxalin water shader's approach,
+	// and the reason it does not read as a pattern the way three regular sines did. Anchored in
+	// the game's WORLD space, so a rebase of the space the GE is fed does not jump the ripples.
+	// No distance fade of its own: the map's mips average the slopes, which flattens it at range
+	// exactly as far as a pixel can no longer resolve it.
+	writer.C("  vec2 wpos = P.xy + u_misc.zw;\n");
+	writer.C("  vec2 ruv = wpos * u_sea2.x;\n");
+	writer.C("  vec2 r1 = ").SampleTexture2D("normalTex", "ruv + vec2(t * 0.031, t * 0.019)").C(".rg * 2.0 - 1.0;\n");
+	writer.C("  vec2 r2 = ").SampleTexture2D("normalTex", "vec2(ruv.y, -ruv.x) * 1.73 + vec2(-t * 0.023, t * 0.029)").C(".rg * 2.0 - 1.0;\n");
+	// Rain roughens the sea: up to twice the ripple while it is falling.
+	writer.C("  vec2 ripple = (r1 + vec2(-r2.y, r2.x)) * u_sea2.y * (1.0 + u_wet3.z);\n");
+	writer.C("  vec2 g = (swell * 0.9 + chop * detail * 0.45) * u_waveA.y + ripple;\n");
 	writer.C("  vec3 nWater = normalize(vec3(-g.x, -g.y, 1.0));\n");
+	// --- how deep the water is here ----------------------------------------------------------
+	//
+	// Read off the floor pass: the world height of the nearest solid behind this pixel. Blue says
+	// there was one; a floor above the water is something the far side of the sea, not under it,
+	// and counts as none.
+	writer.C("  vec4 fl = ").SampleTexture2D("auxTex", "clamp(uv * u_sea.xy, 0.0, 1.0)").C(";\n");
+	writer.C("  float floorZ = (fl.r + fl.g / 255.0) * 256.0 - 64.0;\n");
+	writer.C("  float hasFloor = step(0.5, fl.b) * step(floorZ, P.z + 0.05);\n");
+	writer.C("  float depthV = mix(400.0, max(P.z - floorZ, 0.0), hasFloor);\n");
+	// Along the view ray rather than straight down, because that is the water the light crosses:
+	// looking down into the shallows you see the bottom, looking along them you do not.
+	writer.C("  float depthPath = depthV / max(V.z, 0.12);\n");
 
 	// --- the road's normal, and how wet it is ------------------------------------------------
 	//
@@ -1455,7 +1660,7 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	writer.C("  vec2 rUV = (P.xy + u_misc.zw - u_road.xy) * u_road.z;\n");
 	writer.C("  float inMap = step(0.0, rUV.x) * step(rUV.x, 1.0) *\n");
 	writer.C("                step(0.0, rUV.y) * step(rUV.y, 1.0);\n");
-	writer.C("  vec2 roadSample =").SampleTexture2D("roadTex", "clamp(rUV, 0.0, 1.0)").C(".rg;\n");
+	writer.C("  vec2 roadSample =").SampleTexture2D("auxTex", "clamp(rUV, 0.0, 1.0)").C(".rg;\n");
 	// The mask stores a LINEAR ramp across the road: 1 on the centre line, 0 at the outer edge of
 	// the shoulder, and exactly 0 where there is no road at all. So `across` is where this pixel
 	// sits between the crown and the kerb, which is the axis a drying puddle retreats along, and
@@ -1508,14 +1713,29 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	// this build's log level drops; only the bare "Failed to compile" line at ERROR gets through.
 	// Check for that line after every build that touches this shader.
 	writer.C("  float n = puddleNoise(P.xy * u_wet3.w);\n");
-	writer.C("  float patchMask = smoothstep(1.02 - wetness - 0.28, 1.02 - wetness + 0.04, n);\n");
-	// The floor is what keeps a road UNIFORMLY wet while it is actually raining, rather than
-	// covered in puddles with dry tarmac between them. Cubed rather than squared: squared leaves a
-	// twelve per cent sheen everywhere at a third wetness, which washes out the contrast between a
-	// puddle and the road around it exactly when the puddles are the thing being looked at.
-	writer.C("  float sheet = wetness * wetness * wetness;\n");
-	writer.C("  float puddle = clamp(max(band * patchMask, sheet), 0.0, 1.0);\n");
-	writer.C("  float wet = clamp(road * up * puddle * mapFade, 0.0, 1.0) * (1.0 - isWater);\n");
+	// THREE STATES OF A WET ROAD, not one, and that is the whole of what this pass gets right now.
+	//
+	// It used to be one mask with a wetness-cubed floor under it, so in real rain the floor reached
+	// 1 and the entire road became a single mirror - reported as wanting better puddles, and the
+	// honest reading is that there were none: a puddle is a pool on a road that is NOT one.
+	//
+	//   damp  the whole surface, as soon as it is wet at all: darker, a faint smeared sheen, no
+	//         mirror. Real wet asphalt is mostly this. It dries first.
+	//   pool  where the water collects: world-anchored shapes from the puddle noise with a finer
+	//         octave for a ragged edge, growing with the wetness and retreating to the drain side
+	//         as it falls - the same `band` the old mask used. Sharp, strong reflection; the
+	//         droplets land here.
+	//   rim   a darker ring round each pool, where the water has soaked the surface and gone.
+	//
+	// The thresholds were set off the CPU, over the same formula: pools cover 38% of the road in
+	// full rain, 12% half dry and 3% nearly dry - before the drain band thins them further.
+	writer.C("  float n3 = n * 0.85 + vnoise(P.xy * u_wet3.w * 4.1 + vec2(3.7, 9.2)) * 0.15;\n");
+	writer.C("  float poolLevel = mix(0.76, 0.52, wetness);\n");
+	writer.C("  float surf = road * up * mapFade * (1.0 - isWater);\n");
+	writer.C("  float pool = clamp(smoothstep(poolLevel, poolLevel + 0.05, n3) * band * surf, 0.0, 1.0);\n");
+	writer.C("  float rim = clamp(smoothstep(poolLevel - 0.07, poolLevel, n3) * band * surf, 0.0, 1.0);\n");
+	writer.C("  float damp = clamp(smoothstep(0.05, 0.35, wetness) * surf, 0.0, 1.0);\n");
+	writer.C("  float wet = max(max(damp, rim), pool);\n");
 
 	// --- droplet impacts ---------------------------------------------------------------------
 	//
@@ -1534,8 +1754,10 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	// ...and not past the distance at which a 15cm ring is smaller than a pixel, or the road turns
 	// to sparkle. Same reasoning as the sea's detail fade, at a far shorter range because these
 	// features are two orders of magnitude smaller than a swell.
-	writer.C("  float ripFade = clamp(1.0 - dist * 0.022, 0.0, 1.0);\n");
-	writer.C("  if (wet > 0.004 && u_wet3.z > 0.01 && ripFade > 0.01) {\n");
+	writer.C("  float ripFade = clamp(1.0 - dist * 0.035, 0.0, 1.0);\n");
+	// The sea gets them too while it rains - rain landing on open water is the other place a
+	// player sees it - and needs no wetness to qualify.
+	writer.C("  if ((pool > 0.02 || isWater > 0.5) && u_wet3.z > 0.01 && ripFade > 0.01) {\n");
 	writer.C("    vec2 rp = P.xy * u_wet.y;\n");
 	writer.C("    vec2 cellBase = floor(rp);\n");
 	writer.C("    for (int oy = -1; oy <= 1; oy++) {\n");
@@ -1556,10 +1778,25 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	writer.C("        crest += max(w, 0.0);\n");
 	writer.C("      }\n");
 	writer.C("    }\n");
-	writer.C("    ripG *= u_wet.w * u_wet3.z * ripFade;\n");
-	writer.C("    crest *= u_wet3.z * ripFade;\n");
+	// On a road, only inside a pool - a raindrop on damp tarmac makes no ring anyone can see, and
+	// rings scattered over the whole road read as printed circles rather than as rain.
+	writer.C("    float ringMask = mix(pool, 1.0, isWater);\n");
+	writer.C("    ripG *= u_wet.w * u_wet3.z * ripFade * ringMask;\n");
+	writer.C("    crest *= u_wet3.z * ripFade * ringMask;\n");
+	writer.C("  }\n");
+	// A puddle is not glass. Wind keeps a film of water moving whether or not anything is landing
+	// in it, and that wobble - small, slow, anchored in the world - is most of what tells a puddle
+	// from a mirror lying on the road. The sea's ripple map at about five times the sea's scale.
+	// Value noise rather than the ripple map, which on the roads is not bound: slot 2 carries the
+	// shadow mask there - see the road pass.
+	writer.C("  if (pool > 0.02) {\n");
+	writer.C("    vec2 wq = wpos * 2.2 + vec2(t * 0.35, -t * 0.27);\n");
+	writer.C("    vec2 pr = vec2(vnoise(wq + vec2(0.37, 0.0)) - vnoise(wq - vec2(0.37, 0.0)),\n");
+	writer.C("                   vnoise(wq + vec2(0.0, 0.37)) - vnoise(wq - vec2(0.0, 0.37))) * 1.4;\n");
+	writer.C("    ripG += pr * 0.07 * pool;\n");
 	writer.C("  }\n");
 	writer.C("  vec3 nWet = normalize(vec3(-ripG.x, -ripG.y, 1.0));\n");
+	writer.C("  nWater = normalize(nWater + vec3(-ripG.x, -ripG.y, 0.0) * isWater);\n");
 
 	// --- shading, common to both -------------------------------------------------------------
 	writer.C("  vec3 N = mix(nWet, nWater, isWater);\n");
@@ -1591,12 +1828,23 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	// waves - which is also exactly where the Fresnel term is highest and the reflection is most
 	// of what you are looking at.
 	writer.C("  float blur = u_wet4.y * clamp(dist * u_screen.w, 0.05, 1.0);\n");
-	writer.C("  vec3 refl = ").SampleTexture2D("sceneTex", "clamp(mUV, 0.003, 0.997)").C(".rgb;\n");
+	writer.C("  vec3 refl0 = ").SampleTexture2D("sceneTex", "clamp(mUV, 0.003, 0.997)").C(".rgb;\n");
+	writer.C("  vec3 refl = refl0;\n");
 	writer.C("  refl += ").SampleTexture2D("sceneTex", "clamp(mUV + vec2(blur, 0.0), 0.003, 0.997)").C(".rgb;\n");
 	writer.C("  refl += ").SampleTexture2D("sceneTex", "clamp(mUV - vec2(blur, 0.0), 0.003, 0.997)").C(".rgb;\n");
 	writer.C("  refl += ").SampleTexture2D("sceneTex", "clamp(mUV + vec2(0.0, blur * 0.6), 0.003, 0.997)").C(".rgb;\n");
 	writer.C("  refl += ").SampleTexture2D("sceneTex", "clamp(mUV - vec2(0.0, blur * 0.6), 0.003, 0.997)").C(".rgb;\n");
 	writer.C("  refl *= 0.2;\n");
+	// Take the shadows back out of a ROAD's reflection: the frame was multiplied by
+	// mix(1, mix(tint, 1, lit), strength) where the sun does not reach, so dividing by the same
+	// factor at the reflected point gives the colour before. Not the sea - its slot 2 is the
+	// ripple map, and strength is 0 there.
+	writer.C("  if (u_shadowUndo.a > 0.001 && isWater < 0.5) {\n");
+	writer.C("    float litR = ").SampleTexture2D("normalTex", "clamp(mUV, 0.003, 0.997)").C(".r;\n");
+	writer.C("    vec3 fR = mix(vec3(1.0), mix(u_shadowUndo.rgb, vec3(1.0), litR), u_shadowUndo.a);\n");
+	writer.C("    refl /= max(fR, vec3(0.2));\n");
+	writer.C("    refl0 /= max(fR, vec3(0.2));\n");
+	writer.C("  }\n");
 
 	writer.C("  vec3 H = normalize(u_sun.xyz + V);\n");
 	writer.C("  float spec = pow(max(dot(N, H), 0.0), u_waveB.y) * u_waveB.z * u_sun.w;\n");
@@ -1609,13 +1857,55 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	// looking along it you see the sky off the surface and it goes pale. Mixing a fixed amount of
 	// deep colour everywhere - which is what this did - tints the whole sea slightly darker and
 	// reads as a colour filter rather than as depth.
-	writer.C("  vec3 baseW = mix(scene, u_deep.rgb, u_deep.a * (1.0 - fres));\n");
-	writer.C("  vec3 colW = mix(baseW, refl, clamp(fres * u_waveB.w, 0.0, 1.0));\n");
-	writer.C("  colW += vec3(spec);\n");
+	//
+	// And now by DEPTH as well, per channel, which is what was missing: the deep colour went on
+	// regardless of how much water there was, so looking down into the shallows - where the
+	// Fresnel is lowest and the deep mix highest - painted deep-sea colour over the game's own
+	// turquoise and the sand under it, and the beach read as murky. Red is absorbed first and blue
+	// last, as in real water, which is what turns a shelving beach turquoise before it goes blue.
+	writer.C("  vec3 extinct = clamp(vec3(depthPath) / (u_sea2.z * vec3(0.35, 0.70, 1.0)), 0.0, 1.0);\n");
+	writer.C("  vec3 baseW = mix(scene, u_deep.rgb, u_deep.a * (1.0 - fres) * extinct);\n");
+	// The reflection fades in the very shallows too, where there is hardly a surface to reflect.
+	writer.C("  float shallow = clamp(depthV * 4.0, 0.0, 1.0);\n");
+	writer.C("  vec3 colW = mix(baseW, refl, clamp(fres * u_waveB.w * shallow, 0.0, 1.0));\n");
+	writer.C("  colW += vec3(spec * shallow);\n");
+	writer.C("  colW += (scene * 0.5 + refl * 0.5) * (crest * u_wet4.w * 0.6 * (1.0 - fres));\n");
+	// --- the shore ---------------------------------------------------------------------------
+	//
+	// Foam where the water runs out: strongest at the waterline and breaking up with depth, through
+	// the ripple map's noise channel at two scales so the edge is ragged rather than ruled. It
+	// breathes - the band swells and draws back - which is the waves arriving, and it sits over the
+	// hard line where the game's water polygons meet its sand, which is exactly what needed hiding.
+	// Lit by the game's own pixel, so it is white at noon and grey at night rather than glowing.
+	writer.C("  if (isWater > 0.5 && hasFloor > 0.5 && u_sea.w > 0.001) {\n");
+	writer.C("    float fn = ").SampleTexture2D("normalTex", "wpos * 0.21 + vec2(t * 0.013, -t * 0.009)").C(".b * 0.6 +\n");
+	writer.C("               ").SampleTexture2D("normalTex", "wpos * 0.53 - vec2(t * 0.021, t * 0.017)").C(".b * 0.4;\n");
+	writer.C("    float lap = 0.5 + 0.5 * sin(t * 1.4 + dot(wpos, vec2(0.031, 0.047)));\n");
+	writer.C("    float band = 1.0 - clamp(depthV / (u_sea.z * (0.75 + 0.5 * lap)), 0.0, 1.0);\n");
+	writer.C("    float foam = smoothstep(0.42, 0.62, fn * 0.75 + band * 0.85 - 0.30) * band * u_sea.w;\n");
+	writer.C("    float lum = dot(scene, vec3(0.299, 0.587, 0.114));\n");
+	writer.C("    vec3 foamCol = vec3(0.94, 0.97, 1.0) * clamp(lum * 1.9 + 0.08, 0.15, 1.0);\n");
+	writer.C("    colW = mix(colW, foamCol, clamp(foam, 0.0, 1.0));\n");
+	writer.C("  }\n");
 
-	writer.C("  vec3 colR = scene * u_wet.x;\n");
-	writer.C("  colR = mix(colR, refl, clamp(fres * u_wet2.x, 0.0, 1.0));\n");
-	writer.C("  colR += vec3(spec * 0.6);\n");
+	// Damp darkens; the rim darkens a little more; a pool shows what it reflects over darker ground.
+	writer.C("  vec3 colR = scene * mix(1.0, u_wet.x, max(damp, rim)) * mix(1.0, 0.84, rim * (1.0 - pool));\n");
+	// A pool reflects more than damp asphalt, because what makes a puddle visible is the sky in
+	// it - but NOT as a mirror, which is what it was: the sharp centre tap at up to 92%, so a pool
+	// at any distance was a clean copy of the buildings, reported as "puddles look like a mirror".
+	// Now the same smeared average the damp road gets, a little of the sharp tap, at most half the
+	// pixel, and dimmed: road water is dirty and shallow, and a reflection in it is darker than
+	// the thing reflected. The wobble above does the rest.
+	writer.C("  vec3 reflR = mix(refl, refl0, 0.25 * pool) * mix(1.0, 0.78, pool);\n");
+	writer.C("  float dampRefl = fres * u_wet2.x * 0.4 * damp;\n");
+	writer.C("  float poolRefl = clamp((fres * 1.1 + 0.06) * u_wet2.x * 2.0, 0.0, 0.5) * pool;\n");
+	writer.C("  colR = mix(colR, reflR, clamp(max(dampRefl, poolRefl), 0.0, 1.0));\n");
+	// The sun in a puddle is the sun's own small disc, not the sea's glitter path: that lobe is wide
+	// on purpose (see specularPower), and on a flat pool it painted a white patch the size of the
+	// pool. Eight times the exponent and about half the strength, so it is a point the wobble breaks
+	// into glints.
+	writer.C("  float specPool = pow(max(dot(N, H), 0.0), u_waveB.y * 8.0) * u_waveB.z * 0.55 * u_sun.w;\n");
+	writer.C("  colR += vec3(spec * 0.2 * damp + specPool * pool);\n");
 	// Each ring crest catches light from any angle, lit by what is actually there - the game's own
 	// pixel and the reflection - so a ring is bright at noon and dim at night rather than glowing.
 	// Scaled by (1 - fres) because at a low angle the reflection is already showing the ripple
@@ -1628,10 +1918,11 @@ static void WriteShadeFS(ShaderWriter &writer) {
 	// The debug views, for the same reason VCSShadow has them: an effect that does not appear has
 	// several causes that look identical from outside, and these separate them in one run.
 	writer.C("  if (u_misc.x > 0.5) {\n");
-	writer.C("    if (u_misc.x < 1.5) { col = vec3(wet, road, up); a = 1.0; }\n");
+	writer.C("    if (u_misc.x < 1.5) { col = vec3(damp, pool, rim); a = 1.0; }\n");
 	writer.C("    else if (u_misc.x < 2.5) { col = N * 0.5 + 0.5; a = 1.0; }\n");
 	writer.C("    else if (u_misc.x < 3.5) { col = vec3(clamp(mUV, 0.0, 1.0), 0.0); a = 1.0; }\n");
-	writer.C("    else { col = mix(vec3(0.0), vec3(0.0, 1.0, 1.0), isWater); a = 1.0; }\n");
+	writer.C("    else if (u_misc.x < 4.5) { col = mix(vec3(0.0), vec3(0.0, 1.0, 1.0), isWater); a = 1.0; }\n");
+	writer.C("    else { col = vec3(hasFloor, clamp(depthV / 4.0, 0.0, 1.0), clamp(depthPath / 20.0, 0.0, 1.0)) * isWater; a = 1.0; }\n");
 	writer.C("  }\n");
 
 	// Premultiplied, so the composite is one ONE/INV_SRC_ALPHA blend and a pixel this pass did
@@ -1640,7 +1931,7 @@ static void WriteShadeFS(ShaderWriter &writer) {
 }
 
 static bool EnsurePipelines(Draw::DrawContext *draw) {
-	if (s_depthPipeline && s_shadePipeline && s_compositePipeline) {
+	if (s_depthPipeline && s_shadePipeline && s_compositePipeline && s_floorPipeline) {
 		return true;
 	}
 	if (s_setupFailed) {
@@ -1672,9 +1963,33 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 		delete[] code;
 	}
 
+	// The floor pass writes the world height of the nearest solid surface, which under a water pixel
+	// is the sea bed. Sixteen bits across two channels of an ordinary RGBA8 target, over -64..192:
+	// four thousandths of a unit, far finer than any shore. Blue marks that something was drawn at
+	// all, so open water with nothing under it reads as deep rather than as a floor at -64.
+	ShaderModule *floorFS = nullptr;
+	{
+		const size_t kSize = 2048;
+		char *code = new char[kSize];
+		{
+			ShaderWriter writer(code, lang, ShaderStage::Fragment);
+			writer.HighPrecisionFloat();
+			writer.BeginFSMain(kUniforms, kVaryings);
+			writer.C("  float h = clamp((v_world.z + 64.0) / 256.0, 0.0, 1.0) * 255.0;\n");
+			writer.C("  vec4 outColor = vec4(floor(h) / 255.0, fract(h), 1.0, 1.0);\n");
+			writer.EndFSMain("outColor");
+		}
+		floorFS = draw->CreateShaderModule(ShaderStage::Fragment, lang.shaderLanguage,
+			(const uint8_t *)code, strlen(code), "vcs_water_floor_fs");
+		if (!floorFS) {
+			ERROR_LOG(Log::G3D, "VCS water floor FS failed:\n%s", code);
+		}
+		delete[] code;
+	}
+
 	ShaderModule *shadeFS = nullptr;
 	{
-		const size_t kSize = 16384;
+		const size_t kSize = 24576;
 		char *code = new char[kSize];
 		{
 			ShaderWriter writer(code, lang, ShaderStage::Fragment);
@@ -1735,9 +2050,10 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 		delete[] code;
 	}
 
-	if (!geomVS || !depthFS || !shadeFS || !compVS || !compFS) {
+	if (!geomVS || !depthFS || !floorFS || !shadeFS || !compVS || !compFS) {
 		if (geomVS) geomVS->Release();
 		if (depthFS) depthFS->Release();
+		if (floorFS) floorFS->Release();
 		if (shadeFS) shadeFS->Release();
 		if (compVS) compVS->Release();
 		if (compFS) compFS->Release();
@@ -1806,6 +2122,23 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 	sampDesc.wrapW = TextureAddressMode::CLAMP_TO_EDGE;
 	s_sampler = draw->CreateSamplerState(sampDesc);
 
+	SamplerStateDesc pointDesc = sampDesc;
+	pointDesc.magFilter = TextureFilter::NEAREST;
+	pointDesc.minFilter = TextureFilter::NEAREST;
+	s_pointSampler = draw->CreateSamplerState(pointDesc);
+
+	SamplerStateDesc wrapDesc = sampDesc;
+	wrapDesc.mipFilter = TextureFilter::LINEAR;
+	wrapDesc.maxAniso = 4.0f;
+	wrapDesc.wrapU = TextureAddressMode::REPEAT;
+	wrapDesc.wrapV = TextureAddressMode::REPEAT;
+	wrapDesc.wrapW = TextureAddressMode::REPEAT;
+	s_wrapSampler = draw->CreateSamplerState(wrapDesc);
+
+	if (!s_normalTex) {
+		s_normalTex = BuildNormalMap(draw);
+	}
+
 	PipelineDesc depthDesc{
 		Primitive::TRIANGLE_LIST,
 		{ geomVS, depthFS },
@@ -1813,6 +2146,14 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 		&s_ubDesc,
 	};
 	s_depthPipeline = draw->CreateGraphicsPipeline(depthDesc, "vcs_water_depth");
+
+	PipelineDesc floorDesc{
+		Primitive::TRIANGLE_LIST,
+		{ geomVS, floorFS },
+		geomIL, dsWrite, opaque, raster,
+		&s_ubDesc,
+	};
+	s_floorPipeline = draw->CreateGraphicsPipeline(floorDesc, "vcs_water_floor");
 
 	PipelineDesc shadeDesc{
 		Primitive::TRIANGLE_LIST,
@@ -1834,6 +2175,7 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 
 	geomVS->Release();
 	depthFS->Release();
+	floorFS->Release();
 	shadeFS->Release();
 	compVS->Release();
 	compFS->Release();
@@ -1847,7 +2189,8 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 	over->Release();
 	raster->Release();
 
-	if (!s_depthPipeline || !s_shadePipeline || !s_compositePipeline) {
+	if (!s_depthPipeline || !s_shadePipeline || !s_compositePipeline || !s_floorPipeline ||
+			!s_normalTex || !s_pointSampler || !s_wrapSampler) {
 		ERROR_LOG(Log::G3D, "VCS water pipelines failed to create");
 		ReleasePipelines();
 		s_setupFailed = true;
@@ -1857,13 +2200,14 @@ static bool EnsurePipelines(Draw::DrawContext *draw) {
 }
 
 static bool EnsureSizedResources(Draw::DrawContext *draw, int width, int height) {
-	if (s_sceneFbo && s_surfaceFbo && s_surfaceWidth == width && s_surfaceHeight == height) {
+	if (s_sceneFbo && s_surfaceFbo && s_floorFbo && s_surfaceWidth == width && s_surfaceHeight == height) {
 		return true;
 	}
 	ReleaseSizedResources();
 	s_sceneFbo = draw->CreateFramebuffer({ width, height, 1, 1, 0, false, "vcs_water_scene" });
 	s_surfaceFbo = draw->CreateFramebuffer({ width, height, 1, 1, 0, true, "vcs_water_surface" });
-	if (!s_sceneFbo || !s_surfaceFbo) {
+	s_floorFbo = draw->CreateFramebuffer({ width, height, 1, 1, 0, true, "vcs_water_floor" });
+	if (!s_sceneFbo || !s_surfaceFbo || !s_floorFbo) {
 		ReleaseSizedResources();
 		return false;
 	}
@@ -1943,6 +2287,23 @@ static void FillUniforms(WaterUB *ub, bool isWaterPass) {
 	ub->misc[1] = isWaterPass ? 1.0f : 0.0f;
 	ub->misc[2] = s_geOffset[0];
 	ub->misc[3] = s_geOffset[1];
+
+	// The floor target is drawn into the same viewport as the surface, which can be smaller than the
+	// target itself; this takes the shader's 0..1 across the viewport to the texels it lands on.
+	ub->sea[0] = s_surfaceWidth > 0 ? (float)s_floorViewW / (float)s_surfaceWidth : 1.0f;
+	ub->sea[1] = s_surfaceHeight > 0 ? (float)s_floorViewH / (float)s_surfaceHeight : 1.0f;
+	ub->sea[2] = std::max(s_settings.foamDepth, 0.01f);
+	ub->sea[3] = s_settings.shoreFoam;
+
+	ub->sea2[0] = s_settings.normalMapScale;
+	ub->sea2[1] = s_settings.normalMapStrength;
+	ub->sea2[2] = std::max(s_settings.extinctionDepth, 0.1f);
+	ub->sea2[3] = 0.0f;
+
+	ub->shadowUndo[0] = 1.0f;
+	ub->shadowUndo[1] = 1.0f;
+	ub->shadowUndo[2] = 1.0f;
+	ub->shadowUndo[3] = 0.0f;
 }
 
 static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
@@ -1962,19 +2323,22 @@ static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
 	draw->BlitFramebuffer(target, 0, 0, drawnW, drawnH, s_sceneFbo, 0, 0, width, height,
 		Aspect::COLOR_BIT, FB_BLIT_LINEAR, "vcs_water_scene_copy");
 
-	// 2. Depth, over everything captured. Occlusion comes entirely from this: a pier in front of
-	// the sea wins its pixels here and the shading pass never sees them.
-	draw->BindFramebufferAsRenderTarget(s_surfaceFbo,
-		{ RPAction::CLEAR, RPAction::CLEAR, RPAction::DONT_CARE, 0, 1.0f, 0, "vcs_water" },
-		"vcs_water");
+	// 2. The FLOOR: every solid surface captured, writing its world height as it goes. Under a
+	// water pixel the nearest solid along the view ray is the sea bed, so this is what the sea's
+	// depth is read from - and it is also the solids' half of the depth pre-pass, which is why its
+	// depth buffer is copied across rather than the solids being drawn a second time.
 	Viewport viewport{ 0.0f, 0.0f, (float)viewW, (float)viewH, 0.0f, 1.0f };
-	draw->SetViewport(viewport);
-	draw->SetScissorRect(0, 0, viewW, viewH);
-
+	s_floorViewW = viewW;
+	s_floorViewH = viewH;
 	WaterUB ub;
 	FillUniforms(&ub, false);
 
-	draw->BindPipeline(s_depthPipeline);
+	draw->BindFramebufferAsRenderTarget(s_floorFbo,
+		{ RPAction::CLEAR, RPAction::CLEAR, RPAction::DONT_CARE, 0, 1.0f, 0, "vcs_water_floor" },
+		"vcs_water_floor");
+	draw->SetViewport(viewport);
+	draw->SetScissorRect(0, 0, viewW, viewH);
+	draw->BindPipeline(s_floorPipeline);
 	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
 	for (const Batch &batch : s_batches) {
 		if (batch.solidIndexCount >= 3) {
@@ -1982,6 +2346,22 @@ static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
 				batch.vertexCount,
 				s_solidIndices.data() + batch.firstSolidIndex, batch.solidIndexCount);
 		}
+	}
+	draw->CopyFramebufferImage(s_floorFbo, 0, 0, 0, 0, s_surfaceFbo, 0, 0, 0, 0,
+		width, height, 1, Aspect::DEPTH_BIT, "vcs_water_floor_depth");
+
+	// 3. The water's half of the depth pre-pass, over the solids' depth just copied in. Occlusion
+	// comes entirely from this: a pier in front of the sea wins its pixels and the shading pass
+	// never sees them.
+	draw->BindFramebufferAsRenderTarget(s_surfaceFbo,
+		{ RPAction::CLEAR, RPAction::KEEP, RPAction::DONT_CARE, 0, 1.0f, 0, "vcs_water" },
+		"vcs_water");
+	draw->SetViewport(viewport);
+	draw->SetScissorRect(0, 0, viewW, viewH);
+
+	draw->BindPipeline(s_depthPipeline);
+	draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+	for (const Batch &batch : s_batches) {
 		if (batch.waterIndexCount >= 3) {
 			draw->DrawIndexedUP(s_positions.data() + (size_t)batch.firstVertex * 3,
 				batch.vertexCount,
@@ -1989,18 +2369,32 @@ static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
 		}
 	}
 
-	// 3. Shading, twice with one shader: the roads, then the sea.
+	// 4. Shading, twice with one shader: the roads, then the sea. Slot 1 is the road mask for the
+	// first and the floor for the second - see kShadeSamplers.
 	Texture *roadTex = s_roadTexture;
 	draw->BindFramebufferAsTexture(s_sceneFbo, 0, Aspect::COLOR_BIT, 0);
-	if (roadTex) {
-		draw->BindTextures(1, 1, &roadTex);
-	}
-	SamplerState *samplers[2] = { s_sampler, s_sampler };
-	draw->BindSamplerStates(0, 2, samplers);
+	draw->BindTextures(2, 1, &s_normalTex);
 	draw->BindPipeline(s_shadePipeline);
 
-	if (s_settings.wetRoads && s_roadValid && s_wetness > 0.002f) {
+	if (s_settings.wetRoads && s_roadValid && s_wetness > 0.002f && roadTex) {
+		draw->BindTextures(1, 1, &roadTex);
+		// Slot 2 is the SHADOW MASK on the roads, not the ripple map: the reflection is the frame
+		// mirrored, the frame already has the shadows in it, and so every puddle showed the shadows
+		// upside down - reported as "shadows project strangely onto the puddle reflections", and
+		// answered for a while by fading the shadows out whenever it rained. The shader divides the
+		// composite back out of what it reflects. The roads' only use of the ripple map was the
+		// puddles' wobble, which is noise of its own now.
+		float shadowUndo[4];
+		Framebuffer *mask = VCSShadow::CompositedMask(shadowUndo);
+		if (mask) {
+			draw->BindFramebufferAsTexture(mask, 2, Aspect::COLOR_BIT, 0);
+		}
+		SamplerState *samplers[3] = { s_sampler, s_sampler, mask ? s_sampler : s_wrapSampler };
+		draw->BindSamplerStates(0, 3, samplers);
 		FillUniforms(&ub, false);
+		if (mask) {
+			memcpy(ub.shadowUndo, shadowUndo, sizeof(ub.shadowUndo));
+		}
 		draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
 		for (const Batch &batch : s_batches) {
 			if (batch.solidIndexCount < 3) {
@@ -2013,6 +2407,12 @@ static void RenderSurface(Draw::DrawContext *draw, Draw::Framebuffer *target,
 	}
 
 	if (s_settings.water) {
+		// The floor heights are encoded across two channels and must not be filtered. And the ripple
+		// map back in slot 2, where the roads may have left the shadow mask.
+		draw->BindFramebufferAsTexture(s_floorFbo, 1, Aspect::COLOR_BIT, 0);
+		draw->BindTextures(2, 1, &s_normalTex);
+		SamplerState *samplers[3] = { s_sampler, s_pointSampler, s_wrapSampler };
+		draw->BindSamplerStates(0, 3, samplers);
 		FillUniforms(&ub, true);
 		draw->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
 		for (const Batch &batch : s_batches) {

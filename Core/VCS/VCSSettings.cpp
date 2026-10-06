@@ -36,6 +36,7 @@
 #include "Core/VCS/VCSSettings.h"
 #include "Core/VCS/VCSVault.h"
 #include "GPU/Common/VCSShadow.h"
+#include "GPU/Common/VCSSmaa.h"
 #include "GPU/Common/VCSWater.h"
 
 namespace VCS {
@@ -69,6 +70,10 @@ static void ApplyWaterSetting() {
 	// The module is switched off entirely at Off, so the capture stops too rather than baking a
 	// frame's geometry for passes nobody will draw.
 	VCSWater::SetEnabled(mode != kVCSWaterOff);
+}
+
+static void ApplyAntiAliasingSetting() {
+	VCSSmaa::SetEnabled(GameSettings().antiAliasing);
 }
 
 // The widescreen row, which owns the display's STRETCH as well as the squash factor - see
@@ -111,6 +116,16 @@ static const char *const kShadowLabels[] = {
 // Which control steers in a vehicle. Arrows are what the trilogy's phone ports put there, and
 // what a thumb can find without looking - a stick has no centre you can feel.
 static const char *const kSteeringLabels[] = { "ARROWS", "STICK" };
+
+// The disc's five GXTs, in the game's own index order, each in its own language - the way a
+// language list is always written, so a player who cannot read the current one can still find
+// theirs. Without the accents, as the PC ports' own list has them: the menu face has no Ç or Ñ.
+static const char *const kLanguageLabels[] = {
+	"ENGLISH", "FRANCAIS", "DEUTSCH", "ITALIANO", "ESPANOL",
+};
+static_assert(ARRAY_SIZE(kLanguageLabels) == kVCSLanguageCount, "one label per GXT");
+
+static const char *const kFrameRateLabels[] = { "30 FPS", "60 FPS" };
 
 static const char *const kWaterLabels[] = {
 	"LOW", "MEDIUM", "HIGH",
@@ -460,14 +475,48 @@ const std::vector<Option> &Options() {
 			&GameSettings().radioVolume, 0, kVCSVolumeMax, kVolumeStep, kVCSVolumeMax);
 		enabledBy(&g_Config.bEnableSound);
 
+		// The PSP release's own CUSTOM SOUNDTRACKS, and like the two volumes above it a row this
+		// menu has to carry because the game's Audio page is not reachable from it. The help line
+		// names the folder, because that is the whole of what a player needs to know and nothing
+		// else in the game will tell them. The value says NONE FOUND rather than OFF when the game
+		// looked and found nothing, so that ON not sticking explains itself.
+		addBool(OptionPage::Audio, "CustomTracks", "Custom soundtracks",
+			"Your own music in every radio. Put .gta tracks in PSP/SAVEDATA/ULUS10160CUSTOMTRACKS "
+			"on the memory stick, then restart.",
+			&GameSettings().customTracks, false, false, nullptr, [](const Option &opt) {
+				if (CustomTracksState() == (int)kVCSCustomTracksNone) {
+					return std::string("NONE FOUND");
+				}
+				return std::string(*opt.boolValue ? "ON" : "OFF");
+			});
+		enabledBy(&g_Config.bEnableSound);
+
 		// --- Graphics ---
 		//
 		// The order is the one a player works down: what the picture is rendered at, then how big the
 		// window is, then the quality steps that cost real frames, then the frame rate counter.
 		//
-		// Three rows live one page down, on ADVANCED, because the page had grown past what reads at
-		// a glance: ambient occlusion (a prototype), anisotropic filtering (a knob with one right
-		// answer on any GPU this runs on) and world memory (only takes effect after a restart).
+		// Two pages, split the way the PC ports split DISPLAY SETUP from their advanced options. This
+		// page is the PICTURE - how bright, how big, what shape, how often: Brightness, Resolution,
+		// Fullscreen, Widescreen, Frame limiter, and Show FPS beside the limiter it measures. ADVANCED
+		// is everything about how good it looks and what that costs: textures, shadows, ambient
+		// occlusion, water, anti-aliasing, anisotropic filtering, world memory.
+		//
+		// It was one page with three rows moved down, then Brightness and the frame limiter pushed
+		// it off a 16:10 screen, then moving two more still left a page reported as cluttered. The
+		// order of the rows within each page is the order they are added here.
+
+		// The game's own BRIGHTNESS, off the Display page of its front end, and the first row here
+		// because it is the first row there - and on the PC ports' DISPLAY SETUP. Bound to the
+		// mirror VCSGame keeps, like the volumes, because PSP memory is the emu thread's alone.
+		//
+		// Eight blocks rather than ten: the game's own slider has eight notches of 32, and the
+		// row moves one notch per press, so the strip matches it block for block.
+		addInt(OptionPage::Graphics, "Brightness", "Brightness",
+			"How bright the game draws the world. The same setting as the game's own Display page.",
+			&GameSettings().brightness, kVCSBrightnessMin, kVCSBrightnessMax, kVCSBrightnessStep,
+			kVCSBrightnessDefault);
+		opts.back().blocks = (kVCSBrightnessMax - kVCSBrightnessMin) / kVCSBrightnessStep;
 
 		addChoice(OptionPage::Graphics, nullptr, "Resolution",
 			"Internal rendering resolution. Higher is sharper and costs more.",
@@ -508,7 +557,7 @@ const std::vector<Option> &Options() {
 		// GPU_CONFIG_CHANGED makes the GPU clear its texture cache and re-ask the replacer what
 		// it has, which is exactly what happens when the same flag is flipped in PPSSPP's own
 		// settings.
-		addBool(OptionPage::Graphics, nullptr, "Texture quality",
+		addBool(OptionPage::GraphicsAdvanced, nullptr, "Texture quality",
 			"HIGH uses the installed HD texture pack. LOW draws the PSP's own textures.",
 			&g_Config.bReplaceTextures, true, true, []() {
 				System_PostUIMessage(UIMessage::GPU_CONFIG_CHANGED);
@@ -532,7 +581,7 @@ const std::vector<Option> &Options() {
 		// is what they used to be. A ladder is what a player expects on a graphics page and it sorts
 		// by cost at a glance - but it says nothing about WHAT changes, so the help line has to carry
 		// that instead, and it now does.
-		addChoice(OptionPage::Graphics, "Shadows", "Shadow quality",
+		addChoice(OptionPage::GraphicsAdvanced, "Shadows", "Shadow quality",
 			"Real shadows from the sun, which the PSP game has none of. MEDIUM shadows people and "
 			"vehicles, HIGH adds props like lamp posts and bins, ULTRA shadows the whole city.",
 			&GameSettings().shadows, kShadowLabels,
@@ -562,7 +611,7 @@ const std::vector<Option> &Options() {
 		// how hard it rains - is in the debugger's Water tab, for the same reason the shadow knobs
 		// are: a setting that needs a paragraph of measurement to explain does not belong on a
 		// pause menu.
-		addChoice(OptionPage::Graphics, "Water", "Water quality",
+		addChoice(OptionPage::GraphicsAdvanced, "Water", "Water quality",
 			"Waves, reflections and sun glint on the sea, which the PSP draws as one flat colour. "
 			"HIGH also makes the roads go wet and catch droplets while it is raining.",
 			&GameSettings().water, kWaterLabels,
@@ -587,6 +636,17 @@ const std::vector<Option> &Options() {
 				ApplyWidescreenSetting();
 			});
 
+		// A pass of our own rather than an FXAA post shader, which would smooth the HUD's text as
+		// well. See VCSSmaa.h.
+		addBool(OptionPage::GraphicsAdvanced, "AntiAliasing", "Anti-aliasing",
+			"Smooths the jagged edges of the city - rooftops, poles, cars - without blurring the "
+			"HUD.",
+			&GameSettings().antiAliasing, false, false, []() {
+				ApplyAntiAliasingSetting();
+			}, [](const Option &opt) {
+				return std::string(*opt.boolValue ? "SMAA" : "OFF");
+			});
+
 		addChoice(OptionPage::GraphicsAdvanced, nullptr, "Anisotropic filtering",
 			"Sharpens textures viewed at a shallow angle, like road surfaces ahead of you.",
 			&g_Config.iAnisotropyLevel, kAnisoLabels, ARRAY_SIZE(kAnisoLabels),
@@ -605,6 +665,13 @@ const std::vector<Option> &Options() {
 		// type for - and which the Debug build still uses. See VCSGameSettings for why the two are
 		// not one setting with two homes. (That note used to sit above the shadow row, which is not
 		// what it is about.)
+		// The frame limiter, beside the counter that measures it.
+		addChoice(OptionPage::Graphics, "FrameRate", "Frame limiter",
+			"30 is the game as it shipped. 60 draws twice as often at the same speed, dropping frames "
+			"if the computer can't keep up.",
+			&GameSettings().frameRate, kFrameRateLabels, ARRAY_SIZE(kFrameRateLabels),
+			kVCSFrameRate30);
+
 		addBool(OptionPage::Graphics, "ShowFps", "Show FPS",
 			"Draw the frame rate in the corner of the screen.",
 			&GameSettings().showFps);
@@ -640,6 +707,13 @@ const std::vector<Option> &Options() {
 		// every other row on the page. The help line has to say what it leaves behind, because
 		// the radar staying up looks like the setting half worked; it is what the retail row
 		// does, and the radar has a setting of its own that this fork does not offer.
+		// The game's text, from the GXTs the USA disc ships beside its English one. A patch
+		// applied before the game boots, like the radar corner, so the row says it waits.
+		addChoice(OptionPage::Gameplay, "Language", "Language",
+			"The game's text and menus; the voices stay English. Takes effect next time the game "
+			"starts.",
+			&GameSettings().language, kLanguageLabels, ARRAY_SIZE(kLanguageLabels), 0);
+
 		addBool(OptionPage::Gameplay, "Subtitles", "Subtitles",
 			"Dialogue as text on screen, during cutscenes and phone calls.",
 			&GameSettings().subtitles);
@@ -782,8 +856,22 @@ void LoadSettings() {
 		}
 	}
 
+	// The keyboard's rebinds, by action id. A table rather than rows, for the same reason the
+	// touch layout above is: only what the player has moved is written, so a file with no section
+	// is the shipped scheme, and an id this build does not know is ignored rather than guessed at.
+	ResetActionKeys();
+	if (const Section *keys = ini.GetSection("KeyBindings")) {
+		for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+			int code = 0;
+			if (keys->Get(kVCSKeyActions[i].id, &code) && code > 0 && code != NKCODE_ESCAPE) {
+				SetActionKeyRaw(i, (InputKeyCode)code);
+			}
+		}
+	}
+
 	ApplyShadowSetting();
 	ApplyWaterSetting();
+	ApplyAntiAliasingSetting();
 	// And the widescreen fix, which has a second half the same argument applies to twice over:
 	// it also owns the display's STRETCH, and a boot that widened the view without stretching the
 	// frame would show a narrow, squeezed picture inside black bars - a worse state than either
@@ -828,6 +916,14 @@ void SaveSettings() {
 			snprintf(value, sizeof(value), "%.1f,%.1f,%.2f", entry.second.dx, entry.second.dy,
 				entry.second.size);
 			layout->Set(entry.first.c_str(), value);
+		}
+	}
+
+	// Replaced wholesale, like the layout: a key put back to its default must stop being written.
+	ini.DeleteSection("KeyBindings");
+	for (size_t i = 0; i < kVCSKeyActionCount; i++) {
+		if (const InputKeyCode key = ActionKey(i)) {
+			ini.GetOrCreateSection("KeyBindings")->Set(kVCSKeyActions[i].id, (int)key);
 		}
 	}
 

@@ -85,6 +85,7 @@ using namespace std::placeholders;
 #include "Common/Render/ManagedTexture.h"
 #include "Core/VCS/VCSRadar.h"
 #include "Core/VCS/VCSGame.h"
+#include "Core/VCS/VCSInput.h"
 #include "Core/VCS/VCSSettings.h"
 #include "UI/VCSMenuScreen.h"
 #include "UI/VCSTouchControls.h"
@@ -1485,7 +1486,11 @@ void EmuScreen::update() {
 	// which is the right answer for a first run.
 	if (VCS::GetBootPhase() == VCS::BootPhase::AtMenu && !bootPending_) {
 		VCS::NotifyMenuDismissed();
-		VCS::RequestAutoLoad();
+		// The curtain raised at the end of the movie is the auto-load's from here; with nothing
+		// to load it settles and comes down on its own.
+		if (!VCS::RequestAutoLoad()) {
+			VCS::ReleaseBootCurtain();
+		}
 	}
 
 	// The second half of Back: the game's menu has closed, so this fork's opens. Waits for the
@@ -1501,6 +1506,15 @@ void EmuScreen::update() {
 			screenManager()->topScreen() == this) {
 		vcsMenuAfterGameMenu_ = false;
 		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
+	}
+
+	if (VCSMenuTestDue() && screenManager()->topScreen() == this) {
+		screenManager()->push(CreatePauseScreen(gamePath_, bootPending_));
+	}
+
+	// The save icon opened the firmware's slot list; this fork's SAVE GAME page goes over it.
+	if (VCS::IsActive() && screenManager()->topScreen() == this && VCS::TakeIconSave()) {
+		screenManager()->push(CreateIconSaveScreen(gamePath_, bootPending_));
 	}
 
 	if (pauseTrigger_) {
@@ -1984,7 +1998,8 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 	// open with no route to draw at all.
 	float cursorX = 0.0f, cursorY = 0.0f;
 	const bool haveCursor = VCS::MapCursorScreen(&cursorX, &cursorY);
-	if (segments.empty() && !haveCursor && !s.showCalibration) {
+	const bool driveByCrosshair = VCS::DriveByCrosshairVisible();
+	if (segments.empty() && !haveCursor && !s.showCalibration && !driveByCrosshair) {
 		return;
 	}
 
@@ -1995,6 +2010,25 @@ static void DrawVCSRouteOverlay(UIContext *ctx) {
 
 	float frameX = rc.x * g_display.dpi_scale_x;
 	float frameW = rc.w * g_display.dpi_scale_x;
+	// The drive-by crosshair marks the middle of the WORLD, which the widescreen fix does not
+	// squash - so it is placed before that, on the whole frame. The fire hook shoots down exactly
+	// this point when the drive-by is aimed with the view.
+	if (driveByCrosshair) {
+		const ImageID white = ctx->GetTheme().whiteImage;
+		const float cx = frameX + frameW * 0.5f;
+		const float cy = (rc.y + rc.h * 0.5f) * g_display.dpi_scale_y;
+		const float unit = (rc.h * g_display.dpi_scale_y) / 272.0f;
+		const float gap = 2.5f * unit, arm = 7.0f * unit;
+		const float th = std::max(1.0f, 1.2f * unit);
+		for (int pass = 0; pass < 2; pass++) {
+			const float w = pass == 0 ? th + 1.5f : th;
+			const uint32_t col = pass == 0 ? 0xB0000000 : 0xE6FFFFFF;
+			ctx->Draw()->Line(white, cx - gap - arm, cy, cx - gap, cy, w, col);
+			ctx->Draw()->Line(white, cx + gap, cy, cx + gap + arm, cy, w, col);
+			ctx->Draw()->Line(white, cx, cy - gap - arm, cx, cy - gap, w, col);
+			ctx->Draw()->Line(white, cx, cy + gap, cx, cy + gap + arm, w, col);
+		}
+	}
 	// The widescreen fix squashes the game's own HUD into the middle band of the frame, and this
 	// line is drawn ON that HUD - so it has to land in the same place the radar did.
 	VCS::ApplyHudSquash(&frameX, &frameW);

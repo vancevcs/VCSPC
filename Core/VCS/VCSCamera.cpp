@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
 #include <cmath>
 #include <mutex>
 
@@ -716,7 +717,7 @@ void AimDeflectionFromMouse(float dx, float dy, float scale, bool invertY,
 	if (g_settings.driveByMouseAim) {
 		const std::optional<u32> camMode = ReadAddrU32(VCSAddr::CamMode);
 		const std::optional<u32> weaponMode = ReadAddrU32(VCSAddr::WeaponCamMode);
-		driveBy = camMode && weaponMode && *camMode == 11 && *weaponMode == 11;
+		driveBy = !g_settings.driveByCameraAim && camMode && weaponMode && *camMode == 11 && *weaponMode == 11;
 	}
 
 	if (driveBy) {
@@ -735,12 +736,12 @@ void AimDeflectionFromMouse(float dx, float dy, float scale, bool invertY,
 			if (ry && *ry > 0.01f && *ry < 10.0f) sy = *ry;
 		}
 
-		g_aimOutX = dx * k / sx;
-		g_aimOutY = -dy * k * ySign / sy;
-		if (g_aimOutX > 1.0f) g_aimOutX = 1.0f;
-		if (g_aimOutX < -1.0f) g_aimOutX = -1.0f;
-		if (g_aimOutY > 1.0f) g_aimOutY = 1.0f;
-		if (g_aimOutY < -1.0f) g_aimOutY = -1.0f;
+		// The VERTICAL is opposite to the reticle's: in Jive Drive mouse up pitched the gun down,
+		// reported as "inverted by default, even if I change it in the settings". The horizontal
+		// was right all along - flipping it too was tried and played as "right moves it left".
+		// aimInvertY still flips the vertical on top of this.
+		g_aimOutX = std::clamp(dx * k / sx, -1.0f, 1.0f);
+		g_aimOutY = std::clamp(dy * k * ySign / sy, -1.0f, 1.0f);
 		g_aimSolvedFrame = g_aimFrame;
 		*outX = g_aimOutX;
 		*outY = g_aimOutY;
@@ -871,7 +872,7 @@ static bool ContextDrivesCamera(VCSInputContext context) {
 	// saying plainly because the context here is InVehicle, where mouse look is otherwise right:
 	// the nub is the aim in that seat, so a delta spent on the camera turns the view and leaves
 	// the gun behind. That is the reported bug, in one line.
-	return ContextWantsMouse(context) && !ReticleActive(context) && !DriveByAimActive(context);
+	return ContextWantsMouse(context) && !ReticleActive(context) && !DriveByStickAimActive(context);
 }
 
 bool HandleMouseDelta(float dx, float dy) {
@@ -1074,7 +1075,7 @@ void CameraTick(VCSInputContext context) {
 	// The drive-by holds the delta on the same terms the reticle does - it goes through the same
 	// model, so it has the same gap between our tick rate and the game's logic frame to bridge.
 	float dx = 0.0f, dy = 0.0f;
-	if ((!ReticleActive(context) && !DriveByAimActive(context)) || AimModelReady()) {
+	if ((!ReticleActive(context) && !DriveByStickAimActive(context)) || AimModelReady()) {
 		TakeMouseDelta(&dx, &dy);
 	}
 
@@ -1108,10 +1109,17 @@ void CameraTick(VCSInputContext context) {
 	// (measured: mouse right raised the value, which turned the view LEFT), so the natural mapping
 	// needs a negative sign and invertX flips away from it. Pitch is up-positive and invertY flips it.
 	if (ChaseCamTakesLook(context)) {
-		const float yawStep = dx * g_settings.sensitivity * fovScale *
+		float yawStep = dx * g_settings.sensitivity * fovScale *
 			(g_settings.invertX ? 1.0f : -1.0f);
-		const float pitchStep = dy * g_settings.sensitivity * g_settings.verticalGain * fovScale *
+		float pitchStep = dy * g_settings.sensitivity * g_settings.verticalGain * fovScale *
 			(g_settings.invertY ? -1.0f : 1.0f);
+		// The drive-by aimed with the view is AIMING, so it takes free aim's numbers rather than
+		// mouse look's: the Aiming page's sensitivity, one count to one step with nothing between,
+		// and its vertical convention - push the mouse away and the aim rises.
+		if (DriveByCameraAimActive(context)) {
+			yawStep = -dx * g_settings.aimSensitivity * fovScale;
+			pitchStep = -dy * g_settings.aimSensitivity * fovScale * (g_settings.aimInvertY ? -1.0f : 1.0f);
+		}
 		ChaseCamAddLook(yawStep, pitchStep);
 		// Whatever this path was asserting belongs to a camera the player has left. The next aim
 		// anchors afresh, to where the chase camera has been keeping the game's angles.

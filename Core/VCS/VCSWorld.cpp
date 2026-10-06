@@ -133,7 +133,9 @@ static bool g_wantDispatch = false;
 // A call some other part of the VCS layer wants made, waiting for the same safe moment.
 static bool g_wantForeign = false;
 static u32 g_foreignFunc = 0;
-static u32 g_foreignArg = 0;
+static u32 g_foreignArgs[2] = {};
+// How many dispatches a queued call has given up to the world query. See WorldQueryDispatch.
+static int g_foreignSkipped = 0;
 static u32 g_dispatchCodeOff = 0;      // which program the pending call runs
 static u32 g_climbSeq = 0;
 static bool g_climbPending = false;
@@ -522,13 +524,14 @@ bool RequestGroundZ(const VCSGroundSample *samples, int count) {
 }
 
 void WorldQueryNoteMainThread() {
-	if (!g_block) {
-		return;
-	}
+	// Noted with or without the block: a queued game call needs the thread too, and it has no
+	// block of its own - with vaulting off there would otherwise never be a thread to call on.
 	const SceUID cur = __KernelGetCurThread();
 	if (cur != g_mainThread) {
 		g_mainThread = cur;
-		WriteU32(g_block + kBlockThreadOff, (u32)cur);
+		if (g_block) {
+			WriteU32(g_block + kBlockThreadOff, (u32)cur);
+		}
 	}
 }
 
@@ -563,13 +566,14 @@ static u32 Tag(const char *s) {
 	return tag;
 }
 
-bool EnqueueGameCall(u32 func, u32 arg) {
+bool EnqueueGameCall(u32 func, u32 arg, u32 arg2) {
 	if (g_wantForeign || func == 0) {
 		return false;
 	}
 	g_wantForeign = true;
 	g_foreignFunc = func;
-	g_foreignArg = arg;
+	g_foreignArgs[0] = arg;
+	g_foreignArgs[1] = arg2;
 	return true;
 }
 
@@ -614,21 +618,35 @@ void WorldQueryDispatch(const char *host) {
 	if (refusal) {
 		g_refusals++;
 		g_lastRefusal = refusal;
-		WriteU32(g_block + kBlockRefusedThreadOff, (u32)cur);
-		WriteU32(g_block + kBlockRefusedWhyOff, Tag(refusal));
-		WriteU32(g_block + kBlockRefusalsOff, (u32)g_refusals);
+		if (g_block) {
+			WriteU32(g_block + kBlockRefusedThreadOff, (u32)cur);
+			WriteU32(g_block + kBlockRefusedWhyOff, Tag(refusal));
+			WriteU32(g_block + kBlockRefusalsOff, (u32)g_refusals);
+		}
 		return;
 	}
 
-	// A queued foreign call goes only when the world query has nothing of its own to send. Two
-	// hleEnqueueCalls in one syscall would both be acted on when it finishes, which is not what
-	// that mechanism promises.
-	if (!g_wantDispatch) {
-		const u32 foreignArg = g_foreignArg;
-		hleEnqueueCall(g_foreignFunc, 1, &foreignArg);
+	// A queued foreign call goes when the world query has nothing of its own to send - or when it
+	// has already waited behind it twice. Two hleEnqueueCalls in one syscall would both be acted
+	// on when it finishes, which is not what that mechanism promises, so it is one or the other.
+	//
+	// The waiting limit is not a refinement. The ledge probe asks EVERY frame while the player
+	// moves, so "the probe wins a tie" was a queued call that never went at all: measured, the
+	// custom soundtrack switch was queued once and refused every tick after for as long as the
+	// game ran. The probe simply asks again next frame; it loses one answer, not its place.
+	if (g_wantForeign && (!g_wantDispatch || g_foreignSkipped >= 2)) {
+		const u32 foreignArgs[2] = { g_foreignArgs[0], g_foreignArgs[1] };
+		hleEnqueueCall(g_foreignFunc, 2, foreignArgs);
 		g_wantForeign = false;
+		g_foreignSkipped = 0;
 		g_dispatches++;
 		g_lastHost = host;
+		return;
+	}
+	if (g_wantForeign) {
+		g_foreignSkipped++;
+	}
+	if (!g_wantDispatch || !g_block) {
 		return;
 	}
 
