@@ -418,6 +418,33 @@ can't be read falls back to the car set, which is the pre-existing behaviour and
 and steers exactly like a car, so the existing set covers it - the only dead key is Space, since
 boats have no handbrake.
 
+### A bike leans on the stick's Y, and the keyboard never reached it
+
+The point above - nothing in a vehicle drives the stick's Y axis - was true of motorbikes too, where
+Y is the lean: on the PSP the nub up and down tips a bike forward and back, wheelies and stoppies.
+The keyboard had no way to it, and the pad's in-vehicle row took the left stick's X and threw its Y
+away (reported, 2026-10-13: "add leaning controls on a bike"). Now:
+
+- **The arrows lean** in `InVehicle`: Up forward (the nub pushed away, as Up pitches the nose down in
+  an aircraft), Down back. Claimed through `ContextUsesKeyForMovement`, so they no longer fall
+  through to PPSSPP's d-pad in a vehicle (Up was the sub-mission button, Down the horn - G and H
+  are both). Rebindable as one card row, "Lean (bike)", like Steer.
+- **The pad's left stick leans** with its Y, as the nub does. Not the phone's touch stick: a thumb on
+  glass is never level, so steering would lean the bike with it; the overlay still steers only.
+- **No normalising in a vehicle.** X steers and Y leans, two controls rather than a direction, so
+  each axis is clamped on its own; normalised, A with Down steered at 71% through every lean.
+- **The help line names them.** H_IV_05, "While on a bike you can shift your weight using ~VEWEI~",
+  read "W and S" - the throttle and the brake. `Tools/vcsgxtkeys.py` maps VEWEI (and the unused
+  VEWEU) to "the UP and DOWN arrows" now, the LCS fork's wording; memstick/PSP/VCS/ENGLISH.GXT was
+  regenerated (before the change the tool reproduced the old file byte for byte).
+
+Measured on the motorbike fixture (slot 3, loaded after the boot autoload through PPSSPP's own
+slot / quick-load commands posted as `WM_COMMAND`): Up read -128 on the game's stick Y
+(`CPad+0x04`), Down +126, A + Down (-128, 126); W with Down for 1.6 s lifted the bike's nose
+(forward.z) to 0.913 against 0.08 with W alone, twice in a row. In any other vehicle the arrows send
+whatever the nub's up and down does there (not checked car by car); on one with a cannon the mouse's
+elevation (`cannonY`) adds to the same axis.
+
 ### Spawning vehicles
 
 Testing the aircraft and boat bindings needs an aircraft or a boat, and hunting one down in the

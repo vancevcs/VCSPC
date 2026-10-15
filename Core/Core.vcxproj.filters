@@ -273,6 +273,9 @@
     <ClCompile Include="VCS\VCSVault.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
+    <ClCompile Include="VCS\VCSVehicleDetail.cpp">
+      <Filter>VCS</Filter>
+    </ClCompile>
     <ClCompile Include="VCS\VCSWorld.cpp">
       <Filter>VCS</Filter>
     </ClCompile>
@@ -1618,6 +1621,9 @@
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSVault.h">
+      <Filter>VCS</Filter>
+    </ClInclude>
+    <ClInclude Include="VCS\VCSVehicleDetail.h">
       <Filter>VCS</Filter>
     </ClInclude>
     <ClInclude Include="VCS\VCSWorld.h">

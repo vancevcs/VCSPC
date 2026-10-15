@@ -731,6 +731,36 @@ whatever was last built into the matrix, and the distance it holds is whatever i
 the chase camera writing the matrix it sat at 2.29 for a whole session. Nothing in it is an ideal
 distance to read.
 
+**The on-foot zoom is the game's own number, though** (2026-10-13): Select steps `CCamera+0x7b4`
+(float 1, 2, 3), `0x08a2a444` turns it into `+0x888` (0.0, 2.5, 3.5), and `0x08a2a668` eases `+0x890`
+towards that at 0.12 a TimeStep (towards the script's `+0x88c` while the byte at `+0x81f` is set) -
+III's `PedZoomIndicator`, `m_fPedZoomValue` and `m_fPedZoomValueSmooth`, in the same order as LCS's
+`TheCamera+0x154 / 0x134 / 0x13c`. The chase camera adds `+0x890 - 2.5` to its on-foot distance.
+Read in `ULUS10160_1.03_2.ppst` (level 2, both 2.5) and live (V: 3 -> 2 -> 1 -> 3).
+
+### The vehicle LOD distances — `CVisibilityComponents::SetRslCamera` (`0x08946158`)
+
+The vehicle half of the LOD multiplier [draw-distance.md](vcs/draw-distance.md) found governing peds
+and vehicles. Named from LCS's Android port (`libGTALcs.so` keeps its symbols; the PSP function was
+found in LCS by its callbacks and is the same code here), where it reads a per-device table; the PSP
+has the distances as `lui` immediates. Every frame, squared, into `$gp`-relative globals ($gp
+`0x08bb1d60`):
+
+| global | address | value in `_2.ppst` | multiplier x metres |
+|---|---|---|---|
+| `ms_vehicleLod0Dist` | `$gp+0x22d4` = `0x08bb4034` | 2500 | `CCamera+0x7a0` x 50 |
+| `ms_vehicleLod1Dist` | `0x08bb4038` | 4900 | x 70 |
+| `ms_vehicleFadeDist` | `0x08bb403c` | 8100 | x 90 |
+| `ms_bigVehicleLod0Dist` | `0x08bb4040` | 2500 | x 50 |
+| `ms_bigVehicleLod1Dist` | `0x08bb4044` | 12100 | x 110 |
+| peds | `0x08bb4048`, `0x08bb404c` | 4900 | `CCamera+0x7a8` x 70 |
+| `ms_cullCompsDist` | `0x08bb4050` | 400 | `+0x7a8` x 20; 1e6 in camera modes 1 and 0x25 |
+
+`CCamera+0x7a0` read 1.0. `RenderVehicleHiDetailCB` (`0x08945424`) draws a car's full model while the
+distance squared (`$gp+0x19ac`) is under lod0. The `lw ra,0(sp)` after the last store (`0x08946240`,
+`8fbf0000`; checked by `0x0894623c` `e78c22ec` and `0x089461d8` `3c044248`) is where `VCSVehicleDetail`
+hooks; at HIGH lod0, lod1, big lod0 and big lod1 read 14400, 19600, 14400 and 19600 live.
+
 ### `CWeaponInfo` and the weapon's range — because the ray length was also wrong
 
 `CWeaponInfo::GetWeaponInfo` is `0x08b1fd70` and is three instructions:

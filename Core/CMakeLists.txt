@@ -457,6 +457,8 @@ add_library(Core STATIC
 	VCS/VCSState.h
 	VCS/VCSVault.cpp
 	VCS/VCSVault.h
+	VCS/VCSVehicleDetail.cpp
+	VCS/VCSVehicleDetail.h
 	VCS/VCSWorld.cpp
 	VCS/VCSWorld.h
 	VCS/VCSChaseCam.cpp

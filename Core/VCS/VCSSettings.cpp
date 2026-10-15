@@ -131,6 +131,11 @@ static const char *const kWaterLabels[] = {
 	"LOW", "MEDIUM", "HIGH",
 };
 
+// PSP is the game's own distances, so the row says where the ladder starts rather than "LOW".
+static const char *const kVehicleDetailLabels[] = {
+	"PSP", "HIGH", "ULTRA",
+};
+
 // "3x (1440x816)". The multiplier is what the setting means; the pixel count is what it does, and
 // a resolution is the one setting a player already has a number for. Computed rather than written
 // into the labels above because Auto's half of it is the window's, and the window can be resized
@@ -618,6 +623,14 @@ const std::vector<Option> &Options() {
 			ARRAY_SIZE(kWaterLabels), kVCSWaterDefault, false, []() {
 				ApplyWaterSetting();
 			});
+
+		// The vehicle half of the old draw-distance work: the LOD distances the game sets every
+		// frame, scaled after it sets them (VCSVehicleDetail). Read live by its tick, so no onChange.
+		addChoice(OptionPage::GraphicsAdvanced, "VehicleDetail", "Vehicle detail",
+			"How far away cars, bikes and boats keep their full model. PSP swaps it for a plainer one "
+			"at 50 metres, HIGH at 120 as the Liberty City Stories phone version does, ULTRA at 240.",
+			&GameSettings().vehicleDetail, kVehicleDetailLabels,
+			ARRAY_SIZE(kVehicleDetailLabels), kVCSVehicleDetailHigh);
 
 		// The PSP's screen is 16:9.06 and a modern phone is wider, so PPSSPP either leaves black
 		// bars or stretches everything 20% wide. This does what a GTA widescreen mod does instead

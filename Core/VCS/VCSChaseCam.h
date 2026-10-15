@@ -88,6 +88,9 @@ struct VCSChaseCamSettings {
 	// it starts each frame from wherever the last camera was and only enforces a band - so asked what
 	// distance it wants, it answers with the one it was given. Measured: a learner fed from it sat at
 	// 2.29 for a whole session, because the boot load had left the camera close.
+	//
+	// This is the middle of Select's three zoom levels; the distance moves with the game's eased
+	// zoom (kVCSCCameraPedZoomOffset: 0.0 / 2.5 / 3.5), so V gives 2.0, 4.5 and 5.5.
 	float footDistance = 4.5f;
 	// How far up and down the view may tilt, radians. Up is limited only by what stays readable:
 	// the camera is below the pivot there, and the ground brings it in.

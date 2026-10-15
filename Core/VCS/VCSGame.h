@@ -156,6 +156,12 @@ inline constexpr int kVCSWaterDefault = kVCSWaterSeaAndRoads;
 inline constexpr int kVCSWidescreenDefault = 0;
 #endif
 
+// The Vehicle detail row (VCSVehicleDetail): how far a vehicle keeps its full model. PSP the game's
+// own 50 m, HIGH the LCS Android port's high table (120 m), ULTRA twice that.
+inline constexpr int kVCSVehicleDetailPSP = 0;
+inline constexpr int kVCSVehicleDetailHigh = 1;
+inline constexpr int kVCSVehicleDetailUltra = 2;
+
 // The two positions of the frame limiter row.
 inline constexpr int kVCSFrameRate30 = 0;
 inline constexpr int kVCSFrameRate60 = 1;
@@ -184,6 +190,9 @@ struct VCSGameSettings {
 	// look right when it arrives, and a row that appears to do nothing when you move it is worse
 	// than one whose effect waits for the rain.
 	int water = kVCSWaterDefault;
+
+	// How far vehicles keep their full model (VCSVehicleDetail), read live by its tick.
+	int vehicleDetail = kVCSVehicleDetailHigh;
 
 	// The radar in the top-left corner instead of the bottom-left, where the phone ports of the
 	// trilogy have always put it - and where, on a phone, the left thumb is not sitting on it.

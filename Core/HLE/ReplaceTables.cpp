@@ -36,6 +36,7 @@
 #include "Core/VCS/VCSChaseCam.h"
 #include "Core/VCS/VCSFireHook.h"
 #include "Core/VCS/VCSVault.h"
+#include "Core/VCS/VCSVehicleDetail.h"
 #include "Core/HLE/FunctionWrappers.h"
 #include "Core/HLE/sceDisplay.h"
 
@@ -1672,6 +1673,8 @@ static const ReplacementTableEntry entries[] = {
 	// Installed by address, the second one inside a program the fork writes; inert elsewhere.
 	{ "vcs_camera_prepare", &VCS::Hook_vcs_camera_prepare, 0, REPFLAG_HOOKENTER },
 	{ "vcs_camera_finish", &VCS::Hook_vcs_camera_finish, 0, REPFLAG_HOOKENTER },
+	// And after SetRslCamera's stores, for the vehicle LOD distances - see Core/VCS/VCSVehicleDetail.h.
+	{ "vcs_vehicle_detail", &VCS::Hook_vcs_vehicle_detail, 0, REPFLAG_HOOKENTER },
 	// This is actually used in other games, not just Dissidia.
 	{ "dissidia_recordframe_avi", &Hook_dissidia_recordframe_avi, 0, REPFLAG_HOOKENTER },
 	{ "brandish_download_frame", &Hook_brandish_download_frame, 0, REPFLAG_HOOKENTER },

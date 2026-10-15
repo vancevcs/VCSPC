@@ -139,8 +139,11 @@ KEYS = {
     # It said "the mouse" first, which was a guess about the turret following the camera rather
     # than a reading of the game's own line. The line names a control; use the control.
     "VEWEL": "R and T",        # aim the Rhino's cannon
-    "VEWEI": "W and S",        # shift weight on a bike
-    "VEWEU": "W and S",
+    # H_IV_05: "While on a bike you can shift your weight using ~VEWEI~." Retail is "analog stick up
+    # and analog stick down", and on the keyboard that is the arrows (the InVehicle stick rows in
+    # VCSInput.cpp). It said "W and S", which are the throttle and the brake and lean nothing.
+    "VEWEI": "the UP and DOWN arrows",   # shift weight on a bike
+    "VEWEU": "the UP and DOWN arrows",
     # H_IV_09, the fire engine. Retail is "analog stick", which VESTR above already maps to
     # "A and D" - in a vehicle those keys ARE the stick, and the mouse is the camera.
     #

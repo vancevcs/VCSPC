@@ -410,6 +410,35 @@ inline constexpr u32 kVCSCamStride = 0x260;
 // The vehicle zoom level Select cycles, as a float: read 2.0 on the motorbike fixture. The chase
 // camera watches it only to know when the game's framing changed on purpose.
 inline constexpr u32 kVCSCCameraCarZoomOffset = 0x798;
+// And on foot: Select steps the level at +0x7b4 (float 1, 2, 3; 2.0 on both fixtures), the camera
+// update turns it into a distance at +0x888 (0.0, 2.5, 3.5; 0x08a2a444) and eases +0x890 towards it
+// at 0.12 a TimeStep (0x08a2a668) - III's m_fPedZoomValueSmooth, the distance the on-foot camera adds
+// to its band. +0x88c is the script's value, taken instead while the byte at +0x81f is set.
+inline constexpr u32 kVCSCCameraPedZoomLevelOffset = 0x7b4;
+inline constexpr u32 kVCSCCameraPedZoomOffset = 0x890;
+inline constexpr float kVCSCCameraPedZoomDefault = 2.5f;   // level 2, the game's default
+
+// --- How far vehicles keep their detail (VCSVehicleDetail) --------------------------------------
+//
+// CVisibilityComponents::SetRslCamera (0x08946158; the name is the LCS Android port's, whose
+// libGTALcs.so keeps its symbols - LCS has the same function) sets the LOD distances every frame,
+// squared: CCamera+0x7a0 times 50, 70, 90 and 110 for vehicles, CCamera+0x7a8 times 70 for peds and
+// 20 for the vehicle parts culled by angle. The hook sits on the `lw $ra` after the last store.
+// Read out of ULUS10160_1.03_2.ppst: the five below held 2500, 4900, 8100, 2500 and 12100 with
+// CCamera+0x7a0 at 1.0. RenderVehicleHiDetailCB (0x08945424) draws a car's full model while the
+// distance squared ($gp+0x19ac) is under lod0.
+inline constexpr u32 kVCSVisSetCameraDone = 0x08946240;
+inline constexpr u32 kVCSVisSetCameraDoneOp = 0x8FBF0000;      // lw $ra, 0($sp)
+inline constexpr u32 kVCSVisSetCameraLastStore = 0x0894623C;
+inline constexpr u32 kVCSVisSetCameraLastStoreOp = 0xE78C22EC; // swc1 $f12, 0x22ec($gp)
+inline constexpr u32 kVCSVisSetCameraLod0Lui = 0x089461D8;
+inline constexpr u32 kVCSVisSetCameraLod0LuiOp = 0x3C044248;   // lui $a0, 0x4248 (50.0)
+// $gp + 0x22d4 .. 0x22e4, $gp being 0x08bb1d60 on this build.
+inline constexpr u32 kVCSVehicleLod0Dist = 0x08BB4034;     // 50^2
+inline constexpr u32 kVCSVehicleLod1Dist = 0x08BB4038;     // 70^2
+inline constexpr u32 kVCSVehicleFadeDist = 0x08BB403C;     // 90^2
+inline constexpr u32 kVCSBigVehicleLod0Dist = 0x08BB4040;  // 50^2
+inline constexpr u32 kVCSBigVehicleLod1Dist = 0x08BB4044;  // 110^2
 inline constexpr u32 kVCSCamPreShake = 0x08A23A60;
 inline constexpr u32 kVCSCamPreShakeOp = 0xC60C0B38;      // lwc1 $f12, 0xb38($s0)
 inline constexpr u32 kVCSCamBasisCall = 0x08A23BE8;

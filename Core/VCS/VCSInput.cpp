@@ -670,6 +670,8 @@ const VCSKeyAction kVCSKeyActions[] = {
 	{ "car_brake",       "Brake / reverse", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_S } } },
 	{ "car_left",        "Steer", VCSKeyList::InVehicle, "LEFT",  { { kCar, NKCODE_A } } },
 	{ "car_right",       "Steer", VCSKeyList::InVehicle, "RIGHT", { { kCar, NKCODE_D } } },
+	{ "car_leanforward", "Lean (bike)", VCSKeyList::InVehicle, "FORWARD", { { kCar, NKCODE_DPAD_UP } } },
+	{ "car_leanback",    "Lean (bike)", VCSKeyList::InVehicle, "BACK",    { { kCar, NKCODE_DPAD_DOWN } } },
 	{ "car_handbrake",   "Handbrake", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_SPACE } } },
 	{ "car_leftbutton",  "Left button", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_TAB } } },
 	{ "car_exit",        "Exit vehicle", VCSKeyList::InVehicle, nullptr, { { kCar, NKCODE_F } } },
@@ -1131,6 +1133,8 @@ static const VCSListingExtra kVCSListingExtras[] = {
 	{ VCSKeyList::OnFoot,    "Look",           { "MOUSE", "RIGHT STICK", "RIGHT STICK" } },
 
 	{ VCSKeyList::InVehicle, "Steer",          { "A / D", "LEFT STICK", "LEFT STICK" } },
+	// A bike's wheelie and stoppie: the nub up and down on the PSP, the arrows here (ApplyAnalog).
+	{ VCSKeyList::InVehicle, "Lean (bike)",    { "UP / DOWN", "LEFT STICK", "LEFT STICK" } },
 	{ VCSKeyList::InVehicle, "Look",           { "MOUSE", "RIGHT STICK", "RIGHT STICK" } },
 	// Glances, for shooting out of the side of a car. Not in the mapping table because on the
 	// PSP they are L trigger plus a stick direction - a button and an axis at once, which a row
@@ -1302,6 +1306,12 @@ static std::string ExtraKeyboardCell(const VCSListingExtra &extra) {
 			return extra.controls[0];
 		}
 		return keyText("car_left") + " / " + keyText("car_right");
+	}
+	if (name == "Lean (bike)") {
+		if (!anyRebound({ "car_leanforward", "car_leanback" })) {
+			return extra.controls[0];
+		}
+		return keyText("car_leanforward") + " / " + keyText("car_leanback");
 	}
 	// The same keys as the radio, which is the game's doing - see the rows above.
 	if (name == "Raise forks / turret") {
@@ -1679,9 +1689,15 @@ static bool ContextUsesKeyForMovement(VCSInputContext context, InputKeyCode key)
 	// input thread - where reading the decoded game state would be a race. The psp = 0 rows in
 	// the table cover the claim unconditionally instead, which is the answer that never varies.
 	case VCSInputContext::InVehicle:
-		// W/S are handled as buttons by the mapping table, so only steering here.
-		return key == NKCODE_A || key == NKCODE_D ||
-			key == BoundKey(context, NKCODE_A) || key == BoundKey(context, NKCODE_D);
+		// W/S are handled as buttons by the mapping table, so steering here, and the arrows that
+		// lean a bike on the stick's Y. Claimed, the arrows no longer fall through to PPSSPP's d-pad
+		// in a vehicle (up the sub-mission, down the horn), which G and H already are.
+		for (InputKeyCode axis : { NKCODE_A, NKCODE_D, NKCODE_DPAD_UP, NKCODE_DPAD_DOWN }) {
+			if (key == axis || key == BoundKey(context, axis)) {
+				return true;
+			}
+		}
+		return false;
 	default:
 		return false;
 	}
@@ -2634,9 +2650,14 @@ void ApplyAnalog(VCSInputContext context) {
 			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_S))) y -= 1.0f;
 			break;
 		case VCSInputContext::InVehicle:
-			// Steering only. Accelerate and brake come from the button table.
+			// Steering, and a bike's lean on Y: the PSP leans with the nub up and down, and nothing
+			// on the keyboard reached it, so a bike could neither wheelie nor stoppie. Up leans
+			// forward (the nub pushed away), as up pitches the nose down in the aircraft rows.
+			// Accelerate and brake come from the button table.
 			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_D))) x += 1.0f;
 			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_A))) x -= 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_DPAD_UP))) y += 1.0f;
+			if (IsHostKeyDownLocked(BoundKey(context, NKCODE_DPAD_DOWN))) y -= 1.0f;
 			break;
 		case VCSInputContext::InAircraft:
 			// Pitch and roll - the whole reason this context exists. In a car the stick is
@@ -2688,9 +2709,13 @@ void ApplyAnalog(VCSInputContext context) {
 				y = padY;
 				break;
 			case VCSInputContext::InVehicle:
-				// Steering only, exactly as A and D are. The pedals are the triggers and go
-				// through the button table, so the stick's Y has nothing here to drive.
+				// Steering, and on a bike the lean, as on the PSP's nub. The pedals are the
+				// triggers and go through the button table. Not the touch overlay's Y: a thumb on
+				// glass is never level, and steering would lean the bike with it.
 				x = padX;
+				if (!touchStick) {
+					y = padY;
+				}
 				break;
 			case VCSInputContext::InAircraft:
 				// X banks and Y pitches - the whole reason this context exists. Pushed away from
@@ -2721,8 +2746,8 @@ void ApplyAnalog(VCSInputContext context) {
 			}
 		}
 
-		// After the pad, because the pad's in-vehicle row assigns X and leaves Y alone - so the
-		// two do not compete, and a player on a pad still gets the cannon from the mouse.
+		// After the pad, so a player on a pad still gets the cannon from the mouse. The cannon only
+		// rises on a vehicle that has one, and a bike that leans has none, so the two never meet.
 		y += cannonY;
 	}
 
@@ -2753,6 +2778,12 @@ void ApplyAnalog(VCSInputContext context) {
 		if (x < -1.0f) x = -1.0f;
 		if (y > 1.0f) y = 1.0f;
 		if (y < -1.0f) y = -1.0f;
+	} else if (context == VCSInputContext::InVehicle) {
+		// Two controls, not a direction: X steers and Y leans a bike (or raises a cannon), so
+		// steering stays full through a lean rather than dropping to 71% the way a normalised
+		// diagonal would. Each axis clamped on its own.
+		x = std::clamp(x, -1.0f, 1.0f);
+		y = std::clamp(y, -1.0f, 1.0f);
 	} else {
 		// Normalise diagonals, or holding W+D would move the player ~41% faster than W alone.
 		const float length = std::sqrt(x * x + y * y);

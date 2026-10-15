@@ -68,7 +68,14 @@ enforces a band, so asked what distance it wants it answers with the one it was 
 load had handed it a close one. A value read back from a system you are driving is your own value.
 
 So on foot the distance is a setting, 4.5 - where VCS sits in the open (4.63 from the player in
-`ULUS10160_1.03_1.ppst`). A vehicle is framed from its collision box, which is the data mode 18
+`ULUS10160_1.03_1.ppst`) - and Select's zoom moves it. That 4.5 is the middle of the game's three
+on-foot levels: Select steps `CCamera+0x7b4` and the camera update eases `CCamera+0x890` to 0.0, 2.5
+or 3.5 for them (the game's own number, not the camera's output, so reading it is safe), and the
+distance follows, 2.0 / 4.5 / 5.5. Until 2026-10-13 it sat at 4.5 whatever the level, so V did
+nothing on foot (reported). Measured from the boot autoload (a save left at level 3): V three times
+went 3 -> 2 -> 1 -> 3 and the camera 5.50 -> 4.50 -> 2.00 -> 5.50, each settled within a second. A
+save remembers its level, so a player who pressed V before this lands on whatever they left.
+A vehicle is framed from its collision box, which is the data mode 18
 itself reads (`[[gp+0x18] + model*4] + 0x14`): the pivot at 0.95 of the box's top, and the distance
 `5.0 + 0.65 * length` at the middle zoom level, fitted to the motorbike fixture - a box 1.98 long,
 framed at 6.26 by its own camera - and scaled by 0.8 and 1.35 at the near and far levels Select picks

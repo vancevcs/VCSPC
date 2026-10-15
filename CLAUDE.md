@@ -61,6 +61,7 @@ Core/VCS/                      no dependency on ImGui, UI, or any renderer
   VCSChaseCam.h/cpp the camera the player looks through on foot, driving and flying - built
                     inside the game's camera update, pulled in by the game's own line of sight
   VCSFireHook.h/cpp free aim resolved at the fire site, by rewriting the raycast's target
+  VCSVehicleDetail  how far vehicles keep their full model: the game's LOD distances, scaled
   VCSWorld.h/cpp    calls the game's own collision code, via a program written into PSP memory
   VCSVault.h/cpp    ledge detection and the pull-up, built on that query
   VCSCheats.h/cpp   the game's own button-combo cheats, typed by a sequencer on the game's clock
@@ -152,6 +153,7 @@ Sections cross-reference each other by title: `grep -rn "<title>" docs/vcs`.
 | [anti-aliasing.md](docs/vcs/anti-aliasing.md) | SMAA: where it runs, when it fires, the split-screen debug view | touching `VCSSmaa` |
 | [frame-rate.md](docs/vcs/frame-rate.md) | 30/60: the cap, CTimer, why 60 looked like slow motion, the CPU clock, forced frameskip | touching the frame limiter or game timing |
 | [draw-distance.md](docs/vcs/draw-distance.md) | why the view is what it is: which levers were measured and are inert | trying to change how far the city draws |
+| [vehicle-detail.md](docs/vcs/vehicle-detail.md) | the vehicle LOD distances (SetRslCamera, Rockstar's Android table), the hook, the row | touching `VCSVehicleDetail` or vehicle LOD |
 | [streaming-stutter.md](docs/vcs/streaming-stutter.md) | driving/streaming hitches, `CacheFullIsoInRam`, instant texture loading | chasing hitches or texture loading |
 | [phone.md](docs/vcs/phone.md) | the Android build, touch controls, HUD taps, the radar corner, widescreen, arranging the controls, the phone menu, the iOS build | touching `VCSTouchControls`, the Android flavor, the iOS build, or the Widescreen row |
 | [status.md](docs/vcs/status.md) | log of what was confirmed working, and how | (historical) |

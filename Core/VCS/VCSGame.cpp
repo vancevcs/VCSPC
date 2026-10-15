@@ -63,6 +63,7 @@ void CFRelease(const void *cf);
 #include "Core/VCS/VCSSettings.h"
 #include "Core/VCS/VCSState.h"
 #include "Core/VCS/VCSVault.h"
+#include "Core/VCS/VCSVehicleDetail.h"
 #include "Core/VCS/VCSWorld.h"
 
 namespace VCS {
@@ -564,6 +565,7 @@ void Shutdown() {
 	RemoveFireHook();
 	RemoveClimbSplashHook();
 	RemoveChaseCam();
+	RemoveVehicleDetail();
 	VaultReset();
 	RemoveWorldQuery();
 
@@ -626,6 +628,9 @@ void Tick() {
 	// the code exists, re-checked every tick because a savestate can take them away, and taken back
 	// out when the setting is switched off.
 	InstallChaseCam();
+
+	// The vehicle LOD hook, on the same terms: re-checked every tick, out when the row says PSP.
+	VehicleDetailTick();
 
 	// The world query, installed on the same terms and for the same reason - it writes a small
 	// program into PSP memory, which cannot happen before there is a game to write it next to.

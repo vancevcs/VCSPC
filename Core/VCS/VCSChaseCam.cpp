@@ -263,6 +263,7 @@ CamVec g_preSource;
 CamVec g_preFront;
 CamVec g_preUp;
 float g_wantDistance = 0.0f;
+float g_pedZoom = kVCSCCameraPedZoomDefault;  // the game's on-foot zoom distance this frame
 int g_rayCount = 0;
 
 // --- Kept between frames ---
@@ -861,7 +862,13 @@ int Hook_vcs_camera_prepare() {
 		g_wantDistance = (s.vehicleDistanceBase + s.vehicleDistancePerLength * g_vehicleLength) *
 			zoomScale * s.vehicleDistanceScale * (g_driveByView ? s.driveByDistanceScale : 1.0f);
 	} else {
-		g_wantDistance = s.footDistance;
+		// Select's zoom (V) on foot: the game eases CCamera+0x890 to 0.0 / 2.5 / 3.5 for its three
+		// levels, so footDistance (level 2's) moves by the same amount: 2.0, 4.5, 5.5. The eased
+		// value, so the camera slides between them as the game's own would. It sat at footDistance
+		// whatever the level before, and V did nothing on foot (reported).
+		const float zoom = ReadFloat(kVCSCCamera + kVCSCCameraPedZoomOffset).value_or(kVCSCCameraPedZoomDefault);
+		g_pedZoom = std::isfinite(zoom) ? Clamp(zoom, -1.0f, 8.0f) : kVCSCCameraPedZoomDefault;
+		g_wantDistance = s.footDistance + (g_pedZoom - kVCSCCameraPedZoomDefault);
 	}
 	g_wantDistance = Clamp(g_wantDistance, std::max(s.minDistance, 0.1f), 60.0f);
 
@@ -1070,9 +1077,9 @@ int Hook_vcs_camera_finish() {
 		if (g_traceTimer >= 1.0f) {
 			g_traceTimer = 0.0f;
 			NOTICE_LOG(Log::HLE,
-				"VCS cam: %s mode %d yaw %.3f pitch %.3f game %.2f want %.2f allowed %.2f now %.2f hits %d/%d "
+				"VCS cam: %s mode %d yaw %.3f pitch %.3f game %.2f zoom %.2f want %.2f allowed %.2f now %.2f hits %d/%d "
 				"pivot %.2f %.2f %.2f source %.2f %.2f %.2f speed %.1f clear %.2f near %.2f%s",
-				KindName(g_kind), g_mode, g_yaw, g_pitch, g_gameDistance, g_wantDistance, g_allowed, g_distance,
+				KindName(g_kind), g_mode, g_yaw, g_pitch, g_gameDistance, g_pedZoom, g_wantDistance, g_allowed, g_distance,
 				g_hits, g_rayCount, g_pivot.x, g_pivot.y, g_pivot.z, source.x, source.y, source.z, g_speed,
 				g_clearance, g_near, g_glancing ? " glancing" : "");
 		}

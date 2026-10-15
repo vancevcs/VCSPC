@@ -619,6 +619,10 @@ The row is therefore gone, for the same reason the culling slider and the stream
 setting that cannot do what its name says does not sit on the Graphics page. `git log
 --diff-filter=D -- Core/VCS/VCSDrawDistance.cpp` has the working implementation if it is ever wanted.
 
+**The vehicle half came back as its own row (2026-10-13), [vehicle-detail.md](vehicle-detail.md).**
+Not through this multiplier: through the five vehicle distances `SetRslCamera` builds from it every
+frame, scaled on their way out, which leaves the peds and the map alone.
+
 **The verdict the four negatives add up to.** Four mechanisms have now been found, decoded, patched
 and measured, and every one of them is inert for the map:
 
