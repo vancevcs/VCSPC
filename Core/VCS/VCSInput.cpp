@@ -3106,18 +3106,24 @@ bool RecruitHeld() {
 }
 
 bool CameraDrivenAimHeld() {
-	// The mouse, unchanged and unconditional: it has no lock-on mode of its own to be in.
-	if (IsHostKeyDown(BoundKey(kFoot, kVCSAimKey))) {
-		return true;
-	}
 	// The passenger drive-by, aimed with the view - see driveByCameraAim. There is no aim control to
 	// hold there: the seat IS the aim. Only ever asked from the fire hook, on the emu thread.
 	if (DriveByCameraAimActive(GetCurrentContext())) {
 		return true;
 	}
-	// The pad, only where it is not in lock-on - which is the scoped weapons, and exactly the
-	// case where the right stick is steering the camera as the aim.
-	return IsPadButtonDown(kVCSPadAimButton) && !LockOnModeActive();
+	if (!IsHostKeyDown(BoundKey(kFoot, kVCSAimKey)) && !IsPadButtonDown(kVCSPadAimButton)) {
+		return false;
+	}
+	// Either device, only where it is not in lock-on. The mouse used to be exempt, on the grounds
+	// that it always free aims - but the L toggle is a lock-on mode of its own, and under it the
+	// shot went down the camera's line instead of to the target the game had picked. Reported in
+	// play as lock-on shots landing a little left of the man, and missing him outright at range:
+	// the camera frames the player, not the target, so the error is an angle and grows with
+	// distance.
+	//
+	// A scope is still the camera's whatever the toggle says. The pad already gets that from
+	// LockOnModeActive; the toggle short-circuits before its scope exception, so it is asked here.
+	return !LockOnModeActive() || ScopedWeaponActive();
 }
 
 bool LockOnModeActive() {

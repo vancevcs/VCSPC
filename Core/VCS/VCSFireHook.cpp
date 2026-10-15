@@ -323,11 +323,10 @@ int Hook_vcs_weapon_raycast() {
 	// this fork steers; the distance says this particular ray is the player's. Neither alone is
 	// enough - NPCs shoot through this same wrapper, and they do it while the player is aiming too.
 	//
-	// It asks CameraDrivenAimHeld rather than whether the aim control is down, and the difference
-	// only appeared with the pad. This redirects the shot along the CAMERA ray, which is right
-	// when the camera is the aim and wrong under lock-on: there the game has picked a target the
-	// camera need not be pointing at, and redirecting would send the bullet past it. The mouse
-	// always free aims, so for the mouse the two are the same question and this path is unchanged.
+	// It asks CameraDrivenAimHeld rather than whether the aim control is down. This redirects the
+	// shot along the CAMERA ray, which is right when the camera is the aim and wrong under lock-on:
+	// there the game has picked a target the camera need not be pointing at, and redirecting sends
+	// the bullet past it. That is the pad always, and the mouse with the L toggle on.
 	if (!CameraDrivenAimHeld())
 		return 0;
 

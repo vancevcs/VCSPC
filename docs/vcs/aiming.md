@@ -3,6 +3,28 @@
 > Read before touching `VCSCamera`, `VCSFireHook`, the aim response model, deadbands or the fire-site ray.
 > Moved verbatim out of the old CLAUDE.md; sections cross-reference each other by title, so `grep -rn "<title>" docs/vcs`.
 
+### Under the L toggle the fire hook must stand down, as it does for the pad
+
+**Status: fixed and measured 2026-10-15, not yet confirmed in play.** Reported: with lock-on mode on
+(L), mouse and keyboard, shots land a little left of the target and miss NPCs at range.
+
+**Cause:** `CameraDrivenAimHeld`, the fire hook's guard, returned true for the mouse aim key
+unconditionally, because "the mouse always free aims". The L toggle is a lock-on mode for the mouse,
+so the hook replaced the game's lock-on shot with the camera ray. In lock-on the camera frames the
+player, not the target. The guard now asks `LockOnModeActive` for both devices, and still lets a
+scope through: the toggle returns before `LockOnModeActive`'s scope exception.
+
+**Measured** on the F7 save, interpreter, breakpoint at `ProcessLineOfSight` from the fire site.
+Locked onto a ped 10.4 m away, camera mode 11. The old camera ray ran 3.41° off the ped and passed
+**0.49 m to its left**, which is about 1.5 m at 25 m. With the fix, the game's own shot reaches the
+raycast. Two things to know when measuring this again:
+
+- **`PedPointGunAt` tells you what was locked.** Type 3 is a ped. Type 4 is the stale free-aim
+  placeholder: the game can lock onto it with no ped in range, and the camera then looks straight
+  at it, so old and new shots match to 0.00° and prove nothing.
+- **Lock-on picks targets from the ped's heading, not the camera's.** Sweeping `PedHeading` and
+  re-aiming at each step found a ped in five tries. Turning the view with `look` did not.
+
 ### The passenger drive-by is aimed with the view, like free aim
 
 **Status: confirmed in play on Jive Drive, 2026-10-06, "works well now".** `driveByCameraAim`, on by

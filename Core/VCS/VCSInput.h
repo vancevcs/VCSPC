@@ -757,9 +757,9 @@ bool RecruitHeld();
 // the shot along the camera ray, which is correct when the camera is the aim and actively wrong
 // under lock-on, where the game has chosen a target the camera need not be pointing at.
 //
-// For the mouse the two questions have always had the same answer, because the mouse always free
-// aims - so nothing about that path changes. The pad is where they come apart: it aims by lock-on
-// except with a scope, and a scope is precisely the case where the camera IS the aim.
+// The pad aims by lock-on except with a scope, and a scope is precisely the case where the camera IS
+// the aim. The mouse free aims unless the L toggle is on, and then it is lock-on like the pad - a
+// redirected shot there lands off the target, by an angle, so it misses at range.
 bool CameraDrivenAimHeld();
 
 // Whether any of WASD is held. The free-aim brake keys on this: while a movement key is down the
