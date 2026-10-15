@@ -65,6 +65,10 @@ static std::set<InputKeyCode> g_heldPadButtons;
 static std::set<InputKeyCode> g_heldTouchButtons;
 static std::atomic<float> g_touchStickX{0.0f};
 static std::atomic<float> g_touchStickY{0.0f};
+// A bike's lean from the overlay's two buttons, -1..1 on the stick's Y. Its own channel rather than
+// the touch stick's Y, because the arrows that steer write that stick and a lean button held with
+// them would make the stick "touched" and hand the steering a second owner - see ApplyAnalog.
+static std::atomic<float> g_touchLean{0.0f};
 static std::atomic<float> g_padLeftX{0.0f};
 static std::atomic<float> g_padLeftY{0.0f};
 static std::atomic<float> g_padRightX{0.0f};
@@ -1573,6 +1577,10 @@ void GetTouchStick(float *x, float *y) {
 	*y = g_touchStickY.load(std::memory_order_relaxed);
 }
 
+void SetTouchLean(float y) {
+	g_touchLean.store(y, std::memory_order_relaxed);
+}
+
 void AddTouchLook(float dx, float dy) {
 	if (!TouchSettings().enabled) {
 		return;
@@ -1595,6 +1603,7 @@ void ResetTouchInput() {
 	}
 	g_touchStickX.store(0.0f, std::memory_order_relaxed);
 	g_touchStickY.store(0.0f, std::memory_order_relaxed);
+	g_touchLean.store(0.0f, std::memory_order_relaxed);
 }
 
 
@@ -2749,6 +2758,16 @@ void ApplyAnalog(VCSInputContext context) {
 		// After the pad, so a player on a pad still gets the cannon from the mouse. The cannon only
 		// rises on a vehicle that has one, and a bike that leans has none, so the two never meet.
 		y += cannonY;
+
+		// The overlay's lean buttons. A thumb cannot lean a bike the way the PSP's nub does - the
+		// arrows that steer it write the stick's X and a drag cannot be held level - so the lean is
+		// two buttons of their own, added AFTER the pad so that a pad's stick, which assigns Y above,
+		// cannot swallow it. Bikes only: in anything else Y is a cannon or nothing, and the overlay
+		// only puts the buttons up on one.
+		if (context == VCSInputContext::InVehicle && TouchSettings().enabled &&
+				GetState().vehicleClass == VehicleClass::Bike) {
+			y += g_touchLean.load(std::memory_order_relaxed);
+		}
 	}
 
 	const bool wantsStick = x != 0.0f || y != 0.0f;
@@ -2927,6 +2946,32 @@ bool MountedGunVehicle(VCSInputContext context) {
 	}
 	const std::optional<u32> model = GetState().vehicleModel;
 	return model && (*model == kVCSCannonVehicleModel || *model == kVCSRhinoModel);
+}
+
+// The forklift, whose forks are the radio buttons - see the d-pad rows for InVehicle. Entry 251 of
+// the game's model-name table, which is where 213 is the maverick (docs/VCS_ADDRESSES.md).
+static const u32 kVCSForkliftModel = 251;
+
+static bool ForkliftDriven(VCSInputContext context) {
+	if (context != VCSInputContext::InVehicle) {
+		return false;
+	}
+	const std::optional<u32> model = GetState().vehicleModel;
+	return model && *model == kVCSForkliftModel;
+}
+
+// Swimming, for the overlay to put up a way out of the water. The flag is read off the player's own
+// ped and only on foot: it is meaningless in a vehicle, where a boat on the sea is not a swimmer.
+static bool PlayerSwimming(VCSInputContext context) {
+	if (context != VCSInputContext::OnFoot) {
+		return false;
+	}
+	const std::optional<u32> ped = GetState().playerBase;
+	if (!ped || !*ped) {
+		return false;
+	}
+	const std::optional<u32> flags = ReadU32(*ped + kVCSPedFlagsOffset);
+	return flags && (*flags & kVCSPedInWaterBit) != 0;
 }
 
 // Whether the mouse should steer the CAMERA rather than the stick.
@@ -3258,6 +3303,8 @@ void PublishTouchState(VCSInputContext context) {
 	snap.ledgeAhead = VaultDebugState().armed;
 	snap.driveBy = DriveByAimActive(context);
 	snap.mountedGun = MountedGunVehicle(context);
+	snap.forklift = ForkliftDriven(context);
+	snap.swimming = PlayerSwimming(context);
 	// On foot only. The only line that names these controls in a vehicle is the radio's help
 	// (H_IV_01), which is advice rather than a menu, and the pedals are not something to take
 	// away on a guess. The race picker names them too and may well be met in a car - not seen yet.

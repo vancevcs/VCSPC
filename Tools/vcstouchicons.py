@@ -595,9 +595,24 @@ def bake(table, prefix):
         print("wrote", os.path.relpath(path, os.path.dirname(HERE)))
 
 
+def derive_buttons():
+    """The two hand-painted buttons that are the radio's triangle turned to point up and down.
+
+    The bike's lean and the forklift's forks are an up and a down, and the radio's next-station
+    button is already the right art for an arrow - so they are that one, turned a quarter, rather
+    than a second set of glyphs drawn to resemble it. Lossless: a quarter turn only moves pixels.
+    """
+    src = Image.open(os.path.join(OUT_DIR, "touchbtn_radio_next.png")).convert("RGBA")
+    for name, turn in (("triangle_up", Image.ROTATE_90), ("triangle_down", Image.ROTATE_270)):
+        path = os.path.join(OUT_DIR, "touchbtn_%s.png" % name)
+        src.transpose(turn).save(path)
+        print("wrote", os.path.relpath(path, os.path.dirname(HERE)))
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     bake(ICONS, "touch")
+    derive_buttons()
     # The tiles are NOT baked. The phone menu they were drawn for was a grid of them and it was
     # reverted to the desktop front end, so shipping the art would be shipping nine images
     # nothing loads. The table above is kept as the record of how they were drawn, exactly as

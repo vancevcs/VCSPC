@@ -95,6 +95,15 @@ void ApplySteering() {
 	VCS::SetTouchStick((float)(g_steerRight - g_steerLeft), 0.0f);
 }
 
+// A bike's lean, the same shape as the steering above and for the same reason: the buttons ARE the
+// axis. Its own channel rather than the stick's Y - see SetTouchLean.
+int g_leanForward = 0;
+int g_leanBack = 0;
+
+void ApplyLean() {
+	VCS::SetTouchLean((float)(g_leanForward - g_leanBack));
+}
+
 // Whether the aim TOGGLE currently holds the aim control.
 //
 // File-scope because two different controls reach for that one control and only one of them may
@@ -138,6 +147,8 @@ enum Cond : uint32_t {
 	CondPicker = 1 << 10,          // a menu the game runs in the world wants a confirm and a way out
 	CondPickerCycle = 1 << 11,     // ... and has something to step through
 	CondMountedGun = 1 << 12,      // driving the fire truck or the Rhino
+	CondForklift = 1 << 13,        // driving the forklift
+	CondSwimming = 1 << 14,        // on foot and in the water
 	CondWeapon = CondArmed | CondMelee,
 };
 
@@ -169,6 +180,8 @@ enum class Kind {
 	Skip,        // skips a cutscene
 	SteerLeft,
 	SteerRight,
+	LeanForward,  // a bike's lean on the stick's Y; like the steering arrows it presses no pad control
+	LeanBack,
 };
 
 enum class Anchor {
@@ -209,6 +222,9 @@ constexpr float kColB = -158.0f;  // and the one inside it
 constexpr float kRow1 = -80.0f;
 constexpr float kRow2 = -168.0f;
 constexpr float kRow3 = -250.0f;
+
+// A third column on the right, for what only one vehicle has: the forklift's forks.
+constexpr float kColC = -244.0f;
 
 constexpr float kLeftA = 54.0f;
 constexpr float kLeftB = 148.0f;
@@ -254,6 +270,15 @@ const ControlSpec kControls[] = {
 	{ "foot.pickup",
 		 NKCODE_BUTTON_THUMBL, NKCODE_UNKNOWN,       Kind::Hold,
 		"pickup", nullptr, "PICKUP",   kColB, kRow2, kSmall, Anchor::Edge, kOnFoot,           CondAlways, CondPicker },
+	// Out of the water. The game's own climb-out is the jump control - "If you are close to a
+	// boat or the shore, press ~SWIMO~ to climb out of the water", and SWIMO is the jump key - and
+	// on this overlay jump is a DOUBLE TAP on RUN, which is not what a swimmer reaches for and is a
+	// poor thing to ask of a thumb already working the stroke. So a swimmer gets a button that is
+	// jump and nothing else, held for as long as it is touched exactly as Space is. It presses the
+	// same pad control the double tap does.
+	{ "foot.climbout",
+		 kVCSPadJumpButton,    NKCODE_UNKNOWN,       Kind::Hold,
+		"climb", nullptr, "CLIMB",     kColB, kRow3, kMid,   Anchor::Edge, kOnFoot,           CondSwimming, CondPicker },
 
 	// --- A menu the game runs in the world -----------------------------------------------------
 	//
@@ -360,6 +385,29 @@ const ControlSpec kControls[] = {
 	{ "car.gun",
 		 NKCODE_BUTTON_B,      NKCODE_UNKNOWN,       Kind::Hold,
 		"gun", nullptr, "FIRE",         kColB, kRow3, kMid,  Anchor::Edge, kVehicle,          CondMountedGun, 0 },
+	// A bike's lean: the PSP's nub up and down, which is the wheelie and the stoppie, and which
+	// nothing here reached - the arrows that steer are the stick's X and a thumb on glass is never
+	// level on Y, so the overlay's stick does not pass it. Two buttons instead, in a column beneath
+	// SHOOT where the thumb that steers can reach them. Pushing the nub AWAY leans forward, so
+	// forward is the stoppie and back is the wheelie - and so the buttons are the radio's triangles
+	// turned to point up and down, up above down, which is also what the keyboard's arrows do.
+	{ "car.lean_back",
+		 NKCODE_UNKNOWN,       NKCODE_UNKNOWN,       Kind::LeanBack,
+		"triangle_down", nullptr, "WHEELIE", kLeftB + 94.0f, -70.0f, kSmall, Anchor::Edge, kVehicle,    CondBike, 0 },
+	{ "car.lean_forward",
+		 NKCODE_UNKNOWN,       NKCODE_UNKNOWN,       Kind::LeanForward,
+		"triangle_up", nullptr, "STOPPIE", kLeftB + 94.0f, -128.0f, kSmall, Anchor::Edge, kVehicle, CondBike, 0 },
+	// The forklift's forks. The game reuses the radio's two buttons for them - left lowers and
+	// right raises, found by playing it - so these press the same two pad controls the radio pair
+	// does, and the radio pair stands down on a forklift (see `hide` on those rows) where there is
+	// no radio to change. A column of their own on the right, because the forks are worked while
+	// the gas is let go and nothing else in a forklift wants those places.
+	{ "car.fork_down",
+		 NKCODE_DPAD_LEFT,     NKCODE_UNKNOWN,       Kind::Hold,
+		"triangle_down", nullptr, "FORKS -", kColC, kRow1, kMid,  Anchor::Edge, kVehicle,         CondForklift, 0 },
+	{ "car.fork_up",
+		 NKCODE_DPAD_RIGHT,    NKCODE_UNKNOWN,       Kind::Hold,
+		"triangle_up", nullptr, "FORKS +",   kColC, kRow2, kMid,  Anchor::Edge, kVehicle,         CondForklift, 0 },
 	{ "car.arrow_left",
 		 NKCODE_UNKNOWN,       NKCODE_UNKNOWN,       Kind::SteerLeft,
 		"arrow_left", nullptr, "<",     kLeftA, kWheelY, kBig, Anchor::Edge, kVehicle,        CondAlways, 0 },
@@ -416,11 +464,11 @@ const ControlSpec kControls[] = {
 	{ "car.radio_prev",
 		 NKCODE_DPAD_LEFT,     NKCODE_UNKNOWN,       Kind::Hold,
 		"radio_prev", nullptr, "RADIO", kRadarGap + kRadarStep * 2.0f, 0.0f, kTiny, Anchor::Radar,
-		kVehicle | kAircraft, CondAlways, 0 },
+		kVehicle | kAircraft, CondAlways, CondForklift },
 	{ "car.radio_next",
 		 NKCODE_DPAD_RIGHT,    NKCODE_UNKNOWN,       Kind::Hold,
 		"radio_next", nullptr, "RADIO", kRadarGap + kRadarStep * 3.0f, 0.0f, kTiny, Anchor::Radar,
-		kVehicle | kAircraft, CondAlways, 0 },
+		kVehicle | kAircraft, CondAlways, CondForklift },
 
 	// --- The game's own pages: the map, the briefs, the stats ----------------------------------
 	//
@@ -688,6 +736,11 @@ void VCSTouchButton::Press(bool down) {
 	case Kind::SteerRight:
 		(spec_.kind == Kind::SteerLeft ? g_steerLeft : g_steerRight) = down ? 1 : 0;
 		ApplySteering();
+		return;
+	case Kind::LeanForward:
+	case Kind::LeanBack:
+		(spec_.kind == Kind::LeanForward ? g_leanForward : g_leanBack) = down ? 1 : 0;
+		ApplyLean();
 		return;
 	case Kind::JumpSprint:
 		PressJumpSprint(down);
@@ -962,9 +1015,19 @@ bool VCSHudZone::Touch(const TouchInput &input) {
 }
 
 void VCSHudZone::ForceUp() {
-	if (pointer_ != -1) {
-		ReleasePointer(pointer_);
+	// Only a zone that is actually held lets go of anything.
+	//
+	// THIS WAS "ONLY THE LEFT RADIO BUTTON WORKS". The weapon panel's zone presses d-pad right, and
+	// the layout calls ForceUp on it every frame it is not on screen - which is every frame off
+	// foot. Releasing d-pad right unconditionally there cancelled whoever else was holding it, in
+	// the same frame: NEXT STATION, the forklift's raise, and NEXT target while aiming. d-pad left
+	// has no zone behind it, so it alone survived. It lasted just long enough between a touch
+	// landing and the next Update to be seen now and then, which is what made it look flaky
+	// rather than dead.
+	if (pointer_ == -1) {
+		return;
 	}
+	ReleasePointer(pointer_);
 	pointer_ = -1;
 	if (action_ == Action::NextWeapon) {
 		VCS::SetTouchButton(NKCODE_DPAD_RIGHT, false);
@@ -1420,6 +1483,7 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.hide & CondLockedOn) && state.lockedOn) ||
 			((spec.hide & CondScopeCannotShoot) && state.scopeCannotShoot) ||
 			((spec.hide & CondPicker) && state.picker) ||
+			((spec.hide & CondForklift) && state.forklift) ||
 			((spec.hide & CondPlane) && state.vehicleClass == VCS::VehicleClass::Plane)) {
 		return false;
 	}
@@ -1432,6 +1496,8 @@ bool VCSTouchLayout::ShouldShow(const ControlSpec &spec, const VCS::VCSTouchStat
 			((spec.cond & CondCameraUp) && state.cameraUp) ||
 			((spec.cond & CondBike) && state.vehicleClass == VCS::VehicleClass::Bike) ||
 			((spec.cond & CondMountedGun) && state.mountedGun) ||
+			((spec.cond & CondForklift) && state.forklift) ||
+			((spec.cond & CondSwimming) && state.swimming) ||
 			((spec.cond & CondMapPage) && state.mapPage) ||
 			((spec.cond & CondPicker) && state.picker) ||
 			((spec.cond & CondPickerCycle) && state.pickerCycle) ||
@@ -1512,12 +1578,21 @@ void VCSTouchLayout::Update() {
 		// Something that shoots in hand, so the armed-only controls are there to be moved - and
 		// their melee counterparts are not, which is the same screen the player will see.
 		pretend.armed = true;
-		// And driving something with a gun of its own, so the FIRE button is there to be placed.
+		// And driving something with a gun of its own, so the FIRE button is there to be placed - and
+		// a bike, so SHOOT and the lean pair are.
 		pretend.mountedGun = true;
+		pretend.vehicleClass = VCS::VehicleClass::Bike;
 		pretend.picker = editPicker_;
 		pretend.pickerCycle = editPicker_;
+		// What exists for ONE thing in particular - the forklift's forks, a swimmer's way out - is
+		// put up regardless. Pretending to be a forklift is not an option: that is also what takes
+		// the radio pair away, and the radio is as much a thing to arrange as the forks.
+		constexpr uint32_t kOneOffs = CondForklift | CondSwimming;
 		for (VCSTouchButton *button : buttons_) {
-			const bool show = ShouldShow(button->Spec(), pretend);
+			const ControlSpec &spec = button->Spec();
+			const bool oneOff = (spec.cond & kOneOffs) != 0 && (spec.cond & ~kOneOffs) == 0 &&
+				(spec.contexts & Ctx(editContext_)) != 0 && !editPicker_;
+			const bool show = oneOff || ShouldShow(spec, pretend);
 			button->SetVisibility(show ? V_VISIBLE : V_GONE);
 			button->SetArmed(true);
 		}

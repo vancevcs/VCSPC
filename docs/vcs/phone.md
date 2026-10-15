@@ -89,6 +89,58 @@ it, because `AddTouchLook` feeds the same delta the mouse does, and `CannonAimAc
 delta's Y on the cannon while in the fire truck. The arrange screen shows the button in DRIVING so
 it can be moved. Not played yet.
 
+#### Four things a phone could not do: the radio's right button, a bike's lean, the forks, the water
+
+**Status: built and compiled; NOT played on a phone.** What was measured is called out below.
+
+**"Only the left radio button works" was a release that never stopped releasing.** The weapon
+panel's HUD zone presses d-pad right, and `Update` calls `ForceUp` on it every frame it is off
+screen - every frame off foot. `VCSHudZone::ForceUp` cleared d-pad right whether or not that zone
+was the one holding it, so it cancelled whoever else was: NEXT STATION, the forklift's raise, and
+NEXT target while aiming (the last never reported). Left has no zone behind it, so left alone
+survived - for as long as it takes a touch to land and the next `Update` to run, which is what made
+it look flaky rather than dead. `ForceUp` now releases only what the zone itself pressed. **A
+release that is not conditional on having pressed is the same bug as a press nobody takes back**;
+`HoldSecond` counts for the same reason.
+
+**A bike's lean is two buttons, `car.lean_back` (the wheelie) and `car.lean_forward` (the stoppie),
+on their own channel.** The bike leans on the stick's Y, as the keyboard's up and down arrows now
+do. The overlay cannot pass that from its stick: the steering arrows are the stick's X, and a thumb
+on glass is never level, so the pad path deliberately ignores the touch stick's Y in a vehicle.
+`SetTouchLean` is a separate atomic added to Y in `ApplyAnalog` after the pad, bikes only, so a
+pad's stick (which assigns Y) cannot swallow it and the steering keeps its owner. Up leans forward,
+as the arrows do. Shown on `CondBike`, in a column under SHOOT at the left cluster's third column.
+
+**The forklift's forks are the radio pair, found by playing it** (d-pad left lowers, right raises),
+so `car.fork_down` / `car.fork_up` press the same two pad controls and the radio pair hides on a
+forklift (`hide = CondForklift`, model 251) - a forklift has no radio to change, and the tiny RADIO
+buttons in the radar row were the only way to the forks, marked as something else. Their own third
+column on the right, `kColC`. They were dead for the raise half until the radio fix above.
+
+**Getting out of the water is the jump control, and jump on this overlay is a double tap on RUN.**
+`SWIM_05` says it outright - "press ~SWIMO~ to climb out of the water" - and `SWIMO` is the jump
+key. This fork's own vault does not run in water ("no footing"), so what climbs a swimmer out is
+the game's own, asked with the same pad control. A swimmer gets `foot.climbout`: jump and nothing
+else, held while touched, exactly as Space is, in the free slot at the foot of the inner column.
+**The signal is `ped + 0xEC & 0x100`, the in-water flag the ped code tests before the splash**
+(`kVCSPedInWaterBit`). Measured on the Mac build, on foot, by teleporting along y = -176 from the
+F7 save: `0x000d0042` on land (x = 500 and 800) and `0x040d0142` in the sea (x = 1100, z settling
+at ~6, three samples over six seconds, still set). Read-only: the game recomputes it every frame. Standing in the shallows was not
+sampled.
+
+The editor shows the controls that exist for one situation only (`CondForklift`, `CondSwimming`)
+whatever the pretend state says - pretending to be a forklift is not an option, because that is also
+what takes the radio pair away. It now pretends to be a bike, which also puts SHOOT up to be moved;
+before, it never appeared there.
+
+**The art is the radio's triangle, turned.** All four buttons - wheelie, stoppie, forks down, forks
+up - use `touchbtn_triangle_up.png` / `touchbtn_triangle_down.png`, which are `touchbtn_radio_next`
+rotated a quarter turn (`derive_buttons` in `Tools/vcstouchicons.py`; lossless). Up is the stoppie
+and the raise, down is the wheelie and the lower, and up sits above down - which is the keyboard's
+arrows and the PSP's nub too. Glyphs of a bike on one wheel and of a fork and mast were drawn first
+and dropped: the bike read as a node graph until it was redrawn as a tilted silhouette, and neither
+looked like it belonged beside the radio pair, which is the thing a player already knows.
+
 #### The glances shoot
 
 On the PSP a drive-by is the glance modifier and a stick direction, and then Circle - three

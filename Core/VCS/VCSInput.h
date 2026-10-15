@@ -200,6 +200,10 @@ bool IsTouchButtonDown(InputKeyCode padButton);
 void SetTouchStick(float x, float y);
 void GetTouchStick(float *x, float *y);
 
+// A bike's lean, -1..1: positive leans forward (the nub pushed away, a stoppie), negative leans
+// back (a wheelie). A channel of its own beside the stick - see ApplyAnalog for why.
+void SetTouchLean(float y);
+
 // A look drag, in dp. Pushed into the accumulator the mouse and the right stick share.
 void AddTouchLook(float dx, float dy);
 
@@ -230,6 +234,8 @@ struct VCSTouchState {
 	bool driveBy = false;                // riding shotgun with a weapon out
 	bool mountedGun = false;             // driving something with a gun of its own: the fire
 	                                     // truck's water cannon, the Rhino's
+	bool forklift = false;               // driving the forklift, whose forks are the radio's buttons
+	bool swimming = false;               // on foot and in the water: the game's climb-out is jump
 	// One of the menus the game runs in the world is open on foot - the wardrobe, the Empire
 	// site's business picker, a shop, a "Pay $X?" prompt - asking for its confirm and its way
 	// out, and with `pickerCycle` something to step through as well. See ReadHelpLineControls.

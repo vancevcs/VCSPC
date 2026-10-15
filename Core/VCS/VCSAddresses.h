@@ -135,6 +135,14 @@ inline constexpr u32 kVCSPedSetClimbTarget = 0x0890F6EC;
 inline constexpr u32 kVCSPedStateOffset = 0x8B4;   // 44 while climbing out, 1 standing
 inline constexpr u32 kVCSPedClimbStageOffset = 0x1D9;   // 0, then 1..4 through the pull-up
 
+// The in-water flag: bit 0x100 of the ped's flags word. The game tests it itself before it plays
+// the splash (see below), which is how it was found - and it is recomputed from the world every
+// frame, so it is only ever READ here, never written. The touch overlay asks it to put up a
+// climb-out button, because the game's own climb-out is the jump control and a double tap on RUN
+// is not something a swimmer would think to try.
+inline constexpr u32 kVCSPedFlagsOffset = 0xEC;
+inline constexpr u32 kVCSPedInWaterBit = 0x100;
+
 // THE SPLASH, and why a vault on dry land made one.
 //
 // The climb-out is the SWIMMING pull-up, so the animation plays a water splash partway through -
